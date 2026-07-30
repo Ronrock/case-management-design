@@ -587,6 +587,248 @@ CREATE TABLE CM_IDEMPOTENCY_KEY (
 
 CREATE INDEX IX_CM_IDEM_CREATED ON CM_IDEMPOTENCY_KEY (CREATED_AT_); -- cleanup job
 
+```mermaid
+erDiagram
+    %% ============ DEFINITIONS ============
+    CM_CASE_DEF {
+        varchar ID_ PK "key:version"
+        varchar KEY_
+        number VERSION_NO_
+        varchar TENANT_ID_
+        varchar SLA_POLICY_ID_
+        clob FORMS_JSON_ "formKey -> JSON Schema"
+        clob ROUTING_JSON_
+    }
+    CM_PLAN_ITEM_DEF {
+        varchar ID_ PK
+        varchar CASE_DEF_ID_ FK
+        varchar DEF_KEY_
+        varchar TYPE_ "STAGE|HUMAN_TASK|PROCESS_TASK|MILESTONE"
+        number MANUAL_ACT_
+        number REQUIRED_
+        number REPETITION_
+        clob ENTRY_CRIT_JSON_
+        clob EXIT_CRIT_JSON_
+    }
+    CM_DEF_IDENTITY_LINK {
+        varchar ID_ PK
+        varchar DEF_KEY_ "binds to key, not version"
+        varchar USER_ID_
+        varchar GROUP_ID_
+        varchar TYPE_ "candidateStarter|administrator"
+    }
+
+    %% ============ CASE RUNTIME ============
+    CM_CASE {
+        varchar ID_ PK "engineId:uuid (global)"
+        varchar ENGINE_ID_
+        varchar TENANT_ID_
+        varchar CASE_DEF_ID_ FK
+        varchar BUSINESS_KEY_
+        varchar STATE_ "CREATED..CANCELLED"
+        varchar ASSIGNEE_
+        varchar QUEUE_ID_
+        varchar SLA_STATUS_ "denormalized"
+        clob VARIABLES_JSON_
+        number VERSION_ "optimistic lock = ETag"
+    }
+    CM_PLAN_ITEM {
+        varchar ID_ PK
+        varchar CASE_ID_ FK
+        varchar PI_DEF_ID_ FK "null = ad hoc"
+        varchar PARENT_STAGE_ID_ FK "self-ref"
+        varchar STATE_ "AVAILABLE..TERMINATED"
+        varchar CAMUNDA_TASK_ID_ "loose ref"
+        varchar PROC_INST_ID_ "loose ref"
+        number VERSION_
+    }
+    CM_TASK {
+        varchar ID_ PK
+        varchar CASE_ID_ FK
+        varchar PLAN_ITEM_ID_ FK
+        varchar CAMUNDA_TASK_ID_ "loose ref"
+        varchar STATE_ "OPEN|CLAIMED|COMPLETED|TERMINATED"
+        varchar ASSIGNEE_
+        varchar FORM_KEY_
+        timestamp DUE_AT_
+        number VERSION_
+    }
+    CM_LINKED_PROCESS {
+        varchar ID_ PK
+        varchar CASE_ID_ FK
+        varchar PLAN_ITEM_ID_
+        varchar PROC_INST_ID_ UK "Camunda id, loose ref"
+        varchar STATE_
+    }
+    CM_MILESTONE {
+        varchar ID_ PK
+        varchar CASE_ID_ FK
+        varchar PLAN_ITEM_ID_ FK
+        number ACHIEVED_
+        timestamp ACHIEVED_AT_
+    }
+
+    %% ============ SLA ============
+    CM_BUSINESS_CALENDAR {
+        varchar ID_ PK
+        clob DEFINITION_JSON_ "hours, holidays, tz"
+    }
+    CM_SLA_POLICY {
+        varchar ID_ PK
+        varchar SELECTOR_ "FEEL/JUEL expr"
+        varchar CALENDAR_ID_ FK
+    }
+    CM_SLA_TARGET {
+        varchar ID_ PK
+        varchar POLICY_ID_ FK
+        varchar TARGET_KEY_ "firstResponse, resolution"
+        varchar DURATION_ISO_ "PT8H"
+        clob PAUSED_STATES_JSON_
+        clob BREACH_ACTIONS_JSON_
+    }
+    CM_SLA_RECORD {
+        varchar ID_ PK
+        varchar CASE_ID_ FK
+        varchar TARGET_ID_ FK
+        varchar STATUS_ "RUNNING|PAUSED|MET|BREACHED"
+        timestamp DUE_AT_
+        timestamp PAUSED_AT_
+        number PAUSED_TOTAL_SECS_
+        number VERSION_
+    }
+
+    %% ============ COLLABORATION ============
+    CM_PARTICIPANT {
+        varchar ID_ PK
+        varchar CASE_ID_ FK
+        varchar USER_ID_
+        varchar GROUP_ID_
+        varchar ROLE_ "owner|handler|reviewer|watcher"
+    }
+    CM_COMMENT {
+        varchar ID_ PK
+        varchar CASE_ID_ FK
+        varchar VISIBILITY_ "internal|external"
+        clob TEXT_
+    }
+    CM_DOCUMENT {
+        varchar ID_ PK
+        varchar CASE_ID_ FK
+        varchar CATEGORY_
+        varchar CONTENT_URL_ "DMS/S3, no blobs"
+    }
+    CM_CASE_LINK {
+        varchar ID_ PK
+        varchar CASE_ID_ FK
+        varchar TARGET_CASE_ID_ "no FK: may be other engine"
+        varchar TYPE_ "parentOf|duplicateOf|..."
+    }
+
+    %% ============ WORK DISTRIBUTION ============
+    CM_QUEUE {
+        varchar ID_ PK
+        varchar NAME_
+        clob CAND_GROUPS_JSON_
+    }
+    CM_SAVED_FILTER {
+        varchar ID_ PK
+        varchar OWNER_
+        number SHARED_
+        clob CRITERIA_JSON_ "GET /cases params"
+        number VERSION_
+    }
+
+    %% ============ BULK ============
+    CM_BULK_OPERATION {
+        varchar ID_ PK
+        varchar ACTION_ "ASSIGN|CLOSE|..."
+        varchar STATUS_ "PENDING..CANCELLED"
+        varchar FILTER_ID_
+        varchar IDEMPOTENCY_KEY_
+        number TOTAL_ITEMS_
+        number PROCESSED_
+    }
+    CM_BULK_OPERATION_ITEM {
+        varchar OPERATION_ID_ PK "composite"
+        varchar CASE_ID_ PK "composite"
+        varchar STATUS_ "PENDING|DONE|FAILED|SKIPPED"
+        varchar ERROR_
+    }
+
+    %% ============ EVENTS / AUDIT / IDEMPOTENCY ============
+    CM_EVENT {
+        number SEQ_ PK "cursor for GET /events"
+        varchar ID_ UK "CloudEvents id (dedup)"
+        varchar TYPE_
+        varchar SUBJECT_ "usually case id"
+        clob DATA_JSON_
+    }
+    CM_WEBHOOK_SUB {
+        varchar ID_ PK
+        varchar URL_
+        clob EVENT_TYPES_JSON_
+        varchar SECRET_HASH_
+        number VERSION_
+    }
+    CM_WEBHOOK_DELIVERY {
+        varchar ID_ PK
+        varchar WEBHOOK_ID_ FK
+        number EVENT_SEQ_ FK
+        varchar STATUS_ "PENDING|RETRYING|DELIVERED|DEAD=DLQ"
+        number ATTEMPTS_
+        timestamp NEXT_ATTEMPT_AT_
+    }
+    CM_AUDIT_LOG {
+        varchar ID_ PK
+        varchar CASE_ID_ "no FK: survives purge"
+        varchar ACTOR_
+        varchar ACTION_
+        clob BEFORE_JSON_
+        clob AFTER_JSON_
+    }
+    CM_IDEMPOTENCY_KEY {
+        varchar KEY_ PK "composite"
+        varchar SCOPE_ PK "composite, e.g. POST/cases"
+        varchar REQUEST_HASH_ "SHA-256, mismatch=409"
+        clob RESPONSE_JSON_
+    }
+
+    %% ============ RELATIONS (solid = FK, dashed = loose reference) ============
+    CM_CASE_DEF ||--o{ CM_PLAN_ITEM_DEF : "plan model"
+    CM_CASE_DEF ||--o{ CM_CASE : "instantiates"
+    CM_CASE_DEF }o..o| CM_SLA_POLICY : "slaPolicyId"
+    CM_DEF_IDENTITY_LINK }o..|| CM_CASE_DEF : "by KEY_"
+
+    CM_CASE ||--o{ CM_PLAN_ITEM : "has"
+    CM_PLAN_ITEM_DEF |o--o{ CM_PLAN_ITEM : "instantiates"
+    CM_PLAN_ITEM |o--o{ CM_PLAN_ITEM : "parent stage"
+    CM_CASE ||--o{ CM_TASK : "has"
+    CM_PLAN_ITEM ||--o{ CM_TASK : "backs"
+    CM_CASE ||--o{ CM_LINKED_PROCESS : "correlates"
+    CM_CASE ||--o{ CM_MILESTONE : "has"
+    CM_PLAN_ITEM ||--o| CM_MILESTONE : "backs"
+
+    CM_SLA_POLICY }o--o| CM_BUSINESS_CALENDAR : "uses"
+    CM_SLA_POLICY ||--o{ CM_SLA_TARGET : "targets"
+    CM_CASE ||--o{ CM_SLA_RECORD : "clocks"
+    CM_SLA_TARGET ||--o{ CM_SLA_RECORD : "instantiates"
+
+    CM_CASE ||--o{ CM_PARTICIPANT : "has"
+    CM_CASE ||--o{ CM_COMMENT : "has"
+    CM_CASE ||--o{ CM_DOCUMENT : "has"
+    CM_CASE ||--o{ CM_CASE_LINK : "links"
+    CM_CASE_LINK }o..o| CM_CASE : "target (maybe remote)"
+
+    CM_CASE }o..o| CM_QUEUE : "queueId"
+    CM_BULK_OPERATION ||--o{ CM_BULK_OPERATION_ITEM : "items"
+    CM_BULK_OPERATION_ITEM }o..|| CM_CASE : "targets"
+    CM_BULK_OPERATION }o..o| CM_SAVED_FILTER : "selection"
+
+    CM_WEBHOOK_SUB ||--o{ CM_WEBHOOK_DELIVERY : "deliveries"
+    CM_EVENT ||--o{ CM_WEBHOOK_DELIVERY : "fan-out"
+    CM_EVENT }o..o| CM_CASE : "subject"
+    CM_AUDIT_LOG }o..o| CM_CASE : "records"
+```
 --------------------------------------------------------------------------------
 -- Notes for the implementing team
 --------------------------------------------------------------------------------
