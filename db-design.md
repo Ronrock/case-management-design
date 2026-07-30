@@ -1,4 +1,4 @@
-# Case Management Service — Database Design (Oracle)
+# WIP Case Management Service — Database Design (Oracle)
 
 **Target:** Oracle 19c+ · JSON stored as `CLOB` with `IS JSON` check constraints (switch to the native `JSON` datatype on 21c+) · Companion to the API design document and OpenAPI spec.
 
