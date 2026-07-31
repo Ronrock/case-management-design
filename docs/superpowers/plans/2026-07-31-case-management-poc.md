@@ -3234,15 +3234,53 @@ public class StageCompletion {
     }
 
     /**
-     * Children a completing stage must terminate: everything not yet started. They are
-     * emitted as real Transitions so the service layer persists them — never mutated
-     * silently. Because canComplete already excludes ACTIVE children, this never
-     * terminates work in progress.
+     * Descendants a completing stage must terminate: everything not yet started, at ANY
+     * depth. They are emitted as real Transitions so the service layer persists them —
+     * never mutated silently. Because canComplete already excludes ACTIVE children, this
+     * never terminates work in progress.
+     *
+     * Depth matters: sweeping only direct children strands the children of an unstarted
+     * substage beneath a stage that has ended.
      */
     public List<PlanItem> childrenToTerminateOnCompletion(CaseSnapshot snapshot, PlanItem stage) {
-        return children(snapshot, stage).stream()
+        return descendants(snapshot, stage).stream()
                 .filter(c -> c.state() == PlanItemState.AVAILABLE || c.state() == PlanItemState.ENABLED)
                 .toList();
+    }
+
+    /**
+     * An exit criterion is unconditional: it terminates the stage and EVERYTHING beneath
+     * it, including ACTIVE work, at any depth. That is CMMN exit-sentry semantics, and it
+     * differs deliberately from the completion sweep above, which can never meet an ACTIVE
+     * child because canComplete already excluded that case.
+     */
+    public List<PlanItem> childrenToCascadeTerminate(CaseSnapshot snapshot, PlanItem stage) {
+        return descendants(snapshot, stage).stream()
+                .filter(c -> !c.state().isEnded())
+                .toList();
+    }
+
+    /**
+     * Every item beneath this stage, transitively. The visited set is not an optimisation:
+     * a malformed model can contain a parentStageId cycle, and recursing it would blow the
+     * stack instead of naming the problem.
+     */
+    private List<PlanItem> descendants(CaseSnapshot snapshot, PlanItem stage) {
+        List<PlanItem> found = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        visited.add(stage.id());
+        Deque<PlanItem> queue = new ArrayDeque<>(children(snapshot, stage));
+
+        while (!queue.isEmpty()) {
+            PlanItem next = queue.removeFirst();
+            if (!visited.add(next.id())) {
+                throw new IllegalStateException(
+                        "parentStageId cycle detected at plan item " + next.id());
+            }
+            found.add(next);
+            queue.addAll(children(snapshot, next));
+        }
+        return found;
     }
 
     public List<PlanItem> blockingItems(CaseSnapshot snapshot, PlanItem stage) {
@@ -3294,13 +3332,28 @@ Then, inside `singlePass`, after the entry-criteria block and still within the `
                     && stageCompletion.canComplete(snapshot, item)) {
                 transitions.add(new Transition(item.id(), PlanItemState.ACTIVE,
                         PlanItemState.COMPLETED, "no required child unfinished, no child active"));
-                // Unstarted children die with the stage, and the terminations are reported
-                // so the service layer persists them.
+                // Unstarted descendants die with the stage, and the terminations are
+                // reported so the service layer persists them.
                 for (PlanItem child : stageCompletion.childrenToTerminateOnCompletion(snapshot, item)) {
                     transitions.add(new Transition(child.id(), child.state(),
                             PlanItemState.TERMINATED, "parent stage completed"));
                 }
             }
+```
+
+**Precedence, and why it must be decided rather than fall out of loop order.** A stage can satisfy its
+exit criteria *and* be autocompletable in the same round. The exit criterion is an explicit statement by
+the model's author and wins: compute exit-terminating stages first, exclude them from the autocomplete
+set so the two are disjoint by construction, and check them first in the loop. Getting this backwards
+silently discards the exit criterion and reports the stage as COMPLETED — a bug that reordering
+introduces easily and no test catches unless one exists specifically for the overlap:
+
+```java
+        Set<String> terminatingStageIds = /* stages whose exitCriteria are satisfied */;
+        // Autocomplete never claims a stage that is already exiting.
+        List<PlanItem> completingStages = candidates.stream()
+                .filter(i -> !terminatingStageIds.contains(i.id()))
+                .toList();
 ```
 
 Repetition is handled by the service layer rather than the evaluator, because it creates rows rather than moving states. Add this query method to `PlanModelEvaluator` for the service to call after applying transitions:
