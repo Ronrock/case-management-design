@@ -11,6 +11,7 @@
 ## Global Constraints
 
 - **Java 21.** `<maven.compiler.release>21</maven.compiler.release>`. Operaton requires 17+; 21 is the target here.
+- **Jackson: two generations, no mixing.** `case-management-core` has **Jackson 2 only** (`com.fasterxml.jackson.*`, declared explicitly, BOM-managed 2.21.5). The web-facing modules (`rest`, `engine-remote`, `spring-boot-starter`, `poc-app`) carry **both**: Jackson 3 (`tools.jackson.*`) is what Spring Boot 4 auto-configures for HTTP JSON, while Jackson 2 arrives transitively through core. Rule: core code and anything touching `json-schema-validator` uses `com.fasterxml.*`; Spring-managed HTTP JSON uses `tools.jackson.*`; never both in one class. Established empirically in Task 1 — see its report.
 - **Operaton 2.1.3** — the latest stable release on Maven Central. `2.2.0-M2` is a milestone; `2.2.0-SNAPSHOT` is the local clone at `/Volumes/dockdrive/dev/operaton` and is **for reading only, never a build dependency**.
 - **Spring Boot version is not declared by us.** Operaton 2.1.3 pins Spring Boot `4.0.7` / Spring Framework `7.0.8` via `operaton-core-internal-dependencies`. Import Operaton's BOM and let it win. Never add a `spring-boot-starter-parent`.
 - **Base package:** `org.casemgmt`. Module-specific subpackages are named per task.
@@ -1086,13 +1087,19 @@ public class OptimisticLockException extends RuntimeException {
 ```java
 package org.casemgmt.repo;
 
-import tools.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.List;
 import java.util.Map;
 
 /**
  * Single place where JSON columns are (de)serialised.
+ *
+ * Jackson 2 (com.fasterxml), NOT Jackson 3 — settled by Task 1: case-management-core
+ * has only Jackson 2 on its classpath, declared explicitly in its pom and resolved at
+ * the BOM-managed 2.21.5. Jackson 3 (tools.jackson.*) exists only in the web-facing
+ * modules, where Spring Boot 4 auto-configures it. Never mix the two in one class.
  *
  * Oracle CLOB binding note: JdbcClient binds these as String, which Oracle JDBC
  * handles for values under 32 KB. Larger documents need a streaming bind — if any
@@ -1105,22 +1112,43 @@ public final class JsonCodec {
     private JsonCodec() {}
 
     public static String toJson(Object value) {
-        return value == null ? null : MAPPER.writeValueAsString(value);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return MAPPER.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not serialise " + value.getClass(), e);
+        }
     }
 
     @SuppressWarnings("unchecked")
     public static Map<String, Object> toMap(String json) {
-        return json == null || json.isBlank() ? Map.of() : MAPPER.readValue(json, Map.class);
+        if (json == null || json.isBlank()) {
+            return Map.of();
+        }
+        try {
+            return MAPPER.readValue(json, Map.class);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not parse JSON column value", e);
+        }
     }
 
     @SuppressWarnings("unchecked")
     public static List<String> toList(String json) {
-        return json == null || json.isBlank() ? List.of() : MAPPER.readValue(json, List.class);
+        if (json == null || json.isBlank()) {
+            return List.of();
+        }
+        try {
+            return MAPPER.readValue(json, List.class);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not parse JSON column value", e);
+        }
     }
 }
 ```
 
-If Task 1 Step 6 recorded Jackson 2 rather than Jackson 3, the import is `com.fasterxml.jackson.databind.ObjectMapper` and `writeValueAsString` throws a checked `JsonProcessingException` that must be wrapped in an `IllegalStateException`.
+Jackson 2's `writeValueAsString`/`readValue` throw checked `JsonProcessingException`, hence the wrapping — Jackson 3's equivalents are unchecked, so do not copy this pattern into web-module code.
 
 - [ ] **Step 4: Write the query record and the repository**
 
