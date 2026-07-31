@@ -2361,8 +2361,15 @@ class JuelCriterionEvaluatorTest {
     // ---- sandbox ----
 
     @Test
-    void cannotReachJavaTypesThroughTheContext() {
-        assertThatThrownBy(() -> evaluator.matches("${case.class.name == 'x'}", context()))
+    void cannotReachJavaTypesThroughAValue() {
+        // The base here is an Integer, not a Map or List, so NO resolver in the
+        // sandboxed chain handles the property lookup and it throws.
+        //
+        // Do NOT "simplify" this to ${case.class.name}: `case` is a Map, so
+        // MapELResolver claims the lookup and returns null for the missing key.
+        // That form evaluates to false with OR without a BeanELResolver present,
+        // so it would assert nothing about the sandbox. Verified empirically.
+        assertThatThrownBy(() -> evaluator.matches("${vars.amount.class.name == 'x'}", context()))
                 .isInstanceOf(CriterionEvaluationException.class);
     }
 
