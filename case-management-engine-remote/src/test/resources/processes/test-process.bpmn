@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="defs-test" targetNamespace="http://casemgmt.org/test">
+  <bpmn:process id="test-fragment" name="Test Fragment" isExecutable="true">
+    <bpmn:startEvent id="start"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="wait"/>
+    <bpmn:userTask id="wait" name="Wait"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="wait" targetRef="end"/>
+    <bpmn:endEvent id="end"/>
+  </bpmn:process>
+</bpmn:definitions>

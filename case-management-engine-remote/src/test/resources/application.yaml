@@ -1,0 +1,15 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:remote-engine;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+casemgmt:
+  enabled: false      # this app is the engine only
+operaton:
+  bpm:
+    history-level: full
+    generic-properties:
+      properties:
+        # The test BPMN has no historyTimeToLive on its process element, and newer engine
+        # versions enforce ENGINE-12018 (TTL required for history cleanup) at deploy time.
+        # A global default here satisfies that check without changing the test fixture.
+        history-time-to-live: "180"

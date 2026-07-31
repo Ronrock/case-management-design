@@ -29,5 +29,18 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>
     </dependency>
+    <!-- Test-only "remote engine": a bare Operaton app with engine-rest exposed on a random
+         port, so RemoteEngineGateway can be proved against real HTTP + real serialization
+         instead of a mock. No Docker available here, hence H2 rather than Testcontainers. -->
+    <dependency>
+      <groupId>org.operaton.bpm.springboot</groupId>
+      <artifactId>operaton-bpm-spring-boot-starter-rest</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 </project>
