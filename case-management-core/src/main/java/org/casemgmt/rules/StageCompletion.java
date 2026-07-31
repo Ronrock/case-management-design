@@ -15,18 +15,61 @@ import java.util.List;
  * definition nests it inside a stage may only be considered for entry while that stage
  * instance is ACTIVE. See {@link #isContained(CaseSnapshot, PlanItem)} for the exact
  * semantics and the deliberate limits of what is (and is not) enforced.
+ *
+ * <p><b>CMMN autocomplete (Task 9 review, Critical 1):</b> the first cut of
+ * {@code canComplete} — "no required child unfinished AND at least one child ended" —
+ * let a stage complete in the very same {@code evaluate()} round that admitted a fresh
+ * child beneath it (a live repro: stage with one optional child COMPLETED and another
+ * optional child still AVAILABLE would complete the stage while independently admitting
+ * the AVAILABLE child to ACTIVE, leaving a COMPLETED stage with a live ACTIVE child that
+ * nothing ever revisits). The fix has two parts, both required together:
+ * <ol>
+ *   <li>{@link #blockingItems} now also blocks on any child that is currently ACTIVE,
+ *       not just on unfinished required children — a stage cannot complete while work is
+ *       actively in flight beneath it, required or not.</li>
+ *   <li>{@link #childrenToTerminate} identifies the AVAILABLE/ENABLED children a
+ *       completing stage leaves behind. {@link PlanModelEvaluator} decides, up front and
+ *       against the pre-round snapshot, which stages complete this round, and then
+ *       terminates their leftover AVAILABLE/ENABLED children as real {@link Transition}s
+ *       in that same round — pre-empting those children's own entry-criteria admission
+ *       instead of racing it. This makes the fix independent of definition sortOrder
+ *       (a stage no longer needs a lower sortOrder than its children to be evaluated
+ *       "first"): completions and their fallout are computed as one batch before any
+ *       entry/exit criteria are evaluated for the round.</li>
+ * </ol>
  */
 public class StageCompletion {
 
     public boolean canComplete(CaseSnapshot snapshot, PlanItem stage) {
-        return blockingItems(snapshot, stage).isEmpty()
-                && children(snapshot, stage).stream().anyMatch(c -> c.state().isEnded());
+        return blockingItems(snapshot, stage).isEmpty();
     }
 
+    /**
+     * Children that keep {@code stage} from completing: any unfinished required child, or
+     * any child currently ACTIVE (required or not — active work is never silently discarded,
+     * see {@link #childrenToTerminate}). Feeds both {@link #canComplete} and the API's 409
+     * "why can't this complete" response body.
+     */
     public List<PlanItem> blockingItems(CaseSnapshot snapshot, PlanItem stage) {
         return children(snapshot, stage).stream()
                 .filter(child -> !child.state().isEnded())
-                .filter(child -> snapshot.definitionOf(child).required())
+                .filter(child -> snapshot.definitionOf(child).required()
+                        || child.state() == PlanItemState.ACTIVE)
+                .toList();
+    }
+
+    /**
+     * AVAILABLE/ENABLED children left behind when {@code stage} completes. CMMN autocomplete
+     * discards leftover, never-started children by terminating them — never by silently
+     * dropping them — so the caller (today, {@link PlanModelEvaluator#singlePass}) must turn
+     * every one of these into a real TERMINATED {@link Transition} in the same round the
+     * stage completes. Because {@link #blockingItems} already excludes ACTIVE children from
+     * ever reaching a completing stage, this list can only ever contain AVAILABLE/ENABLED
+     * items — never ACTIVE ones.
+     */
+    public List<PlanItem> childrenToTerminate(CaseSnapshot snapshot, PlanItem stage) {
+        return children(snapshot, stage).stream()
+                .filter(c -> c.state() == PlanItemState.AVAILABLE || c.state() == PlanItemState.ENABLED)
                 .toList();
     }
 
@@ -51,11 +94,15 @@ public class StageCompletion {
      *       contained, so the evaluator's entry-criteria block (the only caller of this
      *       method today) leaves the child sitting at AVAILABLE — it is never offered
      *       entry until the parent stage transitions to ACTIVE.</li>
-     *   <li>This method is consulted only on the AVAILABLE-&gt;entry transition. It is
-     *       intentionally NOT re-checked for items that are already ACTIVE: if a parent
-     *       stage later terminates or completes, this class does not reach back in and
-     *       terminate already-active children. That cascade is out of scope for this task
-     *       and is left as a follow-up rather than being silently half-implemented.</li>
+     *   <li>This method is consulted only on the AVAILABLE-&gt;entry transition. It does NOT
+     *       reach back in and terminate an already-ACTIVE child if its parent stage later
+     *       completes or terminates — there is deliberately no such cascade here. For
+     *       "completes", that case is now structurally unreachable rather than merely
+     *       unhandled: {@link #blockingItems} refuses to let a stage complete while any
+     *       child is ACTIVE, so a COMPLETED stage can never have an ACTIVE child in the
+     *       first place (Task 9 review, Critical 1). Whether a TERMINATED stage should
+     *       cascade-terminate an ACTIVE child remains genuinely open and unimplemented —
+     *       exit criteria terminate the stage itself without touching its children.</li>
      *   <li>A top-level item (no {@code parentStageId}) always returns true — containment
      *       does not apply to it.</li>
      *   <li>If {@code parentStageId} is set but no such plan item exists in the snapshot

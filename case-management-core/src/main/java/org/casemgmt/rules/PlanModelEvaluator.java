@@ -3,6 +3,7 @@ package org.casemgmt.rules;
 import org.casemgmt.domain.*;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Re-evaluates the plan model after every case mutation (spec §4.3).
@@ -68,10 +69,43 @@ public class PlanModelEvaluator {
                 .sorted(evaluationOrder)
                 .toList();
 
+        // Decided up front, against the pre-round snapshot, so a stage's completion can
+        // never race the entry-criteria admission of one of its own children in the same
+        // round (Task 9 review, Critical 1) — the decision does not depend on where the
+        // stage happens to fall in `ordered` relative to its children.
+        List<PlanItem> completingStages = ordered.stream()
+                .filter(i -> i.state() == PlanItemState.ACTIVE)
+                .filter(i -> snapshot.definitionOf(i).type() == PlanItemType.STAGE)
+                .filter(i -> stageCompletion.canComplete(snapshot, i))
+                .toList();
+        Set<String> completingStageIds = completingStages.stream()
+                .map(PlanItem::id)
+                .collect(Collectors.toSet());
+
+        // Leftover AVAILABLE/ENABLED children of a completing stage are claimed for
+        // termination here, before the main loop runs, so they are never independently
+        // considered for entry below.
+        Set<String> claimedForTermination = completingStages.stream()
+                .flatMap(stage -> stageCompletion.childrenToTerminate(snapshot, stage).stream())
+                .map(PlanItem::id)
+                .collect(Collectors.toSet());
+
         for (PlanItem item : ordered) {
             if (item.state().isEnded()) {
                 continue;
             }
+
+            if (completingStageIds.contains(item.id())) {
+                transitions.add(new Transition(item.id(), item.state(), PlanItemState.COMPLETED,
+                        "all required children ended"));
+                continue;
+            }
+            if (claimedForTermination.contains(item.id())) {
+                transitions.add(new Transition(item.id(), item.state(), PlanItemState.TERMINATED,
+                        "parent stage completed"));
+                continue;
+            }
+
             PlanItemDefinition def = snapshot.definitionOf(item);
 
             if (!def.exitCriteria().isEmpty() && criteria.allMatch(def.exitCriteria(), context)) {
@@ -84,12 +118,6 @@ public class PlanModelEvaluator {
                     && criteria.allMatch(def.entryCriteria(), context)) {
                 transitions.add(new Transition(item.id(), PlanItemState.AVAILABLE,
                         targetOnEntry(def), "entry criterion met"));
-            }
-
-            if (def.type() == PlanItemType.STAGE && item.state() == PlanItemState.ACTIVE
-                    && stageCompletion.canComplete(snapshot, item)) {
-                transitions.add(new Transition(item.id(), PlanItemState.ACTIVE,
-                        PlanItemState.COMPLETED, "all required children ended"));
             }
         }
         return transitions;
