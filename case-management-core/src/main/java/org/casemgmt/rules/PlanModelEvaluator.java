@@ -57,8 +57,14 @@ public class PlanModelEvaluator {
         List<Transition> transitions = new ArrayList<>();
         EvaluationContext context = contextOf(snapshot);
 
+        // defKey is a tiebreaker so two definitions sharing a sortOrder still evaluate in a
+        // total, deterministic order instead of whatever order planItems() happens to return.
+        Comparator<PlanItem> evaluationOrder = Comparator
+                .comparingInt((PlanItem i) -> snapshot.definitionOf(i).sortOrder())
+                .thenComparing(i -> snapshot.definitionOf(i).defKey());
+
         List<PlanItem> ordered = snapshot.planItems().stream()
-                .sorted(Comparator.comparingInt(i -> snapshot.definitionOf(i).sortOrder()))
+                .sorted(evaluationOrder)
                 .toList();
 
         for (PlanItem item : ordered) {

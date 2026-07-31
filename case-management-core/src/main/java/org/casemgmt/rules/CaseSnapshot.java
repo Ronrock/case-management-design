@@ -7,15 +7,26 @@ import java.util.List;
 
 public record CaseSnapshot(CaseInstance caseInstance, CaseDefinition definition, List<PlanItem> planItems) {
 
-    /** All runtime instances of a definition key, oldest first (repetition creates several). */
+    /**
+     * Orders instances of the same defKey by repetitionNo, the monotonic counter both
+     * PlanModelInstantiator.initialItems and .repeat() assign (starting at 1, incrementing
+     * by 1 per repeat) — never null, never clock-dependent. createdAt is kept only as a
+     * tiebreaker for the case where repetitionNo is somehow equal; it must not be the
+     * primary key, because two repeats created within the same clock tick can share a
+     * createdAt, which would otherwise make "latest" depend on incidental stream order.
+     */
+    private static final Comparator<PlanItem> INSTANCE_ORDER =
+            Comparator.comparingInt(PlanItem::repetitionNo).thenComparing(PlanItem::createdAt);
+
+    /** All runtime instances of a definition key, earliest repetition first. */
     public List<PlanItem> items(String defKey) {
         return planItems.stream()
                 .filter(i -> defKey.equals(defKeyOf(i)))
-                .sorted(Comparator.comparing(PlanItem::createdAt))
+                .sorted(INSTANCE_ORDER)
                 .toList();
     }
 
-    /** The most recent instance of a definition key, which is what criteria see. */
+    /** The highest-repetitionNo instance of a definition key, which is what criteria see. */
     public PlanItem latest(String defKey) {
         List<PlanItem> all = items(defKey);
         return all.isEmpty() ? null : all.get(all.size() - 1);
