@@ -3,10 +3,13 @@ package org.casemgmt.engine.remote;
 import org.casemgmt.engine.*;
 import org.springframework.http.MediaType;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.temporal.ChronoField;
 import java.util.*;
 
 /**
@@ -21,14 +24,20 @@ public class RemoteEngineGateway implements EngineGateway {
     private static final String PLAN_ITEM_VARIABLE = "planItemId";
 
     /**
-     * engine-rest serialises date fields like {@code "2023-05-13T12:14:12.000+0200"} — an
-     * offset with no colon between hours and minutes. {@link OffsetDateTime#parse(CharSequence)}
-     * uses {@link DateTimeFormatter#ISO_OFFSET_DATE_TIME} by default, which requires the colon
-     * and rejects this format. An explicit pattern is required; a parse failure here must
-     * propagate (never be swallowed into a null createdAt — see EngineGatewayContract).
+     * engine-rest date fields are observed as e.g. {@code "2023-05-13T12:14:12.000+0200"} — a
+     * numeric offset with no colon, which {@link OffsetDateTime#parse(CharSequence)}'s default
+     * ISO formatter rejects. This formatter also tolerates shapes this engine version could
+     * plausibly emit even where not directly observed: no fractional seconds at all,
+     * microsecond/nanosecond-precision fractional seconds, and a bare {@code "Z"} zulu suffix
+     * in place of a numeric offset. Anything outside these shapes is deliberately left to
+     * throw {@link java.time.format.DateTimeParseException} rather than being caught and
+     * silently turned into a null/now() createdAt — see {@link #parseCreatedAt}.
      */
-    private static final DateTimeFormatter ENGINE_REST_DATE_TIME =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+    private static final DateTimeFormatter ENGINE_REST_DATE_TIME = new DateTimeFormatterBuilder()
+            .appendPattern("yyyy-MM-dd'T'HH:mm:ss")
+            .appendFraction(ChronoField.NANO_OF_SECOND, 0, 9, true)
+            .appendOffset("+HHMM", "Z")
+            .toFormatter();
 
     private final RestClient client;
 
@@ -50,11 +59,11 @@ public class RemoteEngineGateway implements EngineGateway {
         if (request.assignee() != null) {
             createBody.put("assignee", request.assignee());
         }
-        post("/task/create", createBody);
+        post("createHumanTask", "/task/create", createBody);
 
         if (request.candidateGroups() != null) {
             for (String group : request.candidateGroups()) {
-                post("/task/" + taskId + "/identity-links",
+                post("createHumanTask (candidate group)", "/task/" + taskId + "/identity-links",
                         Map.of("groupId", group, "type", "candidate"));
             }
         }
@@ -62,20 +71,21 @@ public class RemoteEngineGateway implements EngineGateway {
                 request.variables() == null ? Map.of() : request.variables());
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
-        post("/task/" + taskId + "/variables", Map.of("modifications", typed(variables)));
+        post("createHumanTask (variables)", "/task/" + taskId + "/variables",
+                Map.of("modifications", typed(variables)));
 
-        Map<String, Object> readBack = get("/task/" + taskId);
+        Map<String, Object> readBack = get("createHumanTask (read-back)", "/task/" + taskId);
         return toRef(readBack, request.caseId());
     }
 
     @Override
     public void claimTask(String engineTaskId, String userId) {
-        post("/task/" + engineTaskId + "/claim", Map.of("userId", userId));
+        post("claimTask", "/task/" + engineTaskId + "/claim", Map.of("userId", userId));
     }
 
     @Override
     public void completeTask(String engineTaskId, Map<String, Object> variables) {
-        post("/task/" + engineTaskId + "/complete",
+        post("completeTask", "/task/" + engineTaskId + "/complete",
                 Map.of("variables", typed(variables == null ? Map.of() : variables)));
     }
 
@@ -86,7 +96,7 @@ public class RemoteEngineGateway implements EngineGateway {
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
 
-        Map<String, Object> response = post(
+        Map<String, Object> response = post("startProcess",
                 "/process-definition/key/" + request.processDefinitionKey() + "/start",
                 Map.of("businessKey", request.caseId(), "variables", typed(variables)));
 
@@ -95,13 +105,19 @@ public class RemoteEngineGateway implements EngineGateway {
 
     @Override
     public void cancelProcess(String processInstanceId, String reason) {
+        String path = "/process-instance/" + processInstanceId + "?skipCustomListeners=false";
         try {
-            client.delete()
-                    .uri("/process-instance/{id}?skipCustomListeners=false", processInstanceId)
-                    .retrieve().toBodilessEntity();
+            client.delete().uri(path).retrieve().toBodilessEntity();
         } catch (RestClientResponseException e) {
-            throw new EngineException("Could not cancel process " + processInstanceId
-                    + ": " + e.getStatusCode(), e);
+            throw new EngineException("cancelProcess (DELETE " + path + ") failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            // Covers connection failures (e.g. ResourceAccessException: connection refused,
+            // timeout) as well as any other non-HTTP-status client failure — the one failure
+            // class structurally impossible for the embedded (in-process) gateway. Task 13's
+            // command outbox decides retry-vs-dead-letter by catching EngineException, so a
+            // transient network blip must surface as one, not escape as a raw Spring exception.
+            throw new EngineException("cancelProcess (DELETE " + path + ") failed: " + e.getMessage(), e);
         }
     }
 
@@ -123,7 +139,9 @@ public class RemoteEngineGateway implements EngineGateway {
             // separate query fields, "taskVariables" and "processVariables" respectively, and
             // orQueries is required to OR them together rather than getting them ANDed (which
             // would silently match nothing for either kind of task, exactly as an in-process
-            // query filtering only one scope would).
+            // query filtering only one scope would). Other top-level filters (assignee,
+            // candidateGroups) remain ANDed against this OR group, not widened by it — proven
+            // by findsTasksByCandidateGroupAndCaseIdTogether in the shared contract.
             Map<String, Object> caseIdFilter = Map.of(
                     "taskVariables", List.of(Map.of(
                             "name", CASE_ID_VARIABLE, "value", query.caseId(), "operator", "eq")),
@@ -131,19 +149,54 @@ public class RemoteEngineGateway implements EngineGateway {
                             "name", CASE_ID_VARIABLE, "value", query.caseId(), "operator", "eq")));
             body.put("orQueries", List.of(caseIdFilter));
         }
+        String path = "/task?maxResults=" + (query.maxResults() <= 0 ? 50 : query.maxResults());
+        List<Map<String, Object>> tasks;
         try {
-            List<Map<String, Object>> tasks = client.post()
-                    .uri("/task?maxResults={max}", query.maxResults() <= 0 ? 50 : query.maxResults())
+            tasks = client.post()
+                    .uri(path)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(body)
                     .retrieve()
                     .body(List.class);
-
-            return tasks == null ? List.of() : tasks.stream()
-                    .map(t -> toRef(t, query.caseId()))
-                    .toList();
         } catch (RestClientResponseException e) {
-            throw new EngineException("Task query failed: " + e.getStatusCode(), e);
+            throw new EngineException("findTasks (POST " + path + ") failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException("findTasks (POST " + path + ") failed: " + e.getMessage(), e);
+        }
+        if (tasks == null) {
+            return List.of();
+        }
+
+        // engine-rest's /task query resource returns task DTOs only — it does not include
+        // variables. The caseId on each result must therefore be read back per task rather
+        // than echoed from the query's own caseId filter: that filter is frequently null/
+        // absent (e.g. a candidateGroups-only query), and echoing it would silently return
+        // caseId=null for every result of exactly such a query — a field populated on create
+        // and dropped on read, invisible in a query that only asserts non-emptiness. This
+        // costs one extra HTTP call per returned task, bounded by the same maxResults as the
+        // query itself (see findsCreatedTasksByCandidateGroup in the shared contract, and the
+        // FINDINGS note this belongs in: N results becomes N+1 HTTP calls).
+        return tasks.stream()
+                .map(t -> toRef(t, fetchCaseId(String.valueOf(t.get("id")))))
+                .toList();
+    }
+
+    /** Reads a task's actual caseId variable (task-local or inherited from its process). */
+    private String fetchCaseId(String taskId) {
+        String path = "/task/" + taskId + "/variables/" + CASE_ID_VARIABLE;
+        try {
+            Map<String, Object> variable = client.get().uri(path).retrieve().body(Map.class);
+            Object value = variable == null ? null : variable.get("value");
+            return value == null ? null : value.toString();
+        } catch (RestClientResponseException e) {
+            if (e.getStatusCode().value() == 404) {
+                return null;
+            }
+            throw new EngineException("fetchCaseId (GET " + path + ") failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException("fetchCaseId (GET " + path + ") failed: " + e.getMessage(), e);
         }
     }
 
@@ -156,7 +209,8 @@ public class RemoteEngineGateway implements EngineGateway {
                 parseCreatedAt(task.get("created")));
     }
 
-    private OffsetDateTime parseCreatedAt(Object value) {
+    /** Package-private (not private) so date-format tolerance can be unit-tested directly. */
+    static OffsetDateTime parseCreatedAt(Object value) {
         if (value == null) {
             return null;
         }
@@ -166,18 +220,20 @@ public class RemoteEngineGateway implements EngineGateway {
         return OffsetDateTime.parse((String) value, ENGINE_REST_DATE_TIME);
     }
 
-    private Map<String, Object> get(String path) {
+    private Map<String, Object> get(String operation, String path) {
         try {
             return client.get().uri(path)
                     .retrieve()
                     .body(Map.class);
         } catch (RestClientResponseException e) {
-            throw new EngineException("Engine call " + path + " failed: "
+            throw new EngineException(operation + " (GET " + path + ") failed: "
                     + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException(operation + " (GET " + path + ") failed: " + e.getMessage(), e);
         }
     }
 
-    private Map<String, Object> post(String path, Object body) {
+    private Map<String, Object> post(String operation, String path, Object body) {
         try {
             return client.post().uri(path)
                     .contentType(MediaType.APPLICATION_JSON)
@@ -185,8 +241,13 @@ public class RemoteEngineGateway implements EngineGateway {
                     .retrieve()
                     .body(Map.class);
         } catch (RestClientResponseException e) {
-            throw new EngineException("Engine call " + path + " failed: "
+            throw new EngineException(operation + " (POST " + path + ") failed: "
                     + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            // Covers connection failures (ResourceAccessException et al.) and any other
+            // non-HTTP-status client failure — see the comment in cancelProcess for why this
+            // matters specifically for the remote gateway.
+            throw new EngineException(operation + " (POST " + path + ") failed: " + e.getMessage(), e);
         }
     }
 

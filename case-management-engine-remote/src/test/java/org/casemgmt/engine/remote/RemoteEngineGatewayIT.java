@@ -1,13 +1,20 @@
 package org.casemgmt.engine.remote;
 
+import org.casemgmt.engine.EngineException;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.EngineGatewayContract;
+import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.RepositoryService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.web.client.RestClient;
+
+import java.io.IOException;
+import java.net.ServerSocket;
+
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Proves {@link RemoteEngineGateway} against the same contract the embedded gateway passes
@@ -40,5 +47,31 @@ class RemoteEngineGatewayIT extends EngineGatewayContract {
                 .enableDuplicateFiltering(true)
                 .deploy();
         return "test-fragment";
+    }
+
+    /**
+     * Remote-only failure mode: the embedded gateway has no network to fail on, so this is
+     * not (and cannot be) part of the shared {@link EngineGatewayContract}. Points a fresh
+     * gateway at a port nothing is listening on so the underlying HTTP client throws
+     * {@code ResourceAccessException} ("Connection refused") rather than an HTTP-status
+     * exception, and asserts it still surfaces as {@link EngineException} — the one exception
+     * type Task 13's command outbox catches to decide retry-vs-dead-letter. A connection
+     * failure escaping unwrapped would silently bypass that retry design.
+     */
+    @Test
+    void connectionFailureSurfacesAsEngineException() throws IOException {
+        int deadPort;
+        try (ServerSocket probe = new ServerSocket(0)) {
+            deadPort = probe.getLocalPort();
+        }
+        // The socket above is closed again immediately, so nothing is listening on
+        // deadPort — a connection attempt to it fails fast with "connection refused".
+        EngineGateway unreachable = new RemoteEngineGateway(RestClient.builder()
+                .baseUrl("http://localhost:" + deadPort + "/engine-rest")
+                .build());
+
+        assertThatThrownBy(() -> unreachable.claimTask("any-task", "alice"))
+                .isInstanceOf(EngineException.class)
+                .hasCauseInstanceOf(org.springframework.web.client.RestClientException.class);
     }
 }

@@ -56,6 +56,34 @@ public abstract class EngineGatewayContract {
             assertThat(t.engineTaskId()).isNotBlank();
             // A gateway cannot be allowed to populate createdAt on create and drop it on query.
             assertThat(t.createdAt()).isNotNull();
+            // This query has NO caseId filter (null). A gateway that echoes the *query's*
+            // caseId into each result (rather than reading the task's actual caseId) would
+            // pass every other assertion here while silently returning null — exactly the
+            // "populated on create, dropped on read" failure mode this file's class javadoc
+            // warns about, and exactly the query shape (candidateGroups only) that would
+            // never notice it without this line.
+            assertThat(t.caseId()).isEqualTo("eng-a:2");
+        });
+    }
+
+    @Test
+    void findsTasksByCandidateGroupAndCaseIdTogether() {
+        gateway().createHumanTask(new HumanTaskRequest(
+                "eng-a:9", "pi-9", "DualMatch", null, List.of("dual-group"), null, Map.of()));
+        gateway().createHumanTask(new HumanTaskRequest(
+                "eng-a:10", "pi-10", "SameGroupOtherCase", null, List.of("dual-group"), null, Map.of()));
+
+        // Both tasks share a candidate group; only one matches the caseId. A query combining
+        // both filters must AND them, not let the caseId OR-scoping (task-variable vs.
+        // process-variable, see findsTasksByCaseId / findsTheUserTaskSpawnedByAStartedProcess)
+        // leak into widening the candidateGroups filter too.
+        List<EngineTaskRef> found = gateway().findTasks(
+                new EngineTaskQuery(null, List.of("dual-group"), "eng-a:9", 10));
+
+        assertThat(found).hasSize(1);
+        assertThat(found).allSatisfy(t -> {
+            assertThat(t.caseId()).isEqualTo("eng-a:9");
+            assertThat(t.name()).isEqualTo("DualMatch");
         });
     }
 
