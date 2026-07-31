@@ -34,36 +34,41 @@ public class EmbeddedEngineGateway implements EngineGateway {
 
     @Override
     public EngineTaskRef createHumanTask(HumanTaskRequest request) {
-        Task task = taskService.newTask();
-        task.setName(request.name());
-        if (request.assignee() != null) {
-            task.setAssignee(request.assignee());
-        }
-        taskService.saveTask(task);
-
-        if (request.candidateGroups() != null) {
-            for (String group : request.candidateGroups()) {
-                taskService.addCandidateGroup(task.getId(), group);
+        try {
+            Task task = taskService.newTask();
+            task.setName(request.name());
+            if (request.assignee() != null) {
+                task.setAssignee(request.assignee());
             }
+            taskService.saveTask(task);
+
+            if (request.candidateGroups() != null) {
+                for (String group : request.candidateGroups()) {
+                    taskService.addCandidateGroup(task.getId(), group);
+                }
+            }
+
+            // Standalone tasks (created via newTask(), not attached to a process instance) have
+            // no execution to hold "process" variables. setVariables()/setVariable() implicitly
+            // land in the task's own local scope for such a task (there is no outer scope to
+            // promote to), so taskVariableValueEquals() happens to match either way.
+            // setVariablesLocal() is used here anyway to make that scoping explicit and correct
+            // by construction rather than by an implicit degrade-to-local behaviour of the
+            // plain setters — it is also what still works correctly if createHumanTask is ever
+            // used for a task that IS attached to an execution. processVariableValueEquals()
+            // would require an execution and silently match nothing for a standalone task
+            // either way.
+            Map<String, Object> variables = new HashMap<>(
+                    request.variables() == null ? Map.of() : request.variables());
+            variables.put(CASE_ID_VARIABLE, request.caseId());
+            variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
+            taskService.setVariablesLocal(task.getId(), variables);
+
+            return toRef(taskService.createTaskQuery().taskId(task.getId()).singleResult(),
+                    request.caseId());
+        } catch (ProcessEngineException e) {
+            throw new EngineException("Could not create human task " + request.name(), e);
         }
-
-        // Standalone tasks (created via newTask(), not attached to a process instance) have no
-        // execution to hold "process" variables. setVariables()/setVariable() implicitly land
-        // in the task's own local scope for such a task (there is no outer scope to promote
-        // to), so taskVariableValueEquals() happens to match either way. setVariablesLocal()
-        // is used here anyway to make that scoping explicit and correct by construction rather
-        // than by an implicit degrade-to-local behaviour of the plain setters — it is also
-        // what still works correctly if createHumanTask is ever used for a task that IS
-        // attached to an execution. processVariableValueEquals() would require an execution
-        // and silently match nothing for a standalone task either way.
-        Map<String, Object> variables = new HashMap<>(
-                request.variables() == null ? Map.of() : request.variables());
-        variables.put(CASE_ID_VARIABLE, request.caseId());
-        variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
-        taskService.setVariablesLocal(task.getId(), variables);
-
-        return toRef(taskService.createTaskQuery().taskId(task.getId()).singleResult(),
-                request.caseId());
     }
 
     @Override
@@ -111,31 +116,36 @@ public class EmbeddedEngineGateway implements EngineGateway {
 
     @Override
     public List<EngineTaskRef> findTasks(EngineTaskQuery query) {
-        TaskQuery q = taskService.createTaskQuery();
-        if (query.assignee() != null) {
-            q = q.taskAssignee(query.assignee());
+        try {
+            TaskQuery q = taskService.createTaskQuery();
+            if (query.assignee() != null) {
+                q = q.taskAssignee(query.assignee());
+            }
+            if (query.candidateGroups() != null && !query.candidateGroups().isEmpty()) {
+                q = q.taskCandidateGroupIn(query.candidateGroups()).includeAssignedTasks();
+            }
+            if (query.caseId() != null) {
+                // A task's caseId variable can live in either of two scopes depending on how
+                // the task came to exist: createHumanTask() sets it as a *local* task variable
+                // (a standalone task has no execution to promote it to), while startProcess()
+                // sets it as a *process* variable on the execution, which the BPMN's own user
+                // tasks (e.g. "Wait" in test-process.bpmn) then inherit. taskVariableValueEquals()
+                // alone only matches the former; processVariableValueEquals() alone only
+                // matches the latter. Querying only one silently drops the other kind of task
+                // from every caseId-scoped worklist lookup, so both are queried via
+                // .or()/.endOr().
+                q = q.or()
+                        .taskVariableValueEquals(CASE_ID_VARIABLE, query.caseId())
+                        .processVariableValueEquals(CASE_ID_VARIABLE, query.caseId())
+                        .endOr();
+            }
+            return q.list().stream()
+                    .limit(query.maxResults() <= 0 ? 50 : query.maxResults())
+                    .map(t -> toRef(t, caseIdOf(t)))
+                    .toList();
+        } catch (ProcessEngineException e) {
+            throw new EngineException("Could not query tasks", e);
         }
-        if (query.candidateGroups() != null && !query.candidateGroups().isEmpty()) {
-            q = q.taskCandidateGroupIn(query.candidateGroups()).includeAssignedTasks();
-        }
-        if (query.caseId() != null) {
-            // A task's caseId variable can live in either of two scopes depending on how the
-            // task came to exist: createHumanTask() sets it as a *local* task variable (a
-            // standalone task has no execution to promote it to), while startProcess() sets
-            // it as a *process* variable on the execution, which the BPMN's own user tasks
-            // (e.g. "Wait" in test-process.bpmn) then inherit. taskVariableValueEquals() alone
-            // only matches the former; processVariableValueEquals() alone only matches the
-            // latter. Querying only one silently drops the other kind of task from every
-            // caseId-scoped worklist lookup, so both are queried via .or()/.endOr().
-            q = q.or()
-                    .taskVariableValueEquals(CASE_ID_VARIABLE, query.caseId())
-                    .processVariableValueEquals(CASE_ID_VARIABLE, query.caseId())
-                    .endOr();
-        }
-        return q.list().stream()
-                .limit(query.maxResults() <= 0 ? 50 : query.maxResults())
-                .map(t -> toRef(t, caseIdOf(t)))
-                .toList();
     }
 
     private String caseIdOf(Task task) {

@@ -141,24 +141,36 @@
   </dependencies>
 
   <build>
-    <pluginManagement>
-      <plugins>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-surefire-plugin</artifactId>
-          <version>3.5.2</version>
-        </plugin>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-failsafe-plugin</artifactId>
-          <version>3.5.2</version>
-          <executions>
-            <execution>
-              <goals><goal>integration-test</goal><goal>verify</goal></goals>
-            </execution>
-          </executions>
-        </plugin>
-      </plugins>
-    </pluginManagement>
+    <!-- Declared under <plugins> (not just <pluginManagement>) so every child module
+         inherits this execution automatically, with no per-module opt-in required.
+
+         Standardises on surefire running *IT classes under the ordinary `test` phase,
+         reactor-wide. This project has no Testcontainers-backed or otherwise genuinely
+         separate "integration test" environment for its *IT classes (see
+         case-management-engine-embedded's EmbeddedEngineGatewayIT: full Spring context,
+         real Operaton engine, but on in-memory H2 - fast enough to run as part of `test`).
+         A maven-failsafe-plugin execution previously sat in <pluginManagement> here but was
+         never bound in any module's <build><plugins>, so it did nothing: *IT classes matched
+         neither surefire's default includes (**/*Test.java, **/*Tests.java, **/*TestCase.java)
+         nor any active failsafe execution, and `mvn test` silently reported zero tests for
+         them - a false green, not a skip anyone would notice. Removed rather than fixed
+         forward, since running *IT classes as ordinary tests (not a separate
+         integration-test/verify phase) is what every existing task brief in this project
+         already assumes (`./mvnw -pl <module> test`, not `verify`). -->
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+        <configuration>
+          <includes>
+            <include>**/*Test.java</include>
+            <include>**/*Tests.java</include>
+            <include>**/*TestCase.java</include>
+            <include>**/*IT.java</include>
+          </includes>
+        </configuration>
+      </plugin>
+    </plugins>
   </build>
 </project>

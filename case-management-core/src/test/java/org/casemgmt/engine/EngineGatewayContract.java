@@ -115,6 +115,28 @@ public abstract class EngineGatewayContract {
     }
 
     @Test
+    void findsTheUserTaskSpawnedByAStartedProcess() {
+        String key = deployTestProcess();
+
+        gateway().startProcess(new StartProcessRequest("eng-a:8", "pi-8", key, Map.of()));
+
+        // test-process.bpmn's caseId lands as a *process* variable (it is passed to
+        // startProcess, not createHumanTask), which is a different variable scope than a
+        // standalone task's local variables. A findTasks(caseId) that only checks task-local
+        // scope silently returns nothing here — exactly the gap a first draft of an
+        // EngineGateway can ship with while every other test in this file stays green.
+        List<EngineTaskRef> found = gateway().findTasks(
+                new EngineTaskQuery(null, null, "eng-a:8", 10));
+
+        assertThat(found).hasSize(1);
+        assertThat(found).allSatisfy(t -> {
+            assertThat(t.name()).isEqualTo("Wait");
+            assertThat(t.caseId()).isEqualTo("eng-a:8");
+            assertThat(t.createdAt()).isNotNull();
+        });
+    }
+
+    @Test
     void cancelsARunningProcess() {
         String key = deployTestProcess();
         EngineProcessRef ref = gateway().startProcess(new StartProcessRequest(
