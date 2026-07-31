@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.casemgmt</groupId>
+  <artifactId>case-management-root</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>Case Management on Operaton</name>
+
+  <modules>
+    <module>case-management-core</module>
+    <module>case-management-engine-embedded</module>
+    <module>case-management-engine-remote</module>
+    <module>case-management-rest</module>
+    <module>case-management-spring-boot-starter</module>
+    <module>case-management-poc-app</module>
+  </modules>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <version.operaton>2.1.3</version.operaton>
+    <version.testcontainers>1.21.3</version.testcontainers>
+    <version.json-schema-validator>1.5.8</version.json-schema-validator>
+    <version.archunit>1.4.1</version.archunit>
+    <version.swagger-request-validator>2.44.9</version.swagger-request-validator>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- Operaton pins Spring Boot 4.0.7 / Spring 7.0.8. Import it FIRST so it wins. -->
+      <dependency>
+        <groupId>org.operaton.bpm</groupId>
+        <artifactId>operaton-bom</artifactId>
+        <version>${version.operaton}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <!-- operaton-bom (above) only manages Operaton artifact versions - it does NOT
+           import spring-boot-dependencies. operaton-bpm-spring-boot-starter's own POM
+           does (it imports operaton-core-internal-dependencies + spring-boot-dependencies
+           at 4.0.7). Importing it here as a BOM (type=pom/scope=import, in addition to the
+           plain jar dependency entry below) is how Operaton's actual pinned Spring Boot /
+           Spring Framework / Jackson versions flow into this reactor without us declaring
+           a competing version ourselves. -->
+      <dependency>
+        <groupId>org.operaton.bpm.springboot</groupId>
+        <artifactId>operaton-bpm-spring-boot-starter</artifactId>
+        <version>${version.operaton}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.operaton.bpm.springboot</groupId>
+        <artifactId>operaton-bpm-spring-boot-starter</artifactId>
+        <version>${version.operaton}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.operaton.bpm.springboot</groupId>
+        <artifactId>operaton-bpm-spring-boot-starter-rest</artifactId>
+        <version>${version.operaton}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers-bom</artifactId>
+        <version>${version.testcontainers}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <!-- Pin the testcontainers core artifact explicitly. Without this, Operaton's own
+           internal BOM chain (pulled in above via the operaton-bpm-spring-boot-starter
+           import) directly overrides org.testcontainers:testcontainers to 2.0.5, while
+           oracle-free/jdbc/database-commons stay on our declared 1.21.3 line (testcontainers
+           2.0.5 does not even publish an oracle-free artifact). That skew would silently put
+           a mismatched core jar on the classpath. This direct entry, declared in our own
+           POM, takes precedence over anything arriving via import and keeps the whole
+           testcontainers family on 1.21.3. -->
+      <dependency>
+        <groupId>org.testcontainers</groupId>
+        <artifactId>testcontainers</artifactId>
+        <version>${version.testcontainers}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.networknt</groupId>
+        <artifactId>json-schema-validator</artifactId>
+        <version>${version.json-schema-validator}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.tngtech.archunit</groupId>
+        <artifactId>archunit-junit5</artifactId>
+        <version>${version.archunit}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>com.atlassian.oai</groupId>
+        <artifactId>swagger-request-validator-core</artifactId>
+        <version>${version.swagger-request-validator}</version>
+        <scope>test</scope>
+      </dependency>
+
+      <!-- Internal modules -->
+      <dependency>
+        <groupId>org.casemgmt</groupId>
+        <artifactId>case-management-core</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.casemgmt</groupId>
+        <artifactId>case-management-engine-embedded</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.casemgmt</groupId>
+        <artifactId>case-management-engine-remote</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.casemgmt</groupId>
+        <artifactId>case-management-rest</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.casemgmt</groupId>
+        <artifactId>case-management-spring-boot-starter</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>3.5.2</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-failsafe-plugin</artifactId>
+          <version>3.5.2</version>
+          <executions>
+            <execution>
+              <goals><goal>integration-test</goal><goal>verify</goal></goals>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+  </build>
+</project>
