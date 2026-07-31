@@ -69,13 +69,39 @@ public class PlanModelEvaluator {
                 .sorted(evaluationOrder)
                 .toList();
 
+        // Exit criteria are a stronger, author-stated signal than autocomplete (Task 9
+        // re-review, Important — the Critical-1 restructuring below had accidentally let
+        // autocomplete pre-empt a stage's own exit criterion). Decided first, against the
+        // pre-round snapshot: a stage whose exit criterion is satisfied is TERMINATED no
+        // matter what its children are doing, and is excluded from the completing-stage
+        // batch below so the two can never both claim the same stage.
+        List<PlanItem> terminatingStages = ordered.stream()
+                .filter(i -> !i.state().isEnded())
+                .filter(i -> snapshot.definitionOf(i).type() == PlanItemType.STAGE)
+                .filter(i -> exitCriteriaSatisfied(snapshot.definitionOf(i), context))
+                .toList();
+        Set<String> terminatingStageIds = terminatingStages.stream()
+                .map(PlanItem::id)
+                .collect(Collectors.toSet());
+
+        // Exit is unconditional, so it cascades to ALL of a terminating stage's remaining
+        // children, including ACTIVE ones (unlike autocomplete's childrenToTerminate) — see
+        // StageCompletion.childrenToCascadeTerminate for why leaving an ACTIVE child behind
+        // here would recreate the orphan shape Critical 1 fixed for COMPLETED stages.
+        Set<String> cascadeTerminatedIds = terminatingStages.stream()
+                .flatMap(stage -> stageCompletion.childrenToCascadeTerminate(snapshot, stage).stream())
+                .map(PlanItem::id)
+                .collect(Collectors.toSet());
+
         // Decided up front, against the pre-round snapshot, so a stage's completion can
         // never race the entry-criteria admission of one of its own children in the same
         // round (Task 9 review, Critical 1) — the decision does not depend on where the
-        // stage happens to fall in `ordered` relative to its children.
+        // stage happens to fall in `ordered` relative to its children. Stages already
+        // claimed by exit-criteria termination above are excluded: exit wins.
         List<PlanItem> completingStages = ordered.stream()
                 .filter(i -> i.state() == PlanItemState.ACTIVE)
                 .filter(i -> snapshot.definitionOf(i).type() == PlanItemType.STAGE)
+                .filter(i -> !terminatingStageIds.contains(i.id()))
                 .filter(i -> stageCompletion.canComplete(snapshot, i))
                 .toList();
         Set<String> completingStageIds = completingStages.stream()
@@ -95,6 +121,16 @@ public class PlanModelEvaluator {
                 continue;
             }
 
+            if (terminatingStageIds.contains(item.id())) {
+                transitions.add(new Transition(item.id(), item.state(), PlanItemState.TERMINATED,
+                        "exit criterion met"));
+                continue;
+            }
+            if (cascadeTerminatedIds.contains(item.id())) {
+                transitions.add(new Transition(item.id(), item.state(), PlanItemState.TERMINATED,
+                        "parent stage terminated"));
+                continue;
+            }
             if (completingStageIds.contains(item.id())) {
                 transitions.add(new Transition(item.id(), item.state(), PlanItemState.COMPLETED,
                         "all required children ended"));
@@ -108,7 +144,7 @@ public class PlanModelEvaluator {
 
             PlanItemDefinition def = snapshot.definitionOf(item);
 
-            if (!def.exitCriteria().isEmpty() && criteria.allMatch(def.exitCriteria(), context)) {
+            if (exitCriteriaSatisfied(def, context)) {
                 transitions.add(new Transition(item.id(), item.state(), PlanItemState.TERMINATED,
                         "exit criterion met"));
                 continue;
@@ -121,6 +157,10 @@ public class PlanModelEvaluator {
             }
         }
         return transitions;
+    }
+
+    private boolean exitCriteriaSatisfied(PlanItemDefinition def, EvaluationContext context) {
+        return !def.exitCriteria().isEmpty() && criteria.allMatch(def.exitCriteria(), context);
     }
 
     /**

@@ -223,4 +223,67 @@ class StageCompletionTest {
                 .hasMessageContaining("child")
                 .hasMessageContaining("missing-stage");
     }
+
+    // --- Task 9 re-review, Important: the Critical-1 restructuring accidentally let
+    // autocomplete pre-empt a stage's own exit criterion. Exit must win. ---
+
+    @Test
+    void exitCriterionOnAStageWinsOverAutocompleteInTheSameRound() {
+        // Reviewer's exact repro: a stage with a satisfied exit criterion AND an
+        // already-ended child came out COMPLETED (autocomplete) instead of TERMINATED
+        // (exit criterion), silently discarding the author-stated exit signal.
+        CaseDefinition def = definition(
+                def("stage", PlanItemType.STAGE, null, false, false, false,
+                        List.of(), List.of("${vars.abort == true}"), 10),
+                def("child", PlanItemType.HUMAN_TASK, "stage", false, false, false,
+                        List.of(), List.of(), 20));
+        var snapshot = snapshot(def, List.of(
+                item("pi-stage", "stage", PlanItemType.STAGE, PlanItemState.ACTIVE),
+                item("pi-child", "child", PlanItemType.HUMAN_TASK, PlanItemState.COMPLETED, "pi-stage")),
+                Map.of("abort", true));
+
+        List<Transition> transitions = evaluator.evaluate(snapshot);
+
+        assertThat(transitions).noneMatch(t -> "pi-stage".equals(t.planItemId()) && t.to() == PlanItemState.COMPLETED);
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-stage");
+            assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
+        });
+    }
+
+    @Test
+    void terminatingStageCascadeTerminatesAllRemainingChildrenIncludingActiveOnes() {
+        // Design decision made explicit: unlike autocomplete (which can never see an ACTIVE
+        // child, by construction of blockingItems), an exit criterion is unconditional and
+        // can fire while a child is ACTIVE — so termination cascades to every remaining
+        // child, active or not, rather than leaving one behind.
+        CaseDefinition def = definition(
+                def("stage", PlanItemType.STAGE, null, false, false, false,
+                        List.of(), List.of("${vars.abort == true}"), 10),
+                def("activeChild", PlanItemType.HUMAN_TASK, "stage", false, false, false,
+                        List.of(), List.of(), 20),
+                def("availableChild", PlanItemType.HUMAN_TASK, "stage", false, false, false,
+                        List.of(), List.of(), 30));
+        var snapshot = snapshot(def, List.of(
+                item("pi-stage", "stage", PlanItemType.STAGE, PlanItemState.ACTIVE),
+                item("pi-active", "activeChild", PlanItemType.HUMAN_TASK, PlanItemState.ACTIVE, "pi-stage"),
+                item("pi-avail", "availableChild", PlanItemType.HUMAN_TASK, PlanItemState.AVAILABLE, "pi-stage")),
+                Map.of("abort", true));
+
+        List<Transition> transitions = evaluator.evaluate(snapshot);
+
+        assertThat(transitions).hasSize(3);
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-stage");
+            assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
+        });
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-active");
+            assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
+        });
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-avail");
+            assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
+        });
+    }
 }
