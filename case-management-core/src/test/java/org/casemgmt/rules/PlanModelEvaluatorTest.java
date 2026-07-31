@@ -135,19 +135,27 @@ class PlanModelEvaluatorTest {
     }
 
     @Test
-    void mutuallyTriggeringCriteriaAreReportedNotSpun() {
-        // Two milestones whose criteria are satisfied by each other's non-completion:
-        // a modelling bug. It must fail loudly rather than loop forever.
-        CaseDefinition def = definition(
-                def("ping", PlanItemType.MILESTONE, null, false, false, true,
-                        List.of("${items.pong.state != 'COMPLETED'}"), List.of(), 10),
-                def("pong", PlanItemType.MILESTONE, null, false, false, true,
-                        List.of("${items.ping.state != 'COMPLETED'}"), List.of(), 20));
-        var snapshot = snapshot(def, List.of(
-                item("pi-ping", "ping", PlanItemType.MILESTONE, PlanItemState.AVAILABLE),
-                item("pi-pong", "pong", PlanItemType.MILESTONE, PlanItemState.AVAILABLE)), Map.of());
+    void loopGuardThrowsWhenTransitionsNeverSettle() {
+        // With a fixed item set and a monotone state machine (states only move forward, ended
+        // items are never reconsidered), no real model can make singlePass() return non-empty
+        // transitions for 20 straight rounds — the cap is unreachable by construction today.
+        // It exists for a future change (e.g. repetition creating items mid-loop) that could
+        // break that monotonicity, so it's exercised directly here via a test seam: a subclass
+        // whose singlePass() always reports a transition, forcing every round to look "still
+        // moving" regardless of what the criteria or item states actually are.
+        CaseDefinition def = definition(def("task", PlanItemType.HUMAN_TASK));
+        var snapshot = snapshot(def, List.of(item("pi-1", "task", PlanItemType.HUMAN_TASK,
+                PlanItemState.AVAILABLE)), Map.of());
 
-        assertThatThrownBy(() -> evaluator.evaluate(snapshot))
+        PlanModelEvaluator neverSettles = new PlanModelEvaluator(new JuelCriterionEvaluator()) {
+            @Override
+            List<Transition> singlePass(CaseSnapshot ignored) {
+                return List.of(new Transition("pi-1", PlanItemState.AVAILABLE, PlanItemState.ACTIVE,
+                        "test double: never settles"));
+            }
+        };
+
+        assertThatThrownBy(() -> neverSettles.evaluate(snapshot))
                 .isInstanceOf(PlanModelLoopException.class)
                 .hasMessageContaining("20");
     }

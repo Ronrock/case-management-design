@@ -12,10 +12,23 @@ import java.util.*;
  */
 public class PlanModelEvaluator {
 
+    /**
+     * Guard against a modelling bug producing transitions that never settle.
+     *
+     * With a fixed item set this cap is unreachable by construction: states only move
+     * forward (AVAILABLE -> ENABLED/ACTIVE -> COMPLETED/TERMINATED), ended items are never
+     * reconsidered ({@link #singlePass}), and a case has finitely many items — so the number
+     * of possible transitions across all rounds is bounded by roughly two per item, nowhere
+     * near 20. It exists for what this evaluator does NOT yet do: anything that can add a
+     * plan item mid-loop (e.g. repetition instantiating a new instance) would break that
+     * monotonicity and could in principle spin. This is a guard against that future change,
+     * not against today's model — see PlanModelEvaluatorTest.loopGuardThrowsWhenTransitionsNeverSettle,
+     * which exercises the guard directly via a test seam rather than trying to construct a
+     * model that actually hits it.
+     */
     public static final int MAX_ITERATIONS = 20;
 
     private final CriterionEvaluator criteria;
-    private final PlanModelInstantiator instantiator = new PlanModelInstantiator();
 
     public PlanModelEvaluator(CriterionEvaluator criteria) {
         this.criteria = criteria;
@@ -36,7 +49,11 @@ public class PlanModelEvaluator {
         throw new PlanModelLoopException(snapshot.caseInstance().id(), MAX_ITERATIONS);
     }
 
-    private List<Transition> singlePass(CaseSnapshot snapshot) {
+    // Package-private and non-final so tests can override it to exercise the loop guard
+    // directly (see PlanModelEvaluatorTest.loopGuardThrowsWhenTransitionsNeverSettle) without
+    // needing a model that genuinely never settles — with today's monotone state machine and
+    // fixed item set, none does.
+    List<Transition> singlePass(CaseSnapshot snapshot) {
         List<Transition> transitions = new ArrayList<>();
         EvaluationContext context = contextOf(snapshot);
 
@@ -94,35 +111,20 @@ public class PlanModelEvaluator {
     }
 
     /**
-     * Applies a round's transitions to produce the snapshot the next round evaluates against.
-     *
-     * A repeatable item (spec §3.2) that completes gets a fresh AVAILABLE instance right away —
-     * that new instance, not the completed one, is what {@link CaseSnapshot#latest} and sibling
-     * criteria see from here on. This is also what makes truly mutually-triggering criteria
-     * (each satisfied by the other's non-completion) spin forever instead of settling after one
-     * round: every round completes-then-repeats both items, so neither's *latest* instance is
-     * ever seen as COMPLETED by the other. That divergence is exactly what MAX_ITERATIONS exists
-     * to catch.
+     * Applies a round's transitions to the existing items only — it creates nothing.
+     * Instantiating further repeat instances is the service layer's job (Task 9's
+     * {@code repeatable()} query), not the evaluator's: everything this pure function does
+     * must be visible in the {@link Transition}s it returns, so a caller that persists
+     * exactly those transitions never diverges from what the evaluator went on to reason
+     * about internally.
      */
     private CaseSnapshot apply(CaseSnapshot snapshot, List<Transition> transitions) {
         Map<String, PlanItemState> byId = new HashMap<>();
         transitions.forEach(t -> byId.put(t.planItemId(), t.to()));
 
-        List<PlanItem> updated = new ArrayList<>();
-        for (PlanItem item : snapshot.planItems()) {
-            PlanItemState newState = byId.get(item.id());
-            if (newState == null) {
-                updated.add(item);
-                continue;
-            }
-            PlanItem transitioned = item.withState(newState);
-            updated.add(transitioned);
-
-            PlanItemDefinition def = snapshot.definitionOf(item);
-            if (newState == PlanItemState.COMPLETED && def.repetition()) {
-                updated.add(instantiator.repeat(transitioned, def));
-            }
-        }
+        List<PlanItem> updated = snapshot.planItems().stream()
+                .map(i -> byId.containsKey(i.id()) ? i.withState(byId.get(i.id())) : i)
+                .toList();
         return snapshot.withPlanItems(updated);
     }
 }
