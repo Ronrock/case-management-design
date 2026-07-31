@@ -2,6 +2,8 @@ package org.casemgmt.engine;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 
@@ -10,6 +12,13 @@ import static org.assertj.core.api.Assertions.*;
 /**
  * One suite, both implementations (spec §9). If embedded and remote disagree here,
  * the interface is lying about one of them.
+ *
+ * <p>The rule this file enforces: every behaviour {@link EngineGateway} promises must be
+ * asserted here, not merely exercised. A field or effect that is touched but never checked
+ * is exactly where embedded and remote are free to silently diverge — the calls will look
+ * green while one implementation quietly does less than the other (e.g. populating a field
+ * on create but dropping it on read, or swallowing a parse failure into a null). If you add
+ * a new capability to the interface, add its assertion here too.
  */
 public abstract class EngineGatewayContract {
 
@@ -27,6 +36,11 @@ public abstract class EngineGatewayContract {
         assertThat(ref.engineTaskId()).isNotBlank();
         assertThat(ref.name()).isEqualTo("Review");
         assertThat(ref.caseId()).isEqualTo("eng-a:1");
+        // createdAt must be honestly populated on create, not silently dropped or left null
+        // (e.g. by a remote gateway swallowing a timestamp-parse failure).
+        assertThat(ref.createdAt()).isNotNull();
+        assertThat(ref.createdAt().toInstant())
+                .isCloseTo(Instant.now(), within(1, ChronoUnit.MINUTES));
     }
 
     @Test
@@ -38,7 +52,11 @@ public abstract class EngineGatewayContract {
                 new EngineTaskQuery(null, List.of("special-group"), null, 10));
 
         assertThat(found).isNotEmpty();
-        assertThat(found).allSatisfy(t -> assertThat(t.engineTaskId()).isNotBlank());
+        assertThat(found).allSatisfy(t -> {
+            assertThat(t.engineTaskId()).isNotBlank();
+            // A gateway cannot be allowed to populate createdAt on create and drop it on query.
+            assertThat(t.createdAt()).isNotNull();
+        });
     }
 
     @Test
@@ -48,7 +66,10 @@ public abstract class EngineGatewayContract {
 
         assertThat(gateway().findTasks(new EngineTaskQuery(null, null, "eng-a:3", 10)))
                 .hasSize(1)
-                .allSatisfy(t -> assertThat(t.caseId()).isEqualTo("eng-a:3"));
+                .allSatisfy(t -> {
+                    assertThat(t.caseId()).isEqualTo("eng-a:3");
+                    assertThat(t.createdAt()).isNotNull();
+                });
     }
 
     @Test
@@ -58,8 +79,12 @@ public abstract class EngineGatewayContract {
 
         gateway().claimTask(ref.engineTaskId(), "alice");
 
-        assertThat(gateway().findTasks(new EngineTaskQuery("alice", null, "eng-a:4", 10)))
-                .extracting(EngineTaskRef::assignee).containsExactly("alice");
+        List<EngineTaskRef> found = gateway().findTasks(
+                new EngineTaskQuery("alice", null, "eng-a:4", 10));
+
+        assertThat(found).extracting(EngineTaskRef::assignee).containsExactly("alice");
+        // Claiming must not drop createdAt from the record read back afterward.
+        assertThat(found).allSatisfy(t -> assertThat(t.createdAt()).isNotNull());
     }
 
     @Test
