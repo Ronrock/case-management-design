@@ -15,6 +15,16 @@
       <groupId>org.casemgmt</groupId>
       <artifactId>case-management-core</artifactId>
     </dependency>
+    <!-- Test-jar of case-management-core: brings in EngineGatewayContract so this module's
+         tests can subclass it and prove the HTTP-based gateway satisfies the same contract
+         as the in-process gateway. -->
+    <dependency>
+      <groupId>org.casemgmt</groupId>
+      <artifactId>case-management-core</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>

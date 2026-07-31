@@ -15,6 +15,16 @@
       <groupId>org.casemgmt</groupId>
       <artifactId>case-management-core</artifactId>
     </dependency>
+    <!-- Test-jar of case-management-core: brings in EngineGatewayContract so this module's
+         tests can subclass it and prove the in-process gateway satisfies the same contract
+         as the remote (HTTP) gateway. -->
+    <dependency>
+      <groupId>org.casemgmt</groupId>
+      <artifactId>case-management-core</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.operaton.bpm.springboot</groupId>
       <artifactId>operaton-bpm-spring-boot-starter</artifactId>
