@@ -31,7 +31,9 @@
 
   <dependencyManagement>
     <dependencies>
-      <!-- Operaton pins Spring Boot 4.0.7 / Spring 7.0.8. Import it FIRST so it wins. -->
+      <!-- operaton-bom manages only Operaton's own artifact versions (engine, webapp, etc.);
+           it does NOT supply the Spring Boot or Spring Framework versions. See the
+           operaton-bpm-spring-boot-starter import below for what actually pins those. -->
       <dependency>
         <groupId>org.operaton.bpm</groupId>
         <artifactId>operaton-bom</artifactId>

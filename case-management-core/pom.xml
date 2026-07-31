@@ -23,6 +23,18 @@
       <groupId>com.networknt</groupId>
       <artifactId>json-schema-validator</artifactId>
     </dependency>
+    <!-- Fix-round addition (Jackson finding): declare Jackson 2's jackson-databind directly.
+         core has no Jackson 3 (tools.jackson.*) on its classpath at all, so code in this
+         module (e.g. a future JsonCodec) must use com.fasterxml.jackson.databind.ObjectMapper.
+         Before this, jackson-databind arrived only transitively via json-schema-validator;
+         declaring it directly makes the compile-time dependency explicit instead of
+         incidental. No new version: it inherits the version already pinned in root
+         dependencyManagement (2.21.5, resolved via the operaton-bpm-spring-boot-starter
+         BOM import, the same version every other module's Jackson-2-compat path uses). -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
     <!-- JUEL: pulled in on its own, NOT via operaton-engine, so core stays engine-free.
          org.operaton.bpm.impl.juel is an expression library, not the process engine. -->
     <dependency>
