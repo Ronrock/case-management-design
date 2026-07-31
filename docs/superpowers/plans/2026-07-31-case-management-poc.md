@@ -14,7 +14,7 @@
 - **Operaton 2.1.3** — the latest stable release on Maven Central. `2.2.0-M2` is a milestone; `2.2.0-SNAPSHOT` is the local clone at `/Volumes/dockdrive/dev/operaton` and is **for reading only, never a build dependency**.
 - **Spring Boot version is not declared by us.** Operaton 2.1.3 pins Spring Boot `4.0.7` / Spring Framework `7.0.8` via `operaton-core-internal-dependencies`. Import Operaton's BOM and let it win. Never add a `spring-boot-starter-parent`.
 - **Base package:** `org.casemgmt`. Module-specific subpackages are named per task.
-- **`case-management-core` must not import any `org.operaton` type.** Enforced by ArchUnit in Task 26. The `EngineGateway` interface and its DTOs live in core; implementations do not.
+- **`case-management-core` must not import any `org.operaton.bpm.engine` type.** Enforced by ArchUnit in Task 25. The `EngineGateway` interface and its DTOs live in core; implementations do not. The one deliberate exception is `org.operaton.bpm.impl.juel` (Task 7) — an expression library, not the process engine, and the ArchUnit rule is scoped accordingly.
 - **Every mutable table carries `VERSION_`.** Updates are always `UPDATE … SET VERSION_ = VERSION_ + 1 WHERE ID_ = :id AND VERSION_ = :expected`; zero rows affected means a concurrency conflict, never a retry.
 - **The DDL in `db-design.sql` is the source of truth for the schema.** It is copied into the build, never re-typed. PoC-only additions go in a separate, clearly-labelled changeset.
 - **`casemgmt.events.type-prefix` has no default.** Startup fails if webhooks are enabled and it is unset.
@@ -1290,6 +1290,7 @@ git commit -m "feat(core): case repository with optimistic locking and JSON vari
 - Produces:
   - `CaseDefinitionService.deploy(String json, String deployedBy) : CaseDefinition` — assigns the next version for the key, returns the stored definition
   - `CaseDefinitionRepository.findLatest(String key, String tenantId) : Optional<CaseDefinition>`
+  - `CaseDefinitionRepository.listLatest(String tenantId) : List<CaseDefinition>` — latest version per key, backs `GET /case-definitions`
   - `CaseDefinitionRepository.findById(String id) : Optional<CaseDefinition>`
   - `CaseDefinitionRepository.require(String id) : CaseDefinition`
   - `CaseDefinitionRepository.formSchema(String key, String formKey) : Optional<Map<String,Object>>`
@@ -1494,6 +1495,23 @@ public class CaseDefinitionRepository {
 
     public CaseDefinition require(String id) {
         return findById(id).orElseThrow(() -> new NotFoundException("CaseDefinition", id));
+    }
+
+    /** Latest version of every deployed key — backs GET /case-definitions. */
+    public List<CaseDefinition> listLatest(String tenantId) {
+        return jdbc.sql("""
+                SELECT ID_ FROM CM_CASE_DEF d
+                WHERE VERSION_NO_ = (SELECT MAX(VERSION_NO_) FROM CM_CASE_DEF x
+                                     WHERE x.KEY_ = d.KEY_
+                                       AND (x.TENANT_ID_ = d.TENANT_ID_
+                                            OR (x.TENANT_ID_ IS NULL AND d.TENANT_ID_ IS NULL)))
+                  AND (:tenant IS NULL OR TENANT_ID_ = :tenant)
+                ORDER BY KEY_""")
+            .param("tenant", tenantId)
+            .query(String.class).list().stream()
+            .map(this::findById)
+            .flatMap(Optional::stream)
+            .toList();
     }
 
     public Optional<CaseDefinition> findLatest(String key, String tenantId) {
@@ -4030,16 +4048,42 @@ class EngineCommandDispatcherTest extends OracleTestBase {
 
     @Test
     void outboxGatewayEnqueuesInsteadOfCalling() {
-        AtomicInteger calls = new AtomicInteger();
         var outbox = new OutboxEngineGateway(commands, id -> {});
 
         EngineTaskRef ref = outbox.createHumanTask(new HumanTaskRequest(
                 "eng-a:1", "pi-1", "Review", null, List.of("g"), null, Map.of()));
 
-        assertThat(calls).hasValue(0);
-        assertThat(ref.engineTaskId()).isNotBlank();
+        // No engine id yet: the dispatcher supplies it after the engine confirms.
+        assertThat(ref.engineTaskId()).isNull();
         assertThat(commands.claimDue(10)).hasSize(1)
                 .allSatisfy(c -> assertThat(c.type()).isEqualTo(EngineCommand.Type.CREATE_TASK));
+    }
+
+    @Test
+    void outboxGatewayNeverTouchesTheEngineOnTheRequestThread() {
+        // ExplodingGateway fails the test if any engine call happens synchronously.
+        var outbox = new OutboxEngineGateway(commands, id -> {});
+        outbox.createHumanTask(new HumanTaskRequest("eng-a:9", "pi-9", "Review",
+                null, List.of("g"), null, Map.of()));
+        outbox.completeTask("engine-1", Map.of());
+        outbox.cancelProcess("proc-1", "reason");
+
+        // Nothing was delivered because no dispatcher ran.
+        assertThat(new EngineCommandDispatcher(commands, new ExplodingGateway(), (t, s, e) -> {}))
+                .isNotNull();
+        assertThat(commands.claimDue(10)).hasSize(3);
+    }
+
+    static class ExplodingGateway extends RecordingGateway {
+        @Override public EngineTaskRef createHumanTask(HumanTaskRequest r) {
+            throw new AssertionError("engine must not be called from the request thread");
+        }
+        @Override public void completeTask(String id, Map<String, Object> v) {
+            throw new AssertionError("engine must not be called from the request thread");
+        }
+        @Override public void cancelProcess(String id, String reason) {
+            throw new AssertionError("engine must not be called from the request thread");
+        }
     }
 
     @Test
@@ -8738,8 +8782,10 @@ public class CaseController {
                 created -> JsonCodec.toJson(Map.of("id", created.id())),
                 201);
 
+        // A replay returns the ORIGINAL 201 (spec §6.4) — same status either way; the
+        // Idempotency-Replayed header is what tells the client which it got.
         CaseInstance created = result.value();
-        return ResponseEntity.status(result.replayed() ? HttpStatus.CREATED : HttpStatus.CREATED)
+        return ResponseEntity.status(HttpStatus.CREATED)
                 .eTag(ETagSupport.format(created.version()))
                 .header("Idempotency-Replayed", String.valueOf(result.replayed()))
                 .body(response(created, actor));
@@ -9027,6 +9073,21 @@ public class CaseDefinitionController {
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of(
                 "id", deployed.id(), "key", deployed.key(), "version", deployed.versionNo(),
                 "planItems", deployed.planItems().size()));
+    }
+
+    /**
+     * The listing. A consumer with no prior knowledge starts here: it discovers which
+     * case types exist rather than being told (spec §2.1, and what makes the
+     * generic-consumer test in Task 27 possible without case-type constants).
+     */
+    @GetMapping
+    public List<Map<String, Object>> list(@RequestParam(required = false) String tenantId) {
+        return repo.listLatest(tenantId).stream()
+                .map(def -> Map.<String, Object>of(
+                        "id", def.id(), "key", def.key(), "version", def.versionNo(),
+                        "name", def.name(),
+                        "tenantId", def.tenantId() == null ? "" : def.tenantId()))
+                .toList();
     }
 
     @GetMapping("/{key}")
@@ -10284,8 +10345,7 @@ class GenericConsumerIT extends OracleBackedPocTest {
     void completesACaseUsingOnlyAvailableActionsAndFormSchemas() {
         RestClient api = client("alice");
 
-        // The only case-type-specific input in the whole test: which definition to start.
-        // It comes from the definitions listing, not from a constant.
+        // Discovered, not hardcoded: the consumer learns which case types exist.
         String definitionKey = firstDeployedDefinitionKey(api);
 
         Map<String, Object> created = api.post().uri("/cases")
@@ -10308,7 +10368,7 @@ class GenericConsumerIT extends OracleBackedPocTest {
             if (actionable.isEmpty()) {
                 break;
             }
-            driveTask(api, actionable.get());
+            driveTask(api, actionable.get(), definitionKey);
         }
 
         Map<String, Object> finalCase = api.get().uri("/cases/{id}", caseId)
@@ -10321,15 +10381,19 @@ class GenericConsumerIT extends OracleBackedPocTest {
                 .retrieve().body(List.class)).isNotEmpty();
     }
 
+    @SuppressWarnings("unchecked")
     private String firstDeployedDefinitionKey(RestClient api) {
-        // The PoC seeds exactly one definition; discover its key rather than hardcoding it.
-        Map<String, Object> definition = api.get().uri("/case-definitions/{key}", "complaint")
-                .retrieve().body(Map.class);
-        return (String) definition.get("key");
+        List<Map<String, Object>> definitions = api.get().uri("/case-definitions?tenantId=t1")
+                .retrieve().body(List.class);
+        assertThat(definitions)
+                .withFailMessage("GET /case-definitions returned nothing — a consumer with no "
+                        + "prior knowledge has no entry point")
+                .isNotEmpty();
+        return (String) definitions.get(0).get("key");
     }
 
     @SuppressWarnings("unchecked")
-    private void driveTask(RestClient api, Map<String, Object> task) {
+    private void driveTask(RestClient api, Map<String, Object> task, String definitionKey) {
         List<Map<String, Object>> actions = (List<Map<String, Object>>) task.get("availableActions");
 
         Map<String, Object> claim = actions.stream()
@@ -10346,7 +10410,7 @@ class GenericConsumerIT extends OracleBackedPocTest {
             String formKey = (String) complete.get("formKey");
             if (formKey != null) {
                 Map<String, Object> schema = api.get()
-                        .uri("/case-definitions/{key}/forms/{formKey}", "complaint", formKey)
+                        .uri("/case-definitions/{key}/forms/{formKey}", definitionKey, formKey)
                         .retrieve().body(Map.class);
                 payload = SchemaPayloadGenerator.generate(schema);
             }
@@ -10412,10 +10476,15 @@ public final class SchemaPayloadGenerator {
 }
 ```
 
-- [ ] **Step 2: Run it**
+- [ ] **Step 2: Run it, and prove it is actually generic**
 
 Run: `./mvnw -q -pl case-management-poc-app test -Dtest=GenericConsumerIT`
 Expected: PASS.
+
+Then verify the constraint that gives this test its meaning:
+
+Run: `grep -icE 'complaint|assess|investigat|acknowledg|registerForm' case-management-poc-app/src/test/java/org/casemgmt/poc/GenericConsumerIT.java case-management-poc-app/src/test/java/org/casemgmt/poc/SchemaPayloadGenerator.java`
+Expected: `0` for both files. A non-zero count means the test knows the domain and proves less than it claims — fix the test, not the count.
 
 If it gets stuck — no actionable task but the case is not closed — **do not add case-type knowledge to make it pass.** Find out which step the contract failed to expose (a plan item needing `enable`/`start` that no task represents is the likely one), fix the contract by adding plan-item actions to the case response, and record the gap in `FINDINGS.md`. That gap *is* the R3 finding.
 
