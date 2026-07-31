@@ -2859,12 +2859,36 @@ import java.util.List;
 
 public class PlanModelInstantiator {
 
-    /** One AVAILABLE runtime item per definition; the evaluator advances them from there. */
+    /**
+     * One AVAILABLE runtime item per definition; the evaluator advances them from there.
+     *
+     * Two passes, because parentStageId must point at the runtime id of the parent's
+     * instance: create every item first, then resolve parents. Leaving parentStageId null
+     * (the obvious one-pass version) makes containment silently inert for every case.
+     * A parentStageKey naming a stage that is not in the model is a broken definition and
+     * throws — definitions arrive over the API from other teams, and silently exempting
+     * such an item from containment is the failure this check exists to prevent.
+     */
     public List<PlanItem> initialItems(String caseId, CaseDefinition definition) {
         OffsetDateTime now = OffsetDateTime.now();
+        Map<String, String> instanceIdByDefKey = new LinkedHashMap<>();
+        definition.planItems().forEach(d -> instanceIdByDefKey.put(d.defKey(), CaseIds.newId()));
+
         return definition.planItems().stream()
-                .map(d -> new PlanItem(CaseIds.newId(), caseId, d.id(), d.type(), d.defKey(),
-                        PlanItemState.AVAILABLE, null, false, 1, null, null, null, 0L, now, now, null))
+                .map(d -> {
+                    String parentId = null;
+                    if (d.parentStageKey() != null) {
+                        parentId = instanceIdByDefKey.get(d.parentStageKey());
+                        if (parentId == null) {
+                            throw new IllegalArgumentException("Plan item '" + d.defKey()
+                                    + "' names parent stage '" + d.parentStageKey()
+                                    + "', which does not exist in definition " + definition.id());
+                        }
+                    }
+                    return new PlanItem(instanceIdByDefKey.get(d.defKey()), caseId, d.id(), d.type(),
+                            d.defKey(), PlanItemState.AVAILABLE, parentId, false, 1,
+                            null, null, null, 0L, now, now, null);
+                })
                 .toList();
     }
 
@@ -3193,9 +3217,32 @@ import java.util.List;
  */
 public class StageCompletion {
 
+    /**
+     * CMMN autocomplete semantics: a stage may complete only when no required child is
+     * unfinished AND no child is still ACTIVE.
+     *
+     * The tempting rule — "no required child unfinished AND some child has ended" — lets a
+     * stage complete in the very same evaluation pass that admits a sibling child beneath
+     * it, leaving a COMPLETED stage with a live ACTIVE child that nothing ever revisits.
+     * Requiring the absence of ACTIVE children makes that state unreachable by
+     * construction rather than by ordering luck.
+     */
     public boolean canComplete(CaseSnapshot snapshot, PlanItem stage) {
         return blockingItems(snapshot, stage).isEmpty()
-                && children(snapshot, stage).stream().anyMatch(c -> c.state().isEnded());
+                && children(snapshot, stage).stream()
+                        .noneMatch(c -> c.state() == PlanItemState.ACTIVE);
+    }
+
+    /**
+     * Children a completing stage must terminate: everything not yet started. They are
+     * emitted as real Transitions so the service layer persists them — never mutated
+     * silently. Because canComplete already excludes ACTIVE children, this never
+     * terminates work in progress.
+     */
+    public List<PlanItem> childrenToTerminateOnCompletion(CaseSnapshot snapshot, PlanItem stage) {
+        return children(snapshot, stage).stream()
+                .filter(c -> c.state() == PlanItemState.AVAILABLE || c.state() == PlanItemState.ENABLED)
+                .toList();
     }
 
     public List<PlanItem> blockingItems(CaseSnapshot snapshot, PlanItem stage) {
@@ -3246,7 +3293,13 @@ Then, inside `singlePass`, after the entry-criteria block and still within the `
             if (def.type() == PlanItemType.STAGE && item.state() == PlanItemState.ACTIVE
                     && stageCompletion.canComplete(snapshot, item)) {
                 transitions.add(new Transition(item.id(), PlanItemState.ACTIVE,
-                        PlanItemState.COMPLETED, "all required children ended"));
+                        PlanItemState.COMPLETED, "no required child unfinished, no child active"));
+                // Unstarted children die with the stage, and the terminations are reported
+                // so the service layer persists them.
+                for (PlanItem child : stageCompletion.childrenToTerminateOnCompletion(snapshot, item)) {
+                    transitions.add(new Transition(child.id(), child.state(),
+                            PlanItemState.TERMINATED, "parent stage completed"));
+                }
             }
 ```
 
