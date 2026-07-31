@@ -2733,19 +2733,25 @@ class PlanModelEvaluatorTest {
     }
 
     @Test
-    void mutuallyTriggeringCriteriaAreReportedNotSpun() {
-        // Two milestones whose criteria are satisfied by each other's non-completion:
-        // a modelling bug. It must fail loudly rather than loop forever.
-        CaseDefinition def = definition(
-                def("ping", PlanItemType.MILESTONE, null, false, false, true,
-                        List.of("${items.pong.state != 'COMPLETED'}"), List.of(), 10),
-                def("pong", PlanItemType.MILESTONE, null, false, false, true,
-                        List.of("${items.ping.state != 'COMPLETED'}"), List.of(), 20));
-        var snapshot = snapshot(def, List.of(
-                item("pi-ping", "ping", PlanItemType.MILESTONE, PlanItemState.AVAILABLE),
-                item("pi-pong", "pong", PlanItemType.MILESTONE, PlanItemState.AVAILABLE)), Map.of());
+    void loopGuardThrowsWhenTransitionsNeverSettle() {
+        // The cap CANNOT be reached by any real model: with a fixed item set the state
+        // machine is monotone — states only advance and ended items are skipped — so
+        // evaluation always settles within about two passes per item. (A model of two
+        // mutually-triggering milestones settles in two rounds and throws nothing.)
+        // The guard exists for a FUTURE change that breaks monotonicity, so the only
+        // honest way to test it is to force an endless transition stream through a seam.
+        var alwaysTransitions = new PlanModelEvaluator(new JuelCriterionEvaluator()) {
+            @Override
+            List<Transition> singlePass(CaseSnapshot snapshot) {
+                return List.of(new Transition("pi-1", PlanItemState.AVAILABLE,
+                        PlanItemState.ACTIVE, "never settles"));
+            }
+        };
+        CaseDefinition def = definition(def("task", PlanItemType.HUMAN_TASK));
+        var snapshot = snapshot(def, List.of(item("pi-1", "task", PlanItemType.HUMAN_TASK,
+                PlanItemState.AVAILABLE)), Map.of());
 
-        assertThatThrownBy(() -> evaluator.evaluate(snapshot))
+        assertThatThrownBy(() -> alwaysTransitions.evaluate(snapshot))
                 .isInstanceOf(PlanModelLoopException.class)
                 .hasMessageContaining("20");
     }
@@ -2779,11 +2785,19 @@ import java.util.List;
 
 public record CaseSnapshot(CaseInstance caseInstance, CaseDefinition definition, List<PlanItem> planItems) {
 
-    /** All runtime instances of a definition key, oldest first (repetition creates several). */
+    /**
+     * All runtime instances of a definition key, oldest first (repetition creates several).
+     *
+     * Ordered by repetitionNo, NOT by createdAt: repeat instances are stamped with
+     * independent OffsetDateTime.now() calls, so two created within the same clock tick
+     * would make latest() ambiguous — and every cross-item criterion reading
+     * items.<defKey>.state would then silently see whichever sorted last.
+     */
     public List<PlanItem> items(String defKey) {
         return planItems.stream()
-                .filter(i -> defKey.equals(i.name()) || defKey.equals(defKeyOf(i)))
-                .sorted(Comparator.comparing(PlanItem::createdAt))
+                .filter(i -> defKey.equals(defKeyOf(i)))
+                .sorted(Comparator.comparingInt(PlanItem::repetitionNo)
+                        .thenComparing(PlanItem::createdAt))
                 .toList();
     }
 
@@ -2908,8 +2922,10 @@ public class PlanModelEvaluator {
         List<Transition> transitions = new ArrayList<>();
         EvaluationContext context = contextOf(snapshot);
 
+        // defKey breaks sortOrder ties so evaluation order is total, not incidental.
         List<PlanItem> ordered = snapshot.planItems().stream()
-                .sorted(Comparator.comparingInt(i -> snapshot.definitionOf(i).sortOrder()))
+                .sorted(Comparator.comparingInt((PlanItem i) -> snapshot.definitionOf(i).sortOrder())
+                        .thenComparing(i -> snapshot.definitionOf(i).defKey()))
                 .toList();
 
         for (PlanItem item : ordered) {
@@ -2995,10 +3011,13 @@ git commit -m "feat(core): plan model evaluator with entry criteria and fixpoint
 - Create: `case-management-core/src/test/java/org/casemgmt/rules/StageCompletionTest.java`
 - Create: `case-management-core/src/test/java/org/casemgmt/rules/RepetitionTest.java`
 
+**Carried forward from Task 8's review (Important).** The evaluator never reads `parentStageId` / `parentStageKey`, so a child plan item activates regardless of its parent stage's state — a human task inside a stage that is still `ENABLED` and was never started goes `ACTIVE` anyway. The complaint model only survives this by duplicating the stage's entry criteria onto each child, which is fragile and not what CMMN containment means. **This task must fix it:** a plan item with a parent stage is only considered for entry while that stage is `ACTIVE`. Add `StageCompletion.isContained(CaseSnapshot, PlanItem) : boolean` (or an equivalent guard inside `singlePass`), and a test proving a child of an `ENABLED` stage stays `AVAILABLE` until the stage starts.
+
 **Interfaces:**
 - Consumes: everything from Task 8
 - Produces:
   - `StageCompletion.canComplete(CaseSnapshot, PlanItem stage) : boolean`
+  - `StageCompletion.isContained(CaseSnapshot, PlanItem item) : boolean` — false when the item's parent stage exists and is not `ACTIVE`
   - `StageCompletion.blockingItems(CaseSnapshot, PlanItem stage) : List<PlanItem>` — required items that are not ended, used by both the evaluator and the `409` message
   - `StageCompletion.caseCanClose(CaseSnapshot) : boolean` and `.caseBlockers(CaseSnapshot) : List<PlanItem>`
   - `PlanModelEvaluator.evaluate` additionally completes stages whose children are all ended, and re-instantiates repeatable items
