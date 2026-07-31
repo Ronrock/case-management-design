@@ -9963,7 +9963,17 @@ public class RemoteEngineAutoConfiguration {
             throw new IllegalStateException(
                     "casemgmt.engine.mode=remote requires casemgmt.engine.remote.base-url");
         }
-        RestClient.Builder builder = RestClient.builder().baseUrl(baseUrl);
+        // Timeouts are not optional here. Catching RestClientException handles an engine that
+        // REFUSES connections, but an engine that is up and hung answers nothing at all: without
+        // a read timeout the calling thread blocks forever, no exception is thrown, and the
+        // command outbox never gets to make its retry-versus-dead-letter decision.
+        var requestFactory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout((int) java.time.Duration.ofSeconds(5).toMillis());
+        requestFactory.setReadTimeout((int) java.time.Duration.ofSeconds(30).toMillis());
+
+        RestClient.Builder builder = RestClient.builder()
+                .baseUrl(baseUrl)
+                .requestFactory(requestFactory);
         if (props.getEngine().getRemote().getUsername() != null) {
             builder = builder.defaultHeaders(h -> h.setBasicAuth(
                     props.getEngine().getRemote().getUsername(),
