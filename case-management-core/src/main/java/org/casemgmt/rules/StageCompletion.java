@@ -4,7 +4,10 @@ import org.casemgmt.domain.PlanItem;
 import org.casemgmt.domain.PlanItemDefinition;
 import org.casemgmt.domain.PlanItemState;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * "Required" gating (spec §3.2): a stage cannot complete, and a case cannot close,
@@ -50,6 +53,24 @@ import java.util.List;
  * — see {@link #childrenToCascadeTerminate}, which (unlike {@link #childrenToTerminate})
  * includes ACTIVE children too, because an exit criterion is unconditional and does not wait
  * for work in flight the way autocomplete does.</p>
+ *
+ * <p><b>Two-level cascade left an orphan (Task 9 second re-review, Important):</b> the first
+ * cut of both {@link #childrenToTerminate} and {@link #childrenToCascadeTerminate} walked only
+ * <em>direct</em> children via {@code parentStageId}. Repro: stage --(exit criterion
+ * satisfied)--&gt; substage (ACTIVE) --&gt; grandchild (ACTIVE). The substage was correctly
+ * cascade-terminated, but the grandchild — contained by the substage, not by the top stage —
+ * was invisible to a one-level {@code children()} lookup and got no transition at all: ACTIVE
+ * beneath a TERMINATED parent beneath a TERMINATED grandparent. Exactly the orphan shape
+ * Critical 1 closed for autocomplete, reopened one level down by the new cascade, and the same
+ * shape applies to {@code childrenToTerminate} too (an unstarted substage swept up by
+ * autocomplete can itself have children left behind). Both methods now walk the WHOLE subtree
+ * transitively via the shared {@link #descendants} helper, not just direct children. Cycle
+ * protection: {@code descendants} descends with a visited-set and throws
+ * {@link IllegalStateException} if a plan item is reached twice in one walk — with a single
+ * {@code parentStageId} pointer per item, revisiting an id during a top-down walk from one
+ * root is only possible if {@code parentStageId} forms a genuine cycle (a malformed model),
+ * so failing loudly beats an infinite recursion / stack overflow on input a case definition
+ * author got wrong.</p>
  */
 public class StageCompletion {
 
@@ -81,37 +102,78 @@ public class StageCompletion {
     }
 
     /**
-     * AVAILABLE/ENABLED children left behind when {@code stage} completes. CMMN autocomplete
-     * discards leftover, never-started children by terminating them — never by silently
-     * dropping them — so the caller (today, {@link PlanModelEvaluator#singlePass}) must turn
-     * every one of these into a real TERMINATED {@link Transition} in the same round the
-     * stage completes. Because {@link #blockingItems} already excludes ACTIVE children from
-     * ever reaching a completing stage, this list can only ever contain AVAILABLE/ENABLED
-     * items — never ACTIVE ones.
+     * ALL not-yet-ended descendants of {@code stage} — children, grandchildren, and so on,
+     * transitively, via {@link #descendants} — left behind when {@code stage} completes.
+     * CMMN autocomplete discards leftover, never-started descendants by terminating them —
+     * never by silently dropping them — so the caller (today,
+     * {@link PlanModelEvaluator#singlePass}) must turn every one of these into a real
+     * TERMINATED {@link Transition} in the same round the stage completes.
+     *
+     * <p>Defensively excludes ACTIVE items rather than allow-listing AVAILABLE/ENABLED: by
+     * construction, none of these descendants can actually be ACTIVE — {@link #blockingItems}
+     * already refuses to let {@code stage} complete while any DIRECT child is ACTIVE, and since
+     * plan item states only ever move forward (never backward) and containment
+     * ({@link #isContained}) refuses entry to a child whose parent isn't ACTIVE, an
+     * unstarted (AVAILABLE/ENABLED) direct child can never have an ACTIVE descendant of its
+     * own — its own children could only have entered while it was ACTIVE, which it never was.
+     * The explicit exclusion is a safety net against that invariant being violated by a future
+     * change, not something expected to ever trigger today.
      */
     public List<PlanItem> childrenToTerminate(CaseSnapshot snapshot, PlanItem stage) {
-        return children(snapshot, stage).stream()
-                .filter(c -> c.state() == PlanItemState.AVAILABLE || c.state() == PlanItemState.ENABLED)
+        return descendants(snapshot, stage).stream()
+                .filter(c -> c.state() != PlanItemState.ACTIVE)
                 .toList();
     }
 
     /**
-     * ALL of a stage's not-yet-ended children — AVAILABLE, ENABLED, or ACTIVE — used when
-     * the stage itself terminates via its own exit criterion rather than autocompleting.
-     * Unlike {@link #childrenToTerminate}, this deliberately includes ACTIVE children: an
-     * exit criterion is an unconditional, author-stated signal (spec §3.2) that fires
-     * regardless of what the stage's children are doing, so termination must cascade to all
-     * of them or a TERMINATED stage could be left with a live ACTIVE child that nothing ever
-     * revisits — the same orphan shape Critical 1 closed for the COMPLETED case, but exit
-     * criteria cannot rely on {@link #blockingItems} to make it structurally unreachable
-     * (exit ignores blocking entirely; that's the whole point of it being a stronger signal).
-     * Cascades one level only — a nested stage among these children is itself terminated, but
-     * its own children are not recursively visited by this method.
+     * ALL not-yet-ended descendants of {@code stage} — children, grandchildren, and so on,
+     * transitively, via {@link #descendants} — used when the stage itself terminates via its
+     * own exit criterion rather than autocompleting. Unlike {@link #childrenToTerminate}, this
+     * deliberately includes ACTIVE descendants at any depth: an exit criterion is an
+     * unconditional, author-stated signal (spec §3.2) that fires regardless of what the
+     * stage's subtree is doing, so termination must cascade all the way down or a TERMINATED
+     * stage could be left with a live ACTIVE descendant that nothing ever revisits — the same
+     * orphan shape Critical 1 closed for the COMPLETED case, but exit criteria cannot rely on
+     * {@link #blockingItems} to make it structurally unreachable (exit ignores blocking
+     * entirely; that's the whole point of it being a stronger signal).
      */
     public List<PlanItem> childrenToCascadeTerminate(CaseSnapshot snapshot, PlanItem stage) {
-        return children(snapshot, stage).stream()
-                .filter(c -> !c.state().isEnded())
-                .toList();
+        return descendants(snapshot, stage);
+    }
+
+    /**
+     * All not-yet-ended plan items in the subtree rooted at (but not including) {@code stage},
+     * found by repeatedly following {@code parentStageId} down through as many levels as exist
+     * — children, grandchildren, and so on. Already-ended descendants are left out of the
+     * result (nothing to terminate), but the walk still passes through them to look for any
+     * live descendants further down.
+     *
+     * <p>Cycle guard: {@code visited} is seeded with {@code stage}'s own id and accumulates
+     * across the whole walk (not reset per branch). Because every {@link PlanItem} has exactly
+     * one {@code parentStageId}, a normal (acyclic) model can never revisit the same id from a
+     * single root — if this method ever finds an id already in {@code visited}, that means
+     * {@code parentStageId} links form an actual cycle (a malformed model; case definitions
+     * are deployed over the API by other teams). Rather than recurse forever or overflow the
+     * stack, it fails loudly with {@link IllegalStateException} naming the repeated id.
+     */
+    private List<PlanItem> descendants(CaseSnapshot snapshot, PlanItem stage) {
+        return descendants(snapshot, stage, new HashSet<>(List.of(stage.id())));
+    }
+
+    private List<PlanItem> descendants(CaseSnapshot snapshot, PlanItem stage, Set<String> visited) {
+        List<PlanItem> result = new ArrayList<>();
+        for (PlanItem child : children(snapshot, stage)) {
+            if (!visited.add(child.id())) {
+                throw new IllegalStateException("Cycle detected in parentStageId: plan item '"
+                        + child.id() + "' is its own ancestor (reached again while descending from '"
+                        + stage.id() + "')");
+            }
+            if (!child.state().isEnded()) {
+                result.add(child);
+            }
+            result.addAll(descendants(snapshot, child, visited));
+        }
+        return result;
     }
 
     public boolean caseCanClose(CaseSnapshot snapshot) {

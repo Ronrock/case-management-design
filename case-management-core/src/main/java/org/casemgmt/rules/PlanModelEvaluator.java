@@ -84,10 +84,11 @@ public class PlanModelEvaluator {
                 .map(PlanItem::id)
                 .collect(Collectors.toSet());
 
-        // Exit is unconditional, so it cascades to ALL of a terminating stage's remaining
-        // children, including ACTIVE ones (unlike autocomplete's childrenToTerminate) — see
-        // StageCompletion.childrenToCascadeTerminate for why leaving an ACTIVE child behind
-        // here would recreate the orphan shape Critical 1 fixed for COMPLETED stages.
+        // Exit is unconditional, so it cascades to the ENTIRE remaining subtree beneath a
+        // terminating stage — children, grandchildren, and so on — including ACTIVE items
+        // (unlike autocomplete's childrenToTerminate). See StageCompletion.descendants for
+        // why this must walk the whole subtree, not just direct children: a one-level walk
+        // left a grandchild orphaned (Task 9 second re-review, Important).
         Set<String> cascadeTerminatedIds = terminatingStages.stream()
                 .flatMap(stage -> stageCompletion.childrenToCascadeTerminate(snapshot, stage).stream())
                 .map(PlanItem::id)
@@ -108,9 +109,9 @@ public class PlanModelEvaluator {
                 .map(PlanItem::id)
                 .collect(Collectors.toSet());
 
-        // Leftover AVAILABLE/ENABLED children of a completing stage are claimed for
-        // termination here, before the main loop runs, so they are never independently
-        // considered for entry below.
+        // Leftover unstarted descendants of a completing stage — at any depth, not just
+        // direct children — are claimed for termination here, before the main loop runs, so
+        // they are never independently considered for entry below.
         Set<String> claimedForTermination = completingStages.stream()
                 .flatMap(stage -> stageCompletion.childrenToTerminate(snapshot, stage).stream())
                 .map(PlanItem::id)

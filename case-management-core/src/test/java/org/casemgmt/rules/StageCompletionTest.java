@@ -286,4 +286,127 @@ class StageCompletionTest {
             assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
         });
     }
+
+    // --- Task 9 second re-review, Important: a one-level cascade orphaned a grandchild.
+    // Both termination paths must walk the whole subtree, not just direct children. ---
+
+    @Test
+    void exitTerminationCascadesThroughTwoLevelsToAGrandchild() {
+        // Reviewer's exact repro: stage --(exit criterion satisfied)--> substage (ACTIVE)
+        // --> grandchild (ACTIVE). A one-level cascade correctly terminated the substage but
+        // left the grandchild ACTIVE beneath a TERMINATED parent beneath a TERMINATED
+        // grandparent — precisely the orphan shape Critical 1 closed for autocomplete,
+        // reopened one level down.
+        CaseDefinition def = definition(
+                def("stage", PlanItemType.STAGE, null, false, false, false,
+                        List.of(), List.of("${vars.abort == true}"), 10),
+                def("substage", PlanItemType.STAGE, "stage", false, false, false,
+                        List.of(), List.of(), 20),
+                def("grandchild", PlanItemType.HUMAN_TASK, "substage", false, false, false,
+                        List.of(), List.of(), 30));
+        var snapshot = snapshot(def, List.of(
+                item("pi-stage", "stage", PlanItemType.STAGE, PlanItemState.ACTIVE),
+                item("pi-substage", "substage", PlanItemType.STAGE, PlanItemState.ACTIVE, "pi-stage"),
+                item("pi-grandchild", "grandchild", PlanItemType.HUMAN_TASK, PlanItemState.ACTIVE, "pi-substage")),
+                Map.of("abort", true));
+
+        List<Transition> transitions = evaluator.evaluate(snapshot);
+
+        assertThat(transitions).hasSize(3);
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-stage");
+            assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
+            assertThat(t.reason()).isEqualTo("exit criterion met");
+        });
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-substage");
+            assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
+            assertThat(t.reason()).isEqualTo("parent stage terminated");
+        });
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-grandchild");
+            assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
+            assertThat(t.reason()).isEqualTo("parent stage terminated");
+        });
+    }
+
+    @Test
+    void autocompleteCascadesThroughTwoLevelsToTerminateUnstartedDescendants() {
+        // Equivalent three-level case for the autocomplete path: an unstarted substage swept
+        // up by a completing stage can itself have an unstarted grandchild that must also be
+        // terminated, not left behind.
+        CaseDefinition def = definition(
+                def("stage", PlanItemType.STAGE, null, false, false, false, List.of(), List.of(), 10),
+                def("required", PlanItemType.HUMAN_TASK, "stage", false, true, false,
+                        List.of(), List.of(), 20),
+                def("substage", PlanItemType.STAGE, "stage", false, false, false,
+                        List.of(), List.of(), 30),
+                def("grandchild", PlanItemType.HUMAN_TASK, "substage", false, false, false,
+                        List.of(), List.of(), 40));
+        var snapshot = snapshot(def, List.of(
+                item("pi-stage", "stage", PlanItemType.STAGE, PlanItemState.ACTIVE),
+                item("pi-req", "required", PlanItemType.HUMAN_TASK, PlanItemState.COMPLETED, "pi-stage"),
+                item("pi-substage", "substage", PlanItemType.STAGE, PlanItemState.AVAILABLE, "pi-stage"),
+                item("pi-grandchild", "grandchild", PlanItemType.HUMAN_TASK, PlanItemState.AVAILABLE, "pi-substage")),
+                Map.of());
+
+        List<Transition> transitions = evaluator.evaluate(snapshot);
+
+        assertThat(transitions).hasSize(3);
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-stage");
+            assertThat(t.to()).isEqualTo(PlanItemState.COMPLETED);
+        });
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-substage");
+            assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
+            assertThat(t.reason()).isEqualTo("parent stage completed");
+        });
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-grandchild");
+            assertThat(t.to()).isEqualTo(PlanItemState.TERMINATED);
+            assertThat(t.reason()).isEqualTo("parent stage completed");
+        });
+    }
+
+    @Test
+    void cascadeLeavesAnAlreadyEndedDescendantAloneRatherThanReTerminatingIt() {
+        // Depth-3 chain where the deepest item is already COMPLETED: the cascade must not
+        // re-touch it, even though the walk passes through its (also cascading) parent.
+        CaseDefinition def = definition(
+                def("stage", PlanItemType.STAGE, null, false, false, false,
+                        List.of(), List.of("${vars.abort == true}"), 10),
+                def("substage", PlanItemType.STAGE, "stage", false, false, false,
+                        List.of(), List.of(), 20),
+                def("grandchild", PlanItemType.HUMAN_TASK, "substage", false, false, false,
+                        List.of(), List.of(), 30));
+        var snapshot = snapshot(def, List.of(
+                item("pi-stage", "stage", PlanItemType.STAGE, PlanItemState.ACTIVE),
+                item("pi-substage", "substage", PlanItemType.STAGE, PlanItemState.ACTIVE, "pi-stage"),
+                item("pi-grandchild", "grandchild", PlanItemType.HUMAN_TASK, PlanItemState.COMPLETED, "pi-substage")),
+                Map.of("abort", true));
+
+        List<Transition> transitions = evaluator.evaluate(snapshot);
+
+        assertThat(transitions).hasSize(2);
+        assertThat(transitions).extracting(Transition::planItemId)
+                .containsExactlyInAnyOrder("pi-stage", "pi-substage");
+        assertThat(transitions).noneMatch(t -> "pi-grandchild".equals(t.planItemId()));
+    }
+
+    @Test
+    void descendantWalkFailsLoudlyOnACycleInParentStageId() {
+        // A malformed model could in principle link parentStageId in a cycle. Rather than
+        // recurse forever or overflow the stack, the walk must fail loudly.
+        CaseDefinition def = definition(
+                def("a", PlanItemType.STAGE),
+                def("b", PlanItemType.STAGE));
+        PlanItem a = item("pi-a", "a", PlanItemType.STAGE, PlanItemState.ACTIVE, "pi-b");
+        PlanItem b = item("pi-b", "b", PlanItemType.STAGE, PlanItemState.ACTIVE, "pi-a");
+        var snapshot = snapshot(def, List.of(a, b), Map.of());
+
+        assertThatThrownBy(() -> completion.childrenToCascadeTerminate(snapshot, a))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Cycle");
+    }
 }
