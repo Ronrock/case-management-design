@@ -29,6 +29,7 @@ public class PlanModelEvaluator {
     public static final int MAX_ITERATIONS = 20;
 
     private final CriterionEvaluator criteria;
+    private final StageCompletion stageCompletion = new StageCompletion();
 
     public PlanModelEvaluator(CriterionEvaluator criteria) {
         this.criteria = criteria;
@@ -79,9 +80,16 @@ public class PlanModelEvaluator {
                 continue;
             }
             if (item.state() == PlanItemState.AVAILABLE
+                    && stageCompletion.isContained(snapshot, item)
                     && criteria.allMatch(def.entryCriteria(), context)) {
                 transitions.add(new Transition(item.id(), PlanItemState.AVAILABLE,
                         targetOnEntry(def), "entry criterion met"));
+            }
+
+            if (def.type() == PlanItemType.STAGE && item.state() == PlanItemState.ACTIVE
+                    && stageCompletion.canComplete(snapshot, item)) {
+                transitions.add(new Transition(item.id(), PlanItemState.ACTIVE,
+                        PlanItemState.COMPLETED, "all required children ended"));
             }
         }
         return transitions;
@@ -132,5 +140,29 @@ public class PlanModelEvaluator {
                 .map(i -> byId.containsKey(i.id()) ? i.withState(byId.get(i.id())) : i)
                 .toList();
         return snapshot.withPlanItems(updated);
+    }
+
+    /**
+     * Definition keys that should get a fresh AVAILABLE instance: repeatable items whose
+     * latest instance has just ended and whose entry criteria still hold.
+     *
+     * Repetition is handled here as a pure query rather than inside singlePass/apply
+     * because it creates a new row rather than moving an existing one — instantiating the
+     * PlanItem (and persisting it) is the service layer's job (see the class-level
+     * invariant that this evaluator creates nothing). The service calls this after
+     * applying a round's transitions and, for every definition returned, calls
+     * {@link PlanModelInstantiator#repeat(PlanItem, PlanItemDefinition)} on the latest
+     * instance before re-evaluating.
+     */
+    public List<PlanItemDefinition> repeatable(CaseSnapshot snapshot) {
+        EvaluationContext context = contextOf(snapshot);
+        return snapshot.definition().planItems().stream()
+                .filter(PlanItemDefinition::repetition)
+                .filter(def -> {
+                    PlanItem latest = snapshot.latest(def.defKey());
+                    return latest != null && latest.state().isEnded();
+                })
+                .filter(def -> criteria.allMatch(def.entryCriteria(), context))
+                .toList();
     }
 }
