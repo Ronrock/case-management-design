@@ -150,4 +150,46 @@ class BusinessCalendarTest {
         OffsetDateTime insideHours = at(2026, 8, 6, 10, 0);
         assertThat(calendar().addDuration(insideHours, Duration.ZERO)).isEqualTo(insideHours);
     }
+
+    @Test
+    void rejectsOverlappingIntervalsOnTheSameDay() {
+        // 09:00-13:00 and 11:00-17:00 overlap by 2h. Left unrejected, addDuration's
+        // per-interval loop counts that overlap twice, deflating the true 8h window
+        // (09:00-17:00) to a computed 10h and returning due dates that are too early.
+        Map<String, Object> morning = Map.of("from", "09:00", "to", "13:00");
+        Map<String, Object> afternoon = Map.of("from", "11:00", "to", "17:00");
+        Map<String, Object> definition = Map.of(
+                "timezone", "Europe/Amsterdam",
+                "workingHours", Map.of("WEDNESDAY", List.of(morning, afternoon)));
+
+        assertThatThrownBy(() -> BusinessCalendar.fromJson(definition))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("WEDNESDAY")
+                .hasMessageContaining("09:00")
+                .hasMessageContaining("13:00")
+                .hasMessageContaining("11:00")
+                .hasMessageContaining("17:00");
+    }
+
+    @Test
+    void allowsAbuttingIntervalsOnTheSameDay() {
+        // 09:00-12:00 and 12:00-17:00 touch at noon but do not overlap: a legitimate
+        // way to express a day with a nominal lunch boundary that isn't actually a
+        // break. The half-open interval convention (from inclusive, to exclusive)
+        // means these compose into one continuous 8h working window.
+        Map<String, Object> morning = Map.of("from", "09:00", "to", "12:00");
+        Map<String, Object> afternoon = Map.of("from", "12:00", "to", "17:00");
+        BusinessCalendar abutting = BusinessCalendar.fromJson(Map.of(
+                "timezone", "Europe/Amsterdam",
+                "workingHours", Map.of("WEDNESDAY", List.of(morning, afternoon))));
+
+        // Wednesday 2026-08-05, 09:00 + 5h crosses the noon boundary and must land at
+        // 14:00, not be shortchanged by treating the boundary as a gap.
+        assertThat(abutting.addDuration(at(2026, 8, 5, 9, 0), Duration.ofHours(5)))
+                .isEqualTo(at(2026, 8, 5, 14, 0));
+
+        // The full day is one continuous 8h window: 09:00 + 8h = 17:00.
+        assertThat(abutting.addDuration(at(2026, 8, 5, 9, 0), Duration.ofHours(8)))
+                .isEqualTo(at(2026, 8, 5, 17, 0));
+    }
 }

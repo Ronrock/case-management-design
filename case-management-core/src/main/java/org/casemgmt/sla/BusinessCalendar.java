@@ -39,11 +39,14 @@ public class BusinessCalendar {
 
         Map<DayOfWeek, List<Interval>> hours = new EnumMap<>(DayOfWeek.class);
         Map<String, Object> raw = (Map<String, Object>) definition.getOrDefault("workingHours", Map.of());
-        raw.forEach((day, intervals) -> hours.put(parseDay(day),
-                ((List<Map<String, String>>) intervals).stream()
-                        .map(i -> parseInterval(day, i))
-                        .sorted(Comparator.comparing(Interval::from))
-                        .toList()));
+        raw.forEach((day, intervals) -> {
+            List<Interval> sorted = ((List<Map<String, String>>) intervals).stream()
+                    .map(i -> parseInterval(day, i))
+                    .sorted(Comparator.comparing(Interval::from))
+                    .toList();
+            checkNoOverlaps(day, sorted);
+            hours.put(parseDay(day), sorted);
+        });
 
         Set<LocalDate> holidays = new HashSet<>();
         ((List<String>) definition.getOrDefault("holidays", List.of()))
@@ -87,6 +90,22 @@ public class BusinessCalendar {
                             + "meaningless; fix the calendar document");
         }
         return new Interval(from, to);
+    }
+
+    private static void checkNoOverlaps(String day, List<Interval> sorted) {
+        for (int i = 1; i < sorted.size(); i++) {
+            Interval previous = sorted.get(i - 1);
+            Interval current = sorted.get(i);
+            if (current.from().isBefore(previous.to())) {
+                throw new IllegalArgumentException(
+                        "Calendar definition workingHours." + day + " has overlapping intervals ["
+                                + previous.from() + ", " + previous.to() + "] and [" + current.from() + ", "
+                                + current.to() + "] — addDuration would count the overlap twice and "
+                                + "compute a shorter working window than the calendar actually specifies; "
+                                + "fix the calendar document. Abutting intervals that only touch (e.g. "
+                                + "[09:00, 12:00] and [12:00, 17:00]) are fine and are not rejected.");
+            }
+        }
     }
 
     public boolean isWorking(OffsetDateTime at) {
