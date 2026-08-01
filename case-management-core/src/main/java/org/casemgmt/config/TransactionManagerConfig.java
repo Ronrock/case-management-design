@@ -46,6 +46,19 @@ import javax.sql.DataSource;
  * application context. {@code org.casemgmt.OracleTestBase#springContext} does the same on a much
  * smaller scale for persistence tests that need to prove an {@code @Transactional} method
  * genuinely commits and rolls back (see {@code TransactionManagerTest}).
+ *
+ * <p><b>Warning for every {@code @Transactional} service Tasks 14/15/18/19 write:</b> this is
+ * proxy-based transaction management (the default {@code EnableTransactionManagement} mode, and
+ * the only mode this module has the dependencies for). The proxy intercepts calls that arrive
+ * from OUTSIDE the bean. A method that calls {@code this.someTransactionalMethod(...)} — plain
+ * self-invocation, not going through the Spring-managed bean reference — bypasses the proxy
+ * entirely, and the annotation on the called method is silently ignored: no new transaction, no
+ * join, no rollback, exactly the "annotation present but inert" failure mode this class exists
+ * to eliminate at the top level. Confirmed directly: a self-invoked {@code @Transactional} method
+ * that inserted a row and then threw left that row committed anyway. If a service needs one
+ * {@code @Transactional} method to call another on the same bean, either call through an injected
+ * self-reference (an {@code ObjectProvider<Self>} or a second bean) or restructure so the
+ * transactional boundary is only ever entered from outside the class.
  */
 @Configuration
 @EnableTransactionManagement

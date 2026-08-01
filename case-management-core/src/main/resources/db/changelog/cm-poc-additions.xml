@@ -30,6 +30,30 @@
     </createIndex>
   </changeSet>
 
+  <!-- Task 13 review round 2: claimDue's original SELECT ... FOR UPDATE SKIP LOCKED never
+       mutated any row, so two claims with no markDone/markRetry between them returned the same
+       row every time - the FOR UPDATE lock is released the instant the single autocommitted
+       SELECT statement completes, long before the engine call or the status update that was
+       meant to follow it. Fixed with claim-by-UPDATE (see EngineCommandRepository.claimDue):
+       these two columns let a claiming UPDATE mark rows atomically as this dispatcher's, and
+       let a claim whose dispatcher died mid-flight be recognised as stale and reclaimed rather
+       than stranded forever. A new changeset, not an edit to cm-poc-engine-command above, per
+       Liquibase convention: already-applied changesets are immutable. -->
+  <changeSet id="cm-poc-engine-command-claim" author="casemgmt">
+    <addColumn tableName="CM_ENGINE_COMMAND">
+      <column name="CLAIM_TOKEN_" type="VARCHAR2(64)"/>
+      <column name="CLAIMED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <sql>ALTER TABLE CM_ENGINE_COMMAND DROP CONSTRAINT CK_CM_ENGCMD_STATUS</sql>
+    <sql>
+      ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT CK_CM_ENGCMD_STATUS
+        CHECK (STATUS_ IN ('PENDING','RETRYING','CLAIMED','DONE','DEAD'))
+    </sql>
+    <createIndex tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_CLAIM">
+      <column name="CLAIM_TOKEN_"/>
+    </createIndex>
+  </changeSet>
+
   <changeSet id="cm-poc-engine-sync-columns" author="casemgmt">
     <addColumn tableName="CM_TASK">
       <column name="ENGINE_SYNC_" type="VARCHAR2(20)" defaultValue="SYNCED">
