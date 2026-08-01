@@ -1,5 +1,6 @@
 package org.casemgmt;
 
+import com.zaxxer.hikari.HikariDataSource;
 import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
@@ -8,11 +9,12 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.testcontainers.oracle.OracleContainer;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.List;
 
 // No @Testcontainers/@Container here on purpose. That extension manages a *per-class-instance*
@@ -31,7 +33,16 @@ public abstract class OracleTestBase {
                     .withPassword("cm")
                     .withReuse(true);
 
-    private static DataSource dataSource;
+    // Pooled rather than a plain DriverManagerDataSource: the schema-reset hooks below run
+    // from every extending class's @BeforeEach (every test method) and @AfterAll, and Tasks
+    // 4-6 add roughly ten more classes on top of this base. Each unpooled DriverManager
+    // connection is a fresh physical TNS connect+logon; at the volume ~10 classes' worth of
+    // per-test cleanup produces, that reliably exhausts the listener's protocol handlers
+    // (ORA-12516) - reproduced directly: a tight loop of raw unpooled connections hit the
+    // same error, while pacing connections out did not, confirming it is connection churn,
+    // not elapsed time. A small Hikari pool (already on the classpath via
+    // spring-boot-starter-jdbc) reuses a handful of physical connections instead.
+    private static HikariDataSource dataSource;
 
     // Captures a startup/migration failure instead of letting it escape the static
     // initializer. A Throwable escaping <clinit> makes the JVM record this class as
@@ -48,11 +59,22 @@ public abstract class OracleTestBase {
     static {
         try {
             ORACLE.start();
-            DriverManagerDataSource ds = new DriverManagerDataSource(
-                    ORACLE.getJdbcUrl(), ORACLE.getUsername(), ORACLE.getPassword());
+            HikariDataSource ds = new HikariDataSource();
+            ds.setJdbcUrl(ORACLE.getJdbcUrl());
+            ds.setUsername(ORACLE.getUsername());
+            ds.setPassword(ORACLE.getPassword());
             ds.setDriverClassName("oracle.jdbc.OracleDriver");
+            ds.setPoolName("OracleTestBasePool");
+            // A handful is plenty: this pool only ever serves one JVM's worth of sequential
+            // test execution, never concurrent load.
+            ds.setMaximumPoolSize(5);
             dataSource = ds;
             migrate(ds);
+            // The pool has no natural close() call site otherwise: dataSource is a static
+            // field with no owning test instance to tie a teardown to. Closing it here means
+            // it releases its physical connections before Ryuk removes the container, rather
+            // than leaking connections until the JVM's own exit tears the socket down anyway.
+            Runtime.getRuntime().addShutdownHook(new Thread(ds::close, "OracleTestBasePool-close"));
         } catch (Throwable t) {
             startupFailure = t;
         }
@@ -106,10 +128,16 @@ public abstract class OracleTestBase {
     // @BeforeEach/@AfterAll above, in FK-safe (child-before-parent) order derived once here
     // from db-design.sql's foreign keys, instead of being re-derived - and re-risked - by
     // every later task. Static (not protected-instance-only) so the static @AfterAll above can
-    // call it directly. Deliberately DELETE, not TRUNCATE: row counts per test are tiny, and
-    // DELETE keeps the statement list simple to reason about without needing to fight
-    // referential-integrity ordering rules that TRUNCATE enforces more strictly across a whole
-    // batch.
+    // call it directly, and so no subclass can bypass it. Deliberately DELETE, not TRUNCATE:
+    // row counts per test are tiny, and DELETE keeps the statement list simple to reason about
+    // without needing to fight referential-integrity ordering rules that TRUNCATE enforces
+    // more strictly across a whole batch.
+    //
+    // Runs all 26 deletes over ONE borrowed connection, as one JDBC batch, rather than one
+    // connection per table: independent of pooling, this is strictly less load per call (one
+    // borrow/return instead of 26) and faster, and it is what actually eliminates the bulk of
+    // the connection churn this method used to cause on every single test method across every
+    // extending class.
     private static void deleteAllCaseManagementData() {
         List<String> tablesChildToParent = List.of(
                 "CM_TASK",
@@ -138,9 +166,14 @@ public abstract class OracleTestBase {
                 "CM_SAVED_FILTER",
                 "CM_IDEMPOTENCY_KEY",
                 "CM_AUDIT_LOG");
-        JdbcClient client = JdbcClient.create(dataSource);
-        for (String table : tablesChildToParent) {
-            client.sql("DELETE FROM " + table).update();
+        try (Connection c = dataSource.getConnection();
+             Statement stmt = c.createStatement()) {
+            for (String table : tablesChildToParent) {
+                stmt.addBatch("DELETE FROM " + table);
+            }
+            stmt.executeBatch();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to reset schema between tests", e);
         }
     }
 }
