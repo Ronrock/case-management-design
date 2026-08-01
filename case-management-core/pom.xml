@@ -15,6 +15,18 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-jdbc</artifactId>
     </dependency>
+    <!-- Task 13 prerequisite: spring-boot-starter-jdbc brings spring-tx (the @Transactional
+         annotation and PlatformTransactionManager SPI) but NOT spring-context or spring-aop —
+         those are what actually create the AOP proxy that intercepts an @Transactional call and
+         opens/commits/rolls back a real transaction. Without this, @EnableTransactionManagement
+         and @Configuration processing are unavailable and @Transactional stays a silent no-op,
+         exactly the gap Task 5 found. No version pinned here: managed by the spring-boot BOM
+         already imported (see dependencyManagement comment above spring-boot-starter-jdbc),
+         so this resolves to the same Spring version (7.0.8) as spring-tx/spring-jdbc. -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.liquibase</groupId>
       <artifactId>liquibase-core</artifactId>

@@ -5,9 +5,11 @@ import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.casemgmt.config.TransactionManagerConfig;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.testcontainers.oracle.OracleContainer;
 
@@ -121,6 +123,48 @@ public abstract class OracleTestBase {
 
     protected JdbcClient jdbc() {
         return JdbcClient.create(dataSource);
+    }
+
+    /**
+     * Builds a minimal Spring context for tests that need a genuine
+     * {@code @Transactional}-capable bean (Task 13's prerequisite — see
+     * {@link TransactionManagerConfig}) rather than the plain {@code JdbcClient}/{@code
+     * DataSource} every other repository test in this module uses directly.
+     *
+     * <p>Deliberately NOT built once and shared statically the way {@link #ORACLE} and
+     * {@link #dataSource} are: unlike the container, an {@code AnnotationConfigApplicationContext}
+     * is cheap to build and tear down (no process, no network handshake, no migration) and each
+     * caller typically wants a different set of {@code @Transactional} beans registered — sharing
+     * one context across test classes would mean either registering every caller's beans into a
+     * single context (coupling unrelated tests' bean definitions together) or fighting Spring
+     * over re-registering beans after refresh. Building one per test class keeps registration
+     * simple: call this from a {@code @BeforeEach}, close the returned context from the matching
+     * {@code @AfterEach}. The {@link DataSource} bean wired in is the SAME pooled Hikari instance
+     * every other test in the JVM uses — this opens no second connection pool and starts no
+     * second container.
+     *
+     * @param componentClasses additional {@code @Configuration}/{@code @Component} classes to
+     *                         register alongside {@link TransactionManagerConfig} — typically a
+     *                         test-local class with one or more {@code @Transactional} methods.
+     */
+    protected static AnnotationConfigApplicationContext springContext(Class<?>... componentClasses) {
+        var ctx = new AnnotationConfigApplicationContext();
+        // setDestroyMethodName("") is load-bearing, not decoration: Spring infers a "(inferred)"
+        // destroy method for any singleton whose type exposes close()/shutdown(), and
+        // HikariDataSource exposes close(). Without disabling that inference, closing THIS
+        // per-test context (as every caller's @AfterEach is expected to do) calls close() on the
+        // shared static pool every other test class in the JVM depends on - confirmed by running
+        // this: it killed OracleTestBasePool and broke every subsequent test in the same JVM run
+        // with "HikariDataSource has been closed". The pool's own lifecycle is already owned by
+        // OracleTestBase's shutdown hook (see the static initializer above); this context must
+        // never touch it.
+        ctx.registerBean(DataSource.class, () -> dataSource, bd -> bd.setDestroyMethodName(""));
+        ctx.register(TransactionManagerConfig.class);
+        if (componentClasses.length > 0) {
+            ctx.register(componentClasses);
+        }
+        ctx.refresh();
+        return ctx;
     }
 
     // All CM_ tables share one schema for the JVM's whole lifetime (see class comment). This

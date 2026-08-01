@@ -163,10 +163,36 @@ public class CaseTaskRepository {
                 t.dueAt(), t.outcome(), t.engineSync(), expectedVersion + 1, t.createdAt(), updatedAt, completedAt);
     }
 
+    /**
+     * Records the engine's confirmation of a task, either directly (embedded mode) or via the
+     * command dispatcher (remote mode, Task 13's outbox). First-writer-wins on
+     * {@code CAMUNDA_TASK_ID_}: once bound to a non-null engine id, later calls never change it,
+     * even when {@code engineTaskId} is a different non-null value.
+     *
+     * <p>This closes a gap the Task 6 review carried forward: the outbox dispatcher delivers
+     * commands at-least-once (see {@code EngineCommandDispatcher}) and there is no expected-value
+     * to compare against at an async callback site (unlike {@link #update}, which has a version
+     * number to guard with) — a crash between the remote engine call succeeding and the command
+     * being marked {@code DONE} makes the SAME command eligible to be claimed and executed again,
+     * calling {@code createHumanTask} a second time against the real engine and reporting a
+     * SECOND engine id here. Without a guard, {@code COALESCE(:engineTaskId, CAMUNDA_TASK_ID_)}
+     * would happily overwrite the first (correct) engine id with the second, orphaning the first
+     * engine task with nothing in CM_TASK pointing at it any more — exactly the failure the
+     * reviewer flagged. Reversing the COALESCE arguments makes the column idempotent: the first
+     * engine id this task is ever told about is the one it keeps.
+     *
+     * <p>This does NOT prevent the duplicate engine task from being created remotely in the first
+     * place — that needs an idempotency key on the engine call itself (e.g. a business key derived
+     * from the command id), which is a bigger change to {@code EngineGateway.createHumanTask}'s
+     * contract than this task's scope. What this guard guarantees is narrower but still real:
+     * CM_TASK never loses track of the engine task it is actually meant to represent, so the
+     * worklist and claim/complete paths stay pointed at a consistent engine id even if a
+     * duplicate command execution happens.
+     */
     public void markSync(String taskId, CaseTask.EngineSync sync, String engineTaskId) {
         jdbc.sql("""
                 UPDATE CM_TASK SET ENGINE_SYNC_ = :sync,
-                    CAMUNDA_TASK_ID_ = COALESCE(:engineTaskId, CAMUNDA_TASK_ID_),
+                    CAMUNDA_TASK_ID_ = COALESCE(CAMUNDA_TASK_ID_, :engineTaskId),
                     UPDATED_AT_ = SYSTIMESTAMP
                 WHERE ID_ = :id""")
             .param("sync", sync.name()).param("engineTaskId", engineTaskId).param("id", taskId)

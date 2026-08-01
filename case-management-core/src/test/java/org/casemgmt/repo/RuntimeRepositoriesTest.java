@@ -168,6 +168,26 @@ class RuntimeRepositoriesTest extends OracleTestBase {
     }
 
     @Test
+    void markSyncIsFirstWriterWinsOnCamundaTaskIdUnderDuplicateRedelivery() {
+        // Task 13's outbox dispatcher retries at-least-once. If the same CREATE_TASK command
+        // is executed twice (e.g. a crash between the remote call succeeding and the command
+        // being marked DONE), markSync gets called twice for the same CM_TASK row with two
+        // DIFFERENT engine ids. The first engine id is the one CM_TASK must keep: overwriting
+        // it would orphan the first (real) engine task with nothing pointing at it any more.
+        planItems.insert(item("pi-idem", PlanItemState.ACTIVE));
+        tasks.insert(new CaseTask("t-idem", "eng-a:1", "pi-idem", null, "Review", null,
+                TaskState.OPEN, null, null, List.of(), null, 50, null, null,
+                CaseTask.EngineSync.PENDING, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null));
+
+        tasks.markSync("t-idem", CaseTask.EngineSync.SYNCED, "engine-task-first");
+        tasks.markSync("t-idem", CaseTask.EngineSync.SYNCED, "engine-task-second-duplicate");
+
+        CaseTask loaded = tasks.require("t-idem");
+        assertThat(loaded.engineTaskId()).isEqualTo("engine-task-first");
+        assertThat(loaded.engineSync()).isEqualTo(CaseTask.EngineSync.SYNCED);
+    }
+
+    @Test
     void participantRolesAreResolvedForUserAndGroups() {
         participants.insert("p-1", "eng-a:1", "alice", null, "owner");
         participants.insert("p-2", "eng-a:1", null, "reviewers", "reviewer");
