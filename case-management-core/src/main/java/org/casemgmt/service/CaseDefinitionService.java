@@ -42,7 +42,7 @@ public class CaseDefinitionService {
                     strings(p, "candidateGroups"),
                     p.get("sortOrder") instanceof Number n ? n.intValue() : 0));
         }
-        validateParentStageKeys(key, items);
+        validatePlanItems(key, items);
 
         CaseDefinition def = new CaseDefinition(id, key, version,
                 (String) doc.getOrDefault("name", key), tenantId,
@@ -56,21 +56,42 @@ public class CaseDefinitionService {
     }
 
     /**
-     * Rejects a definition whose plan items reference a {@code parentStageKey} that names no
-     * {@code defKey} in the same definition, at deploy time rather than letting it fail later.
+     * Rejects a malformed definition before any database write is attempted, in two ways:
      *
-     * <p>Without this, a bad definition would deploy successfully and then blow up the first
-     * time anyone starts a case from it: {@link org.casemgmt.rules.PlanModelInstantiator}
-     * (Task 9) throws {@link IllegalArgumentException} from {@code initialItems} for exactly
-     * this condition, specifically because a case definition arriving over the API from
-     * another team is realistic malformed input. Deploy time is the right place to catch it —
-     * the caller who submitted the bad definition gets an immediate, specific error instead of
-     * a case-creation failure that names a plan model they may not even have written.
+     * <ol>
+     *   <li>Duplicate {@code defKey} across plan items. Left unchecked, this reaches
+     *   {@code CaseDefinitionRepository.insert} and fails midway through the plan-item
+     *   INSERT loop on the {@code UQ_CM_PI_DEF UNIQUE (CASE_DEF_ID_, DEF_KEY_)} constraint —
+     *   which {@code insert} now handles atomically (rolls back the whole definition, see its
+     *   Javadoc), but a clear pre-write {@link IllegalArgumentException} naming the offending
+     *   key is a far better signal to the caller than a raw
+     *   {@code DataIntegrityViolationException} surfacing from deep inside the repository.
+     *   <li>A {@code parentStageKey} that names no {@code defKey} in the same definition.
+     *   Without this, a bad definition would deploy successfully and then blow up the first
+     *   time anyone starts a case from it: {@link org.casemgmt.rules.PlanModelInstantiator}
+     *   (Task 9) throws {@link IllegalArgumentException} from {@code initialItems} for exactly
+     *   this condition, specifically because a case definition arriving over the API from
+     *   another team is realistic malformed input. Deploy time is the right place to catch
+     *   it — the caller who submitted the bad definition gets an immediate, specific error
+     *   instead of a case-creation failure that names a plan model they may not even have
+     *   written.
+     * </ol>
+     *
+     * <p>Validation alone does not make {@code insert} safe against every failure mode — a
+     * lost connection or a constraint this method doesn't know to check for can still fail
+     * mid-write — which is why {@code insert} is also atomic in its own right. The two are
+     * complementary, not alternatives: this method turns the single most likely trigger into
+     * a cheap, clear, pre-write rejection; the repository's transaction is the backstop for
+     * everything else.
      */
-    private static void validateParentStageKeys(String key, List<PlanItemDefinition> items) {
+    private static void validatePlanItems(String key, List<PlanItemDefinition> items) {
         Set<String> defKeys = new HashSet<>();
         for (PlanItemDefinition p : items) {
-            defKeys.add(p.defKey());
+            if (!defKeys.add(p.defKey())) {
+                throw new IllegalArgumentException("Case definition '" + key
+                        + "': duplicate plan item defKey '" + p.defKey()
+                        + "' — defKeys must be unique within a definition");
+            }
         }
         for (PlanItemDefinition p : items) {
             if (p.parentStageKey() != null && !defKeys.contains(p.parentStageKey())) {

@@ -3,7 +3,11 @@ package org.casemgmt.repo;
 import org.casemgmt.domain.*;
 import org.casemgmt.error.NotFoundException;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
@@ -12,9 +16,17 @@ import java.util.Optional;
 public class CaseDefinitionRepository {
 
     private final JdbcClient jdbc;
+    private final DataSource dataSource;
 
-    public CaseDefinitionRepository(JdbcClient jdbc) {
-        this.jdbc = jdbc;
+    /**
+     * Takes the {@link DataSource} directly (not a pre-built {@link JdbcClient}) because
+     * {@link #insert} needs to run the CM_CASE_DEF row and every CM_PLAN_ITEM_DEF row it
+     * explodes into as one atomic unit on a single physical connection — see that method's
+     * Javadoc for why.
+     */
+    public CaseDefinitionRepository(DataSource dataSource) {
+        this.dataSource = dataSource;
+        this.jdbc = JdbcClient.create(dataSource);
     }
 
     /**
@@ -35,7 +47,71 @@ public class CaseDefinitionRepository {
         return max == null ? 1 : max + 1;
     }
 
+    /**
+     * Writes the CM_CASE_DEF row and every CM_PLAN_ITEM_DEF row it explodes into as one
+     * atomic unit.
+     *
+     * <p>This module has no transaction boundary at all: {@link #jdbc} and {@code dataSource}
+     * are a plain pooled {@code DataSource} (HikariCP) handed straight to
+     * {@link JdbcClient#create}, with no Spring {@code ApplicationContext},
+     * {@code PlatformTransactionManager}, or {@code @Transactional} anywhere in
+     * case-management-core — {@code OracleTestBase} builds the pool directly, the same way
+     * production wiring will have to. Before this fix, each of {@code insert}'s N+1 statements
+     * (one CM_CASE_DEF row, N CM_PLAN_ITEM_DEF rows) ran as its own independently
+     * autocommitted call, each on whatever connection Hikari happened to hand out. A failure
+     * partway through the plan-item loop — a constraint violation, a lost connection, a bad
+     * CLOB write — left the CM_CASE_DEF row and however many CM_PLAN_ITEM_DEF rows had
+     * already committed sitting in the database as a "successfully deployed" definition:
+     * {@link #findLatest} and {@link #listLatest} would serve it with no indication anything
+     * was wrong, a case started from it would silently never create the missing plan
+     * item(s), and any {@code entryCriteria} referencing the missing defKey would either
+     * throw a confusing {@code CriterionEvaluationException} far from the real cause, or
+     * evaluate against a null with no error at all.
+     *
+     * <p>Fixed by taking one physical {@link Connection} from the pool, disabling autocommit
+     * on it directly, running every INSERT against that single connection through a
+     * throwaway {@link SingleConnectionDataSource} wrapper (constructed with
+     * {@code suppressClose=true} so that JdbcClient's normal per-statement
+     * connection-release doesn't actually close the shared connection out from under the
+     * loop — without that flag the second INSERT would fail with "connection closed" after
+     * the first), then committing once at the end or rolling back on any exception. Not
+     * {@code @Transactional}: that annotation needs a {@code PlatformTransactionManager}
+     * bean from a Spring context, and this module deliberately has neither — reaching for it
+     * here would silently do nothing (no AOP proxy to intercept the call) rather than fail
+     * loudly, which is worse than not having transactions at all.
+     */
     public void insert(CaseDefinition d) {
+        try (Connection conn = dataSource.getConnection()) {
+            boolean priorAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            JdbcClient txJdbc = JdbcClient.create(new SingleConnectionDataSource(conn, true));
+            try {
+                insertCaseDefRow(txJdbc, d);
+                for (PlanItemDefinition p : d.planItems()) {
+                    insertPlanItemDefRow(txJdbc, d.id(), p);
+                }
+                conn.commit();
+            } catch (RuntimeException e) {
+                rollbackQuietly(conn);
+                throw e;
+            } finally {
+                conn.setAutoCommit(priorAutoCommit);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to deploy case definition " + d.id(), e);
+        }
+    }
+
+    private static void rollbackQuietly(Connection conn) {
+        try {
+            conn.rollback();
+        } catch (SQLException suppressed) {
+            // Best-effort: the exception that triggered the rollback is what the caller sees;
+            // a rollback failure on top of that would only obscure the real cause.
+        }
+    }
+
+    private static void insertCaseDefRow(JdbcClient jdbc, CaseDefinition d) {
         jdbc.sql("""
                 INSERT INTO CM_CASE_DEF (ID_, KEY_, VERSION_NO_, NAME_, TENANT_ID_, DESCRIPTION_,
                     SLA_POLICY_ID_, ROLES_JSON_, ATTACH_CATS_JSON_, FORMS_JSON_, DEPLOYED_AT_, DEPLOYED_BY_)
@@ -49,28 +125,28 @@ public class CaseDefinitionRepository {
             .param("forms", JsonCodec.toJson(d.forms()))
             .param("deployedAt", d.deployedAt()).param("deployedBy", d.deployedBy())
             .update();
+    }
 
-        for (PlanItemDefinition p : d.planItems()) {
-            jdbc.sql("""
-                    INSERT INTO CM_PLAN_ITEM_DEF (ID_, CASE_DEF_ID_, DEF_KEY_, TYPE_, NAME_,
-                        PARENT_STAGE_KEY_, MANUAL_ACT_, REQUIRED_, REPETITION_,
-                        ENTRY_CRIT_JSON_, EXIT_CRIT_JSON_, FORM_KEY_, PROC_DEF_KEY_,
-                        CAND_GROUPS_JSON_, SORT_ORDER_)
-                    VALUES (:id, :defId, :key, :type, :name, :parent, :manual, :required, :repetition,
-                        :entry, :exit, :formKey, :procKey, :groups, :sort)""")
-                .param("id", p.id()).param("defId", d.id()).param("key", p.defKey())
-                .param("type", p.type().name()).param("name", p.name())
-                .param("parent", p.parentStageKey())
-                .param("manual", p.manualActivation() ? 1 : 0)
-                .param("required", p.required() ? 1 : 0)
-                .param("repetition", p.repetition() ? 1 : 0)
-                .param("entry", JsonCodec.toJson(p.entryCriteria()))
-                .param("exit", JsonCodec.toJson(p.exitCriteria()))
-                .param("formKey", p.formKey()).param("procKey", p.processDefinitionKey())
-                .param("groups", JsonCodec.toJson(p.candidateGroups()))
-                .param("sort", p.sortOrder())
-                .update();
-        }
+    private static void insertPlanItemDefRow(JdbcClient jdbc, String caseDefId, PlanItemDefinition p) {
+        jdbc.sql("""
+                INSERT INTO CM_PLAN_ITEM_DEF (ID_, CASE_DEF_ID_, DEF_KEY_, TYPE_, NAME_,
+                    PARENT_STAGE_KEY_, MANUAL_ACT_, REQUIRED_, REPETITION_,
+                    ENTRY_CRIT_JSON_, EXIT_CRIT_JSON_, FORM_KEY_, PROC_DEF_KEY_,
+                    CAND_GROUPS_JSON_, SORT_ORDER_)
+                VALUES (:id, :defId, :key, :type, :name, :parent, :manual, :required, :repetition,
+                    :entry, :exit, :formKey, :procKey, :groups, :sort)""")
+            .param("id", p.id()).param("defId", caseDefId).param("key", p.defKey())
+            .param("type", p.type().name()).param("name", p.name())
+            .param("parent", p.parentStageKey())
+            .param("manual", p.manualActivation() ? 1 : 0)
+            .param("required", p.required() ? 1 : 0)
+            .param("repetition", p.repetition() ? 1 : 0)
+            .param("entry", JsonCodec.toJson(p.entryCriteria()))
+            .param("exit", JsonCodec.toJson(p.exitCriteria()))
+            .param("formKey", p.formKey()).param("procKey", p.processDefinitionKey())
+            .param("groups", JsonCodec.toJson(p.candidateGroups()))
+            .param("sort", p.sortOrder())
+            .update();
     }
 
     public Optional<CaseDefinition> findById(String id) {

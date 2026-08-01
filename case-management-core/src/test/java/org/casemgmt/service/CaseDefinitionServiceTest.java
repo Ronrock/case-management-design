@@ -20,7 +20,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
     void setUp() throws Exception {
         // No manual DELETEs here: OracleTestBase already wipes every CM_ table (including
         // CM_PLAN_ITEM_DEF and CM_CASE_DEF) before each test method via its own @BeforeEach.
-        service = new CaseDefinitionService(new CaseDefinitionRepository(jdbc()));
+        service = new CaseDefinitionService(new CaseDefinitionRepository(dataSource()));
         json = new String(getClass().getResourceAsStream("/definitions/test-definition.json")
                 .readAllBytes(), StandardCharsets.UTF_8);
     }
@@ -52,7 +52,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
         service.deploy(json, "alice");
         service.deploy(json, "alice");
 
-        var latest = new CaseDefinitionRepository(jdbc()).findLatest("widget-review", "t1");
+        var latest = new CaseDefinitionRepository(dataSource()).findLatest("widget-review", "t1");
 
         assertThat(latest).isPresent();
         assertThat(latest.get().versionNo()).isEqualTo(2);
@@ -62,7 +62,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
     void servesFormSchemasByKey() {
         service.deploy(json, "alice");
 
-        var schema = new CaseDefinitionRepository(jdbc()).formSchema("widget-review", "reviewForm");
+        var schema = new CaseDefinitionRepository(dataSource()).formSchema("widget-review", "reviewForm");
 
         assertThat(schema).isPresent();
         assertThat(schema.get()).containsKey("properties");
@@ -79,7 +79,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
         service.deploy(json, "alice");
         service.deploy(json, "alice");
 
-        var latest = new CaseDefinitionRepository(jdbc()).listLatest("t1");
+        var latest = new CaseDefinitionRepository(dataSource()).listLatest("t1");
 
         assertThat(latest).hasSize(1);
         assertThat(latest.get(0).versionNo()).isEqualTo(2);
@@ -89,7 +89,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
     void findByIdAndRequireLoadTheStoredDefinitionWithPlanItems() {
         CaseDefinition deployed = service.deploy(json, "alice");
 
-        var repo = new CaseDefinitionRepository(jdbc());
+        var repo = new CaseDefinitionRepository(dataSource());
         assertThat(repo.findById(deployed.id())).isPresent();
         assertThat(repo.require(deployed.id()).planItems()).hasSize(3);
         assertThatThrownBy(() -> repo.require("no-such-def:1"))
@@ -104,5 +104,23 @@ class CaseDefinitionServiceTest extends OracleTestBase {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("review")
                 .hasMessageContaining("intake");
+    }
+
+    @Test
+    void rejectsADefinitionWithDuplicatePlanItemDefKeys() {
+        // Renaming "reviewed" to "review" collides with the existing "review" HUMAN_TASK's
+        // defKey. Caught before any write reaches the repository — this is the exact
+        // condition CaseDefinitionRepositoryTest proves insert() itself rolls back atomically
+        // if it were ever to reach the database instead.
+        String badJson = json.replace("\"defKey\": \"reviewed\"", "\"defKey\": \"review\"");
+
+        assertThatThrownBy(() -> service.deploy(badJson, "alice"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("duplicate")
+                .hasMessageContaining("review");
+
+        // And nothing was written: no CM_CASE_DEF row for this key at all.
+        var repo = new CaseDefinitionRepository(dataSource());
+        assertThat(repo.findLatest("widget-review", "t1")).isEmpty();
     }
 }
