@@ -365,6 +365,12 @@ git commit -m "build: multi-module skeleton on Operaton 2.1.3 / Java 21"
 - Consumes: modules from Task 1
 - Produces: `OracleTestBase` — an abstract JUnit base class exposing `protected static DataSource dataSource()` and `protected JdbcClient jdbc()` against a migrated Oracle container. **Every persistence test in later tasks extends it.**
 
+**Three properties this base class must have** — each was found the hard way, and later tasks depend on all of them:
+
+1. **A migration failure must surface its cause to every class, not just the first.** A `static` initialiser that throws leaves every subsequent class in the JVM with a cached `NoClassDefFoundError` and no root cause. Capture the failure and rethrow it with its cause from `@BeforeAll`.
+2. **Isolation must be structural, not conventional.** Declare the cleanup as an inherited `@BeforeEach` on the base (plus an `@AfterAll`), so subclasses get a clean schema automatically and no later task can forget. Later tasks therefore need NO `DELETE FROM` statements of their own — where the code below still shows them, they are redundant.
+3. **The DataSource must be pooled and cleanup must use ONE connection.** Cleanup runs per test method for every subclass; issuing 26 unpooled connections each time exhausts the Oracle listener (`ORA-12516`) once a handful of classes exist. Use a bounded `HikariDataSource` and run the 26 deletes as a single batch on one connection.
+
 - [ ] **Step 1: Write the failing test**
 
 `case-management-core/src/test/java/org/casemgmt/SchemaMigrationTest.java`:
