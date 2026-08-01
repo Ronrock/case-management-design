@@ -4,7 +4,9 @@ import liquibase.Liquibase;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.testcontainers.oracle.OracleContainer;
@@ -63,6 +65,22 @@ public abstract class OracleTestBase {
         }
     }
 
+    // Isolation is automatic and inherited: every class extending OracleTestBase gets a clean
+    // schema before each of its own test methods (JUnit runs a superclass's @BeforeEach before
+    // the subclass's own, so a subclass @BeforeEach that inserts fixtures still runs against a
+    // clean slate) and again after its last test method finishes, so it never leaves the
+    // schema dirty for whatever class or developer looks at the container next. Subclasses
+    // need do nothing to get this - no per-class opt-in, no convention to remember.
+    @BeforeEach
+    void resetSchemaBeforeEachTest() {
+        deleteAllCaseManagementData();
+    }
+
+    @AfterAll
+    static void resetSchemaAfterAllTestsInClass() {
+        deleteAllCaseManagementData();
+    }
+
     private static void migrate(DataSource ds) throws Exception {
         try (Connection c = ds.getConnection()) {
             var database = DatabaseFactory.getInstance()
@@ -83,16 +101,16 @@ public abstract class OracleTestBase {
         return JdbcClient.create(dataSource);
     }
 
-    // All CM_ tables share one schema for the JVM's whole lifetime (see class comment), so
-    // without an explicit reset, rows left behind by one test class are visible to every
-    // class that runs after it - order-dependent collisions that JUnit gives no guarantee
-    // against. Call this from a @BeforeEach in each extending class rather than hand-writing
-    // per-class DELETE lists: the FK-safe (child-before-parent) order is captured once, here,
-    // instead of being re-derived - and re-risked - by every later task. Deliberately DELETE,
-    // not TRUNCATE: row counts per test are tiny, and DELETE keeps the statement list simple
-    // to reason about without needing to fight referential-integrity ordering rules that
-    // TRUNCATE enforces more strictly across a whole batch.
-    protected void deleteAllCaseManagementData() {
+    // All CM_ tables share one schema for the JVM's whole lifetime (see class comment). This
+    // is the single, structural reset that keeps that safe: it runs automatically from the
+    // @BeforeEach/@AfterAll above, in FK-safe (child-before-parent) order derived once here
+    // from db-design.sql's foreign keys, instead of being re-derived - and re-risked - by
+    // every later task. Static (not protected-instance-only) so the static @AfterAll above can
+    // call it directly. Deliberately DELETE, not TRUNCATE: row counts per test are tiny, and
+    // DELETE keeps the statement list simple to reason about without needing to fight
+    // referential-integrity ordering rules that TRUNCATE enforces more strictly across a whole
+    // batch.
+    private static void deleteAllCaseManagementData() {
         List<String> tablesChildToParent = List.of(
                 "CM_TASK",
                 "CM_MILESTONE",
@@ -120,7 +138,7 @@ public abstract class OracleTestBase {
                 "CM_SAVED_FILTER",
                 "CM_IDEMPOTENCY_KEY",
                 "CM_AUDIT_LOG");
-        JdbcClient client = jdbc();
+        JdbcClient client = JdbcClient.create(dataSource);
         for (String table : tablesChildToParent) {
             client.sql("DELETE FROM " + table).update();
         }
