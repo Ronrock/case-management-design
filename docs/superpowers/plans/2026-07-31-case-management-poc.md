@@ -8541,6 +8541,17 @@ public class ActionPolicy {
         if (task.engineSync() != CaseTask.EngineSync.SYNCED) {
             return actions;
         }
+        // Roles gate tasks exactly as they gate cases and plan items. Omitting this check
+        // does NOT break the list/assertAllowed agreement property — assertAllowedOnTask
+        // derives from this method, so the two stay consistent while both being wrong.
+        // Consistency is not correctness; a watcher could claim any open task.
+        //
+        // Candidate-group membership is included because that is how work reaches someone
+        // who is not yet a participant on the case at all.
+        if (!mayMutate(callerRoles)
+                && callerRoles.stream().noneMatch(task.candidateGroups()::contains)) {
+            return actions;
+        }
         if (task.state() == TaskState.OPEN) {
             actions.add(AvailableAction.post("claim", base + "/claim"));
         }
