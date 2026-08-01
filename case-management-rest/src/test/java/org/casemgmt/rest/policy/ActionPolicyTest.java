@@ -74,6 +74,53 @@ class ActionPolicyTest {
             assertThatNoException().isThrownBy(() ->
                     policy.assertAllowed(snapshot, roles, action.action()));
         }
+
+        // Negative half: "reopen" is never a case-level action in any state, so it must
+        // be rejected -- a policy that permitted everything would pass the loop above
+        // alone without this check.
+        assertThatThrownBy(() -> policy.assertAllowed(snapshot, roles, "reopen"))
+                .isInstanceOf(CaseConflictException.class)
+                .hasMessageContaining("reopen");
+    }
+
+    @Test
+    void assertAllowedOnPlanItemAndListAgree() {
+        CaseSnapshot snapshot = activeCaseWithOpenRequiredItem();
+        PlanItem active = snapshot.planItems().get(0);
+        Set<String> roles = Set.of("handler");
+
+        for (AvailableAction action : policy.listForPlanItem(snapshot, active, roles)) {
+            assertThatNoException().isThrownBy(() ->
+                    policy.assertAllowedOnPlanItem(snapshot, active, roles, action.action()));
+        }
+
+        // Negative half: this item is ACTIVE, which offers complete/terminate but never
+        // "enable" (that's the AVAILABLE-state action) -- confirm it is actually rejected,
+        // not just absent from the list.
+        assertThatThrownBy(() -> policy.assertAllowedOnPlanItem(snapshot, active, roles, "enable"))
+                .isInstanceOf(CaseConflictException.class)
+                .hasMessageContaining("enable");
+    }
+
+    @Test
+    void assertAllowedOnTaskAndListAgree() {
+        CaseTask claimed = new CaseTask("t-1", "eng-a:1", "pi-1", "engine-1", "T", null,
+                TaskState.CLAIMED, "alice", null, List.of("g"), "reviewForm", 50, null, null,
+                CaseTask.EngineSync.SYNCED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null);
+        Set<String> roles = Set.of("handler");
+
+        for (AvailableAction action : policy.listForTask(claimed, "alice", roles)) {
+            assertThatNoException().isThrownBy(() ->
+                    policy.assertAllowedOnTask(claimed, "alice", roles, action.action()));
+        }
+
+        // Negative half: "complete" is listed for alice (the assignee) but must NOT be
+        // enforceable by bob -- this exercises the caller-specific gating, not just task
+        // state, which is exactly where a hand-rolled enforcement check could drift from
+        // listForTask's caller-aware rule.
+        assertThatThrownBy(() -> policy.assertAllowedOnTask(claimed, "bob", roles, "complete"))
+                .isInstanceOf(CaseConflictException.class)
+                .hasMessageContaining("complete");
     }
 
     @Test

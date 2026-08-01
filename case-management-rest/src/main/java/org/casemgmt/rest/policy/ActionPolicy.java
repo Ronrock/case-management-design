@@ -97,6 +97,17 @@ public class ActionPolicy {
         }
     }
 
+    public void assertAllowedOnPlanItem(CaseSnapshot snapshot, PlanItem item, Set<String> callerRoles,
+                                         String action) {
+        List<AvailableAction> allowed = listForPlanItem(snapshot, item, callerRoles);
+        if (allowed.stream().noneMatch(a -> a.action().equals(action))) {
+            throw new CaseConflictException("action-not-available",
+                    "Action '" + action + "' is not available on plan item " + item.id()
+                            + " in state " + item.state(),
+                    allowed.stream().map(AvailableAction::action).toList());
+        }
+    }
+
     public void assertAllowedOnTask(CaseTask task, String callerUserId, Set<String> callerRoles,
                                      String action) {
         List<AvailableAction> allowed = listForTask(task, callerUserId, callerRoles);
