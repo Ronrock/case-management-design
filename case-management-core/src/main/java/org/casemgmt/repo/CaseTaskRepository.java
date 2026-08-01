@@ -1,0 +1,170 @@
+package org.casemgmt.repo;
+
+import org.casemgmt.domain.CaseTask;
+import org.casemgmt.domain.TaskState;
+import org.casemgmt.error.NotFoundException;
+import org.casemgmt.error.OptimisticLockException;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.core.simple.JdbcClient.StatementSpec;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Optional;
+
+public class CaseTaskRepository {
+
+    private static final String COLUMNS = """
+            ID_, CASE_ID_, PLAN_ITEM_ID_, CAMUNDA_TASK_ID_, NAME_, DESCRIPTION_, STATE_,
+            ASSIGNEE_, DELEGATED_BY_, CAND_GROUPS_JSON_, FORM_KEY_, PRIORITY_, DUE_AT_,
+            OUTCOME_, ENGINE_SYNC_, VERSION_, CREATED_AT_, UPDATED_AT_, COMPLETED_AT_""";
+
+    private final JdbcClient jdbc;
+
+    public CaseTaskRepository(JdbcClient jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    public void insert(CaseTask t) {
+        jdbc.sql("""
+                INSERT INTO CM_TASK (ID_, CASE_ID_, PLAN_ITEM_ID_, CAMUNDA_TASK_ID_, NAME_,
+                    DESCRIPTION_, STATE_, ASSIGNEE_, DELEGATED_BY_, CAND_GROUPS_JSON_, FORM_KEY_,
+                    PRIORITY_, DUE_AT_, OUTCOME_, ENGINE_SYNC_, VERSION_, CREATED_AT_, UPDATED_AT_,
+                    COMPLETED_AT_)
+                VALUES (:id, :caseId, :planItemId, :engineTaskId, :name, :description, :state,
+                    :assignee, :delegatedBy, :groups, :formKey, :priority, :dueAt, :outcome,
+                    :sync, :version, :createdAt, :updatedAt, :completedAt)""")
+            .param("id", t.id()).param("caseId", t.caseId()).param("planItemId", t.planItemId())
+            .param("engineTaskId", t.engineTaskId()).param("name", t.name())
+            .param("description", t.description()).param("state", t.state().name())
+            .param("assignee", t.assignee()).param("delegatedBy", t.delegatedBy())
+            .param("groups", JsonCodec.toJson(t.candidateGroups())).param("formKey", t.formKey())
+            .param("priority", t.priority()).param("dueAt", t.dueAt()).param("outcome", t.outcome())
+            .param("sync", t.engineSync().name()).param("version", t.version())
+            .param("createdAt", t.createdAt()).param("updatedAt", t.updatedAt())
+            .param("completedAt", t.completedAt())
+            .update();
+    }
+
+    public Optional<CaseTask> findById(String id) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM CM_TASK WHERE ID_ = :id")
+                .param("id", id).query(CaseTaskRepository::map).optional();
+    }
+
+    public CaseTask require(String id) {
+        return findById(id).orElseThrow(() -> new NotFoundException("Task", id));
+    }
+
+    public Optional<CaseTask> findByEngineTaskId(String engineTaskId) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = :tid")
+                .param("tid", engineTaskId).query(CaseTaskRepository::map).optional();
+    }
+
+    public List<CaseTask> findByCase(String caseId) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM CM_TASK WHERE CASE_ID_ = :caseId ORDER BY CREATED_AT_")
+                .param("caseId", caseId).query(CaseTaskRepository::map).list();
+    }
+
+    /**
+     * Worklist: open/claimed tasks visible to an assignee and/or a set of candidate groups.
+     *
+     * <p>Two rules make this query more than a plain filter:
+     *
+     * <ul>
+     * <li>Tasks whose {@code ENGINE_SYNC_} is not {@code SYNCED} are excluded outright. In
+     * remote mode the Camunda task cannot be created inside the same local transaction as the
+     * CM_TASK row (spec §3.5); until the engine confirms the task exists, claiming or
+     * completing it locally would succeed while the corresponding engine action fails. Hiding
+     * unsynced tasks from the worklist makes that eventual-consistency window invisible to the
+     * caller rather than surfacing as a confusing failure on claim. Task 23's ActionPolicy
+     * relies on this same exclusion.</li>
+     * <li>Candidate-group matching needs a set-overlap test between the caller's groups and
+     * each task's {@code CAND_GROUPS_JSON_} array. The brief's sketch built this with a
+     * {@code JSON_TABLE(...) MEMBER OF (SELECT * FROM JSON_TABLE(:groupsJson, ...))}
+     * construct — passing the caller's group list into the query as a second JSON document.
+     * That form does not compile on Oracle 23ai's optimizer in this shape (ORA-00907 from the
+     * nested JSON_TABLE used as a bare subquery operand of MEMBER OF). It also isn't needed:
+     * this codebase already has a working pattern for "column value is one of a caller-side
+     * list" — {@code ParticipantRepository.rolesOf} binds a Java {@code List<String>} straight
+     * to an {@code IN (:groups)} parameter and lets Spring's {@code NamedParameterJdbcTemplate}
+     * expand it. Applying that same pattern here needed only ONE JSON_TABLE, on the stored
+     * column: explode {@code CAND_GROUPS_JSON_} into rows and test each exploded value with
+     * plain {@code IN (:groups)}. That is the form used below.</li>
+     * </ul>
+     */
+    public List<CaseTask> worklist(String assignee, List<String> groups, int limit) {
+        boolean hasAssignee = assignee != null;
+        boolean hasGroups = groups != null && !groups.isEmpty();
+
+        StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_TASK t\n"
+                + "WHERE STATE_ IN ('OPEN','CLAIMED') AND ENGINE_SYNC_ = 'SYNCED'\n");
+        if (hasAssignee) {
+            sql.append("  AND ASSIGNEE_ = :assignee\n");
+        }
+        if (hasGroups) {
+            sql.append("""
+                      AND EXISTS (
+                        SELECT 1 FROM JSON_TABLE(t.CAND_GROUPS_JSON_, '$[*]' COLUMNS (g VARCHAR2(255) PATH '$')) jt
+                        WHERE jt.g IN (:groups))
+                    """);
+        }
+        sql.append("ORDER BY CREATED_AT_ FETCH FIRST :limit ROWS ONLY");
+
+        StatementSpec spec = jdbc.sql(sql.toString());
+        if (hasAssignee) spec = spec.param("assignee", assignee);
+        if (hasGroups) spec = spec.param("groups", groups);
+        return spec.param("limit", limit).query(CaseTaskRepository::map).list();
+    }
+
+    /**
+     * Optimistic update. See {@code PlanItemRepository.updateState} / {@code CaseRepository.update}
+     * for why the returned object is constructed locally rather than re-read after the UPDATE,
+     * and why UPDATED_AT_/COMPLETED_AT_ are bound from a single Java-captured
+     * {@code OffsetDateTime} instead of SYSTIMESTAMP.
+     */
+    public CaseTask update(CaseTask t, long expectedVersion) {
+        OffsetDateTime updatedAt = OffsetDateTime.now();
+        OffsetDateTime completedAt = t.state() == TaskState.COMPLETED
+                ? (t.completedAt() != null ? t.completedAt() : updatedAt)
+                : t.completedAt();
+
+        int rows = jdbc.sql("""
+                UPDATE CM_TASK SET STATE_ = :state, ASSIGNEE_ = :assignee, DELEGATED_BY_ = :delegatedBy,
+                    OUTCOME_ = :outcome, DUE_AT_ = :dueAt, COMPLETED_AT_ = :completedAt,
+                    UPDATED_AT_ = :updatedAt, VERSION_ = VERSION_ + 1
+                WHERE ID_ = :id AND VERSION_ = :expected""")
+            .param("state", t.state().name()).param("assignee", t.assignee())
+            .param("delegatedBy", t.delegatedBy()).param("outcome", t.outcome())
+            .param("dueAt", t.dueAt()).param("completedAt", completedAt).param("updatedAt", updatedAt)
+            .param("id", t.id()).param("expected", expectedVersion)
+            .update();
+        if (rows == 0) throw new OptimisticLockException("Task", t.id(), expectedVersion);
+
+        return new CaseTask(t.id(), t.caseId(), t.planItemId(), t.engineTaskId(), t.name(), t.description(),
+                t.state(), t.assignee(), t.delegatedBy(), t.candidateGroups(), t.formKey(), t.priority(),
+                t.dueAt(), t.outcome(), t.engineSync(), expectedVersion + 1, t.createdAt(), updatedAt, completedAt);
+    }
+
+    public void markSync(String taskId, CaseTask.EngineSync sync, String engineTaskId) {
+        jdbc.sql("""
+                UPDATE CM_TASK SET ENGINE_SYNC_ = :sync,
+                    CAMUNDA_TASK_ID_ = COALESCE(:engineTaskId, CAMUNDA_TASK_ID_),
+                    UPDATED_AT_ = SYSTIMESTAMP
+                WHERE ID_ = :id""")
+            .param("sync", sync.name()).param("engineTaskId", engineTaskId).param("id", taskId)
+            .update();
+    }
+
+    private static CaseTask map(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
+        return new CaseTask(rs.getString("ID_"), rs.getString("CASE_ID_"), rs.getString("PLAN_ITEM_ID_"),
+                rs.getString("CAMUNDA_TASK_ID_"), rs.getString("NAME_"), rs.getString("DESCRIPTION_"),
+                TaskState.valueOf(rs.getString("STATE_")), rs.getString("ASSIGNEE_"),
+                rs.getString("DELEGATED_BY_"), JsonCodec.toList(rs.getString("CAND_GROUPS_JSON_")),
+                rs.getString("FORM_KEY_"), rs.getInt("PRIORITY_"),
+                rs.getObject("DUE_AT_", OffsetDateTime.class), rs.getString("OUTCOME_"),
+                CaseTask.EngineSync.valueOf(rs.getString("ENGINE_SYNC_")),
+                rs.getLong("VERSION_"),
+                rs.getObject("CREATED_AT_", OffsetDateTime.class),
+                rs.getObject("UPDATED_AT_", OffsetDateTime.class),
+                rs.getObject("COMPLETED_AT_", OffsetDateTime.class));
+    }
+}
