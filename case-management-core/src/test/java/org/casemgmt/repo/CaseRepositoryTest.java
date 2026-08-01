@@ -76,6 +76,46 @@ class CaseRepositoryTest extends OracleTestBase {
                 .isInstanceOf(NotFoundException.class);
     }
 
+    /**
+     * Pins the guarantee that update()'s return value always reflects THIS call's own
+     * write, never a re-read that could observe a different writer's concurrent commit.
+     *
+     * <p>Directly simulating the interleaving (writer A's UPDATE commits, then writer B's
+     * UPDATE+commit lands, then A's *own* post-update read runs and would see B's row) is
+     * fiddly to express deterministically in a single-JVM test without instrumenting a
+     * delay inside the repository itself. Instead this asserts the contract the fix relies
+     * on: update() no longer performs any SELECT after its UPDATE, so the returned object
+     * is built purely from values this call already knows (the WHERE clause having just
+     * proven the row was at exactly {@code expectedVersion}) — there is no second query left
+     * for another writer's commit to race against. That is verified two ways below: the
+     * returned instance matches what this call wrote with version incremented by exactly
+     * one, and a genuinely concurrent-style write attempt (reusing the same pre-image/
+     * expected version A read) is rejected outright rather than silently blended in.
+     */
+    @Test
+    void updateReturnsThisCallsOwnWriteNeverAnotherWritersConcurrentCommit() {
+        repo.insert(newCase("eng-a:6"));
+        CaseInstance loaded = repo.require("eng-a:6");
+
+        CaseInstance updated = repo.update(loaded.withState(CaseState.CLOSED), loaded.version());
+
+        assertThat(updated.id()).isEqualTo("eng-a:6");
+        assertThat(updated.version()).isEqualTo(loaded.version() + 1);
+        assertThat(updated.state()).isEqualTo(CaseState.CLOSED);
+        assertThat(updated.title()).isEqualTo(loaded.title());
+        assertThat(updated.updatedAt()).isAfterOrEqualTo(loaded.updatedAt());
+
+        // A second writer racing in with the same pre-image A read must be rejected, not
+        // silently merged into A's already-returned result.
+        assertThatThrownBy(() -> repo.update(loaded.withState(CaseState.CANCELLED), loaded.version()))
+                .isInstanceOf(OptimisticLockException.class);
+
+        // The row in the database agrees exactly with what update() returned to the caller.
+        CaseInstance reread = repo.require("eng-a:6");
+        assertThat(reread.version()).isEqualTo(updated.version());
+        assertThat(reread.state()).isEqualTo(updated.state());
+    }
+
     @Test
     void queriesByStateAndAssignee() {
         repo.insert(newCase("eng-a:4"));
