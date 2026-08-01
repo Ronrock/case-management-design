@@ -77,6 +77,13 @@ public class ActionPolicy {
         if (task.engineSync() != CaseTask.EngineSync.SYNCED) {
             return actions;
         }
+        // Role gate (review fix): a caller with no mutating role and no candidate-group
+        // membership gets nothing, same as the case- and plan-item-level surfaces. See
+        // mayActOnTask() for the rule and why it is OR, not the plain mayMutate() check
+        // the other two surfaces use.
+        if (!mayActOnTask(task, callerRoles)) {
+            return actions;
+        }
         if (task.state() == TaskState.OPEN) {
             actions.add(AvailableAction.post("claim", base + "/claim"));
         }
@@ -84,6 +91,29 @@ public class ActionPolicy {
             actions.add(AvailableAction.post("complete", base + "/complete", task.formKey()));
         }
         return actions;
+    }
+
+    /**
+     * Authorization rule for task actions (review fix, Critical): {@code mayMutate}
+     * ("owner" or "handler") OR membership in the task's own {@code candidateGroups}.
+     *
+     * <p>Plain {@code mayMutate} — what {@link #listForCase} and {@link #listForPlanItem}
+     * use — is wrong here on its own: candidate-group membership is precisely how work
+     * reaches someone who is not yet a case participant (spec's worklist model — a task
+     * is offered to a group before anyone in it is "the handler" of the case). Requiring
+     * {@code mayMutate} alone would make a case's declared candidate groups meaningless
+     * for claiming; requiring candidate-group membership alone would stop an owner/handler
+     * acting on a task that, for whatever reason, doesn't list their group. Either condition
+     * is sufficient.
+     *
+     * <p>What this does NOT do: a caller who satisfies neither condition gets nothing,
+     * including a "watcher" role or an empty role set — those must never see or perform
+     * {@code claim}/{@code complete} on any task, which is exactly the hole this fixes
+     * (a watcher, or a caller with no roles at all, could otherwise claim any open synced
+     * task, gated on task state only).
+     */
+    private boolean mayActOnTask(CaseTask task, Set<String> callerRoles) {
+        return mayMutate(callerRoles) || callerRoles.stream().anyMatch(task.candidateGroups()::contains);
     }
 
     public void assertAllowed(CaseSnapshot snapshot, Set<String> callerRoles, String action) {

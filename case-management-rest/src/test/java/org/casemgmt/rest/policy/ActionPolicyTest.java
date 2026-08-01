@@ -81,6 +81,15 @@ class ActionPolicyTest {
         assertThatThrownBy(() -> policy.assertAllowed(snapshot, roles, "reopen"))
                 .isInstanceOf(CaseConflictException.class)
                 .hasMessageContaining("reopen");
+
+        // Non-mutating role: everything this fully-done case would otherwise offer an
+        // owner (including "close") must be refused to a watcher -- an agreement test
+        // that only ever exercises a privileged role can never detect a missing
+        // authorization check (review finding).
+        Set<String> watcher = Set.of("watcher");
+        assertThat(policy.listForCase(snapshot, watcher)).isEmpty();
+        assertThatThrownBy(() -> policy.assertAllowed(snapshot, watcher, "close"))
+                .isInstanceOf(CaseConflictException.class);
     }
 
     @Test
@@ -100,6 +109,13 @@ class ActionPolicyTest {
         assertThatThrownBy(() -> policy.assertAllowedOnPlanItem(snapshot, active, roles, "enable"))
                 .isInstanceOf(CaseConflictException.class)
                 .hasMessageContaining("enable");
+
+        // Non-mutating role: an ACTIVE item's "complete"/"terminate" must not be listed
+        // or enforceable for a watcher, same reasoning as the case-level check above.
+        Set<String> watcher = Set.of("watcher");
+        assertThat(policy.listForPlanItem(snapshot, active, watcher)).isEmpty();
+        assertThatThrownBy(() -> policy.assertAllowedOnPlanItem(snapshot, active, watcher, "complete"))
+                .isInstanceOf(CaseConflictException.class);
     }
 
     @Test
@@ -121,6 +137,35 @@ class ActionPolicyTest {
         assertThatThrownBy(() -> policy.assertAllowedOnTask(claimed, "bob", roles, "complete"))
                 .isInstanceOf(CaseConflictException.class)
                 .hasMessageContaining("complete");
+
+        // Non-mutating role: alice IS the assignee here, so identity alone would pass --
+        // this is exactly the hole the review found (Critical): listForTask must also
+        // require a mutating role or candidate-group membership, not caller identity
+        // alone. A watcher-roled alice must get nothing and must not be enforceable.
+        Set<String> watcher = Set.of("watcher");
+        assertThat(policy.listForTask(claimed, "alice", watcher)).isEmpty();
+        assertThatThrownBy(() -> policy.assertAllowedOnTask(claimed, "alice", watcher, "complete"))
+                .isInstanceOf(CaseConflictException.class);
+    }
+
+    @Test
+    void tasksRequireAMutatingRoleOrCandidateGroupMembership() {
+        CaseTask open = new CaseTask("t-1", "eng-a:1", "pi-1", "engine-1", "T", null,
+                TaskState.OPEN, null, null, List.of("reviewers"), null, 50, null, null,
+                CaseTask.EngineSync.SYNCED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null);
+
+        // A read-only watcher gets nothing: the review's proof case was a watcher (or no
+        // roles at all) claiming any open synced task, gated on task state only.
+        assertThat(policy.listForTask(open, "alice", Set.of("watcher")))
+                .extracting(AvailableAction::action).doesNotContain("claim");
+        // No roles whatsoever -- the other half of the same proof case.
+        assertThat(policy.listForTask(open, "alice", Set.of()))
+                .extracting(AvailableAction::action).doesNotContain("claim");
+
+        // Candidate-group membership is how work reaches someone who is not yet a
+        // participant, so it is sufficient on its own -- no owner/handler role required.
+        assertThat(policy.listForTask(open, "alice", Set.of("reviewers")))
+                .extracting(AvailableAction::action).contains("claim");
     }
 
     @Test

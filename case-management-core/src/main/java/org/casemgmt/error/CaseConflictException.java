@@ -26,7 +26,7 @@ public class CaseConflictException extends RuntimeException {
     public CaseConflictException(String code, String message, List<String> availableActions) {
         super(message);
         this.code = code;
-        this.availableActions = availableActions == null ? List.of() : availableActions;
+        this.availableActions = availableActions == null ? List.of() : List.copyOf(availableActions);
     }
 
     /** Stable machine-readable code (RFC 9457 problem+json {@code code} field, spec §6.5). */
