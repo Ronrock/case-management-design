@@ -83,11 +83,11 @@
       <!-- Pin the testcontainers core artifact explicitly. Without this, Operaton's own
            internal BOM chain (pulled in above via the operaton-bpm-spring-boot-starter
            import) directly overrides org.testcontainers:testcontainers to 2.0.5, while
-           oracle-free/jdbc/database-commons stay on our declared 1.21.3 line (testcontainers
+           oracle-free/jdbc/database-commons stay on our declared 1.21.4 line (testcontainers
            2.0.5 does not even publish an oracle-free artifact). That skew would silently put
            a mismatched core jar on the classpath. This direct entry, declared in our own
            POM, takes precedence over anything arriving via import and keeps the whole
-           testcontainers family on 1.21.3. -->
+           testcontainers family on 1.21.4. -->
       <dependency>
         <groupId>org.testcontainers</groupId>
         <artifactId>testcontainers</artifactId>

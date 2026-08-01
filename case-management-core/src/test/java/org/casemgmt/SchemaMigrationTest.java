@@ -1,11 +1,17 @@
 package org.casemgmt;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SchemaMigrationTest extends OracleTestBase {
+
+    @BeforeEach
+    void cleanSchema() {
+        deleteAllCaseManagementData();
+    }
 
     @Test
     void createsAll25TablesFromTheDesignDdl() {
