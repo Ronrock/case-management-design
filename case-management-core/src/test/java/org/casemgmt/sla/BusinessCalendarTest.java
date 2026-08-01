@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class BusinessCalendarTest {
 
@@ -77,5 +78,76 @@ class BusinessCalendarTest {
         assertThat(calendar().isWorking(at(2026, 8, 6, 20, 0))).isFalse();
         assertThat(calendar().isWorking(at(2026, 8, 8, 10, 0))).isFalse();   // Saturday
         assertThat(calendar().isWorking(at(2026, 12, 25, 10, 0))).isFalse(); // holiday
+    }
+
+    @Test
+    void rejectsAnOvernightInterval() {
+        // "from" after "to" would silently mean a night shift if we let it through;
+        // overnight intervals are out of scope for this PoC, so reject at parse time.
+        Map<String, Object> overnight = Map.of("from", "22:00", "to", "02:00");
+        Map<String, Object> definition = Map.of(
+                "timezone", "Europe/Amsterdam",
+                "workingHours", Map.of("MONDAY", List.of(overnight)));
+
+        assertThatThrownBy(() -> BusinessCalendar.fromJson(definition))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("MONDAY")
+                .hasMessageContaining("22:00")
+                .hasMessageContaining("02:00");
+    }
+
+    @Test
+    void rejectsAZeroLengthInterval() {
+        Map<String, Object> degenerate = Map.of("from", "09:00", "to", "09:00");
+        Map<String, Object> definition = Map.of(
+                "timezone", "Europe/Amsterdam",
+                "workingHours", Map.of("TUESDAY", List.of(degenerate)));
+
+        assertThatThrownBy(() -> BusinessCalendar.fromJson(definition))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("TUESDAY");
+    }
+
+    @Test
+    void rejectsAnUnknownDayName() {
+        Map<String, Object> day = Map.of("from", "09:00", "to", "17:00");
+        Map<String, Object> definition = Map.of(
+                "timezone", "Europe/Amsterdam",
+                "workingHours", Map.of("MONDAYY", List.of(day)));
+
+        assertThatThrownBy(() -> BusinessCalendar.fromJson(definition))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("MONDAYY")
+                .hasMessageContaining("workingHours");
+    }
+
+    @Test
+    void rejectsAMalformedTime() {
+        Map<String, Object> day = Map.of("from", "9:00", "to", "17:00");
+        Map<String, Object> definition = Map.of(
+                "timezone", "Europe/Amsterdam",
+                "workingHours", Map.of("MONDAY", List.of(day)));
+
+        assertThatThrownBy(() -> BusinessCalendar.fromJson(definition))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("MONDAY")
+                .hasMessageContaining("9:00");
+    }
+
+    @Test
+    void rejectsANegativeDuration() {
+        assertThatThrownBy(() -> calendar().addDuration(at(2026, 8, 6, 6, 0), Duration.ofHours(-1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("negative");
+    }
+
+    @Test
+    void zeroDurationReturnsFromUnchangedEvenOutsideWorkingHours() {
+        // Identity: adding nothing must not "helpfully" jump to the next opening.
+        OffsetDateTime outsideHours = at(2026, 8, 6, 20, 0);
+        assertThat(calendar().addDuration(outsideHours, Duration.ZERO)).isEqualTo(outsideHours);
+
+        OffsetDateTime insideHours = at(2026, 8, 6, 10, 0);
+        assertThat(calendar().addDuration(insideHours, Duration.ZERO)).isEqualTo(insideHours);
     }
 }
