@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+  <!-- The design DDL, copied verbatim from the repo root at build time.
+       It is plain ;-terminated DDL: no PL/SQL blocks, no / delimiters. -->
+  <changeSet id="cm-schema-v1" author="casemgmt" runOnChange="false">
+    <sqlFile path="db/changelog/sql/db-design.sql"
+             relativeToChangelogFile="false"
+             splitStatements="true"
+             endDelimiter=";"
+             stripComments="true"/>
+  </changeSet>
+
+  <include file="db/changelog/cm-poc-additions.xml"/>
+</databaseChangeLog>

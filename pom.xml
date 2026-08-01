@@ -23,7 +23,15 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <version.operaton>2.1.3</version.operaton>
-    <version.testcontainers>1.21.3</version.testcontainers>
+    <!-- DO NOT downgrade below 1.21.4 - that is the floor, not a whim.
+         1.21.3's DockerClientProviderStrategy hardcodes the connectivity-probe API version
+         at v1.32; Docker Engine 29.x raised its MinAPIVersion to 1.40, so every probe against
+         a current Docker Desktop daemon fails with "client version 1.32 is too old" even
+         though the daemon is perfectly healthy (upstream testcontainers-java #11210/#11232,
+         confirmed against a real Docker Engine 29.6.2 daemon during Task 2). 1.21.4 probes
+         v1.44 first and only falls back to v1.32 for genuinely old engines - bumped for that
+         fix alone; still the 1.21.x line the skew-avoidance pin below targets. -->
+    <version.testcontainers>1.21.4</version.testcontainers>
     <version.json-schema-validator>1.5.8</version.json-schema-validator>
     <version.archunit>1.4.1</version.archunit>
     <version.swagger-request-validator>2.44.9</version.swagger-request-validator>
