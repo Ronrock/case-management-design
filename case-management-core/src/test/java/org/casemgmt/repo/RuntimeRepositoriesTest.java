@@ -40,6 +40,14 @@ class RuntimeRepositoriesTest extends OracleTestBase {
                 OffsetDateTime.now(), OffsetDateTime.now(), null);
     }
 
+    /** Builds an OPEN, SYNCED task with the given assignee/candidate groups, backed by a fresh plan item. */
+    private CaseTask openTask(String id, String assignee, List<String> groups) {
+        planItems.insert(item(id + "-pi", PlanItemState.ACTIVE));
+        return new CaseTask(id, "eng-a:1", id + "-pi", null, "T", null,
+                TaskState.OPEN, assignee, null, groups, null, 50, null, null,
+                CaseTask.EngineSync.SYNCED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null);
+    }
+
     @Test
     void planItemsRoundTripAndUpdateStateOptimistically() {
         planItems.insert(item("pi-1", PlanItemState.AVAILABLE));
@@ -78,6 +86,85 @@ class RuntimeRepositoriesTest extends OracleTestBase {
 
         assertThat(tasks.worklist(null, List.of("reviewers"), 20))
                 .extracting(CaseTask::id).containsExactly("t-2");
+    }
+
+    @Test
+    void worklistWithNoAssigneeAndNoGroupsReturnsNothing() {
+        // A caller who is neither the assignee of anything nor a member of any candidate
+        // group must see an empty worklist, not every task in the system. Dropping the
+        // group predicate entirely when the groups list is empty (rather than matching
+        // nothing) was the CRITICAL defect the reviewer caught.
+        tasks.insert(openTask("t-none-1", "alice", List.of("reviewers")));
+        tasks.insert(openTask("t-none-2", null, List.of("reviewers")));
+
+        assertThat(tasks.worklist(null, List.of(), 20)).isEmpty();
+    }
+
+    @Test
+    void worklistMatchesByAssigneeOnlyWhenNoGroupsSupplied() {
+        tasks.insert(openTask("t-ao-1", "alice", List.of()));
+        tasks.insert(openTask("t-ao-2", "bob", List.of()));
+
+        assertThat(tasks.worklist("alice", List.of(), 20))
+                .extracting(CaseTask::id).containsExactly("t-ao-1");
+    }
+
+    @Test
+    void worklistMatchesByGroupOnlyWhenNoAssigneeSupplied() {
+        tasks.insert(openTask("t-go-1", null, List.of("reviewers")));
+        tasks.insert(openTask("t-go-2", null, List.of("editors")));
+
+        assertThat(tasks.worklist(null, List.of("reviewers"), 20))
+                .extracting(CaseTask::id).containsExactly("t-go-1");
+    }
+
+    @Test
+    void worklistOrsAssigneeAndCandidateGroupsRatherThanAnding() {
+        // "My work OR work I could pick up" — the same OR semantics Task 23's
+        // ActionPolicy.mayActOnTask already established for the same question. ANDing
+        // the two (the second defect the reviewer caught) hides both a task assigned to
+        // me whose groups I don't share, and an unassigned task whose group I do share.
+        tasks.insert(openTask("t-or-mine", "alice", List.of("finance")));       // matches via assignee only
+        tasks.insert(openTask("t-or-group", null, List.of("reviewers")));       // matches via group only
+        tasks.insert(openTask("t-or-neither", "bob", List.of("finance")));      // matches neither
+
+        assertThat(tasks.worklist("alice", List.of("reviewers"), 20))
+                .extracting(CaseTask::id)
+                .containsExactlyInAnyOrder("t-or-mine", "t-or-group");
+    }
+
+    @Test
+    void worklistIgnoresTaskWithEmptyCandidateGroupsArray() {
+        tasks.insert(openTask("t-empty-cg", null, List.of()));
+
+        assertThat(tasks.worklist(null, List.of("reviewers"), 20)).isEmpty();
+    }
+
+    @Test
+    void worklistMatchesWhenAnyOfSeveralCandidateGroupsOverlaps() {
+        tasks.insert(openTask("t-multi", null, List.of("a", "b", "c")));
+
+        assertThat(tasks.worklist(null, List.of("x", "b", "y"), 20))
+                .extracting(CaseTask::id).containsExactly("t-multi");
+    }
+
+    @Test
+    void worklistExcludesFailedSyncAlongsidePending() {
+        planItems.insert(item("t-failed-pi", PlanItemState.ACTIVE));
+        tasks.insert(new CaseTask("t-failed", "eng-a:1", "t-failed-pi", null, "T", null,
+                TaskState.OPEN, "alice", null, List.of("reviewers"), null, 50, null, null,
+                CaseTask.EngineSync.FAILED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null));
+
+        assertThat(tasks.worklist("alice", List.of("reviewers"), 20)).isEmpty();
+    }
+
+    @Test
+    void worklistRespectsLimit() {
+        tasks.insert(openTask("t-lim-1", null, List.of("reviewers")));
+        tasks.insert(openTask("t-lim-2", null, List.of("reviewers")));
+        tasks.insert(openTask("t-lim-3", null, List.of("reviewers")));
+
+        assertThat(tasks.worklist(null, List.of("reviewers"), 2)).hasSize(2);
     }
 
     @Test

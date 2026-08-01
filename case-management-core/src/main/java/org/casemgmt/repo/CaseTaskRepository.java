@@ -65,9 +65,12 @@ public class CaseTaskRepository {
     }
 
     /**
-     * Worklist: open/claimed tasks visible to an assignee and/or a set of candidate groups.
+     * Worklist: open/claimed tasks that are either assigned to the caller or reachable
+     * through the caller's candidate-group membership — "my work OR work I could pick up",
+     * the same semantics {@code ActionPolicy.mayActOnTask} (Task 23) already established for
+     * "may this caller act on this task at all".
      *
-     * <p>Two rules make this query more than a plain filter:
+     * <p>Three rules make this query more than a plain filter:
      *
      * <ul>
      * <li>Tasks whose {@code ENGINE_SYNC_} is not {@code SYNCED} are excluded outright. In
@@ -75,8 +78,7 @@ public class CaseTaskRepository {
      * CM_TASK row (spec §3.5); until the engine confirms the task exists, claiming or
      * completing it locally would succeed while the corresponding engine action fails. Hiding
      * unsynced tasks from the worklist makes that eventual-consistency window invisible to the
-     * caller rather than surfacing as a confusing failure on claim. Task 23's ActionPolicy
-     * relies on this same exclusion.</li>
+     * caller rather than surfacing as a confusing failure on claim.</li>
      * <li>Candidate-group matching needs a set-overlap test between the caller's groups and
      * each task's {@code CAND_GROUPS_JSON_} array. The brief's sketch built this with a
      * {@code JSON_TABLE(...) MEMBER OF (SELECT * FROM JSON_TABLE(:groupsJson, ...))}
@@ -89,23 +91,40 @@ public class CaseTaskRepository {
      * expand it. Applying that same pattern here needed only ONE JSON_TABLE, on the stored
      * column: explode {@code CAND_GROUPS_JSON_} into rows and test each exploded value with
      * plain {@code IN (:groups)}. That is the form used below.</li>
+     * <li><b>No assignee and no groups means no visibility, not full visibility.</b> A caller
+     * who is nobody's assignee and belongs to no candidate group is not entitled to see any
+     * task by either predicate, so the two clauses cannot simply be omitted when their input
+     * is empty — omitting both would leave the WHERE clause with no visibility restriction at
+     * all, returning every task in the system to the least-privileged caller (the defect a
+     * live review caught: {@code worklist(null, List.of(), n)} returned every OPEN/CLAIMED
+     * SYNCED task, system-wide). This method short-circuits to an empty list before touching
+     * the database in that case, and otherwise ORs whichever of the two predicates actually
+     * has input rather than ANDing them (ANDing was the second defect: it hid a task assigned
+     * to the caller under a non-matching group, and a group-matched task assigned to nobody
+     * relevant, from the same caller).</li>
      * </ul>
      */
     public List<CaseTask> worklist(String assignee, List<String> groups, int limit) {
         boolean hasAssignee = assignee != null;
         boolean hasGroups = groups != null && !groups.isEmpty();
 
-        StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_TASK t\n"
-                + "WHERE STATE_ IN ('OPEN','CLAIMED') AND ENGINE_SYNC_ = 'SYNCED'\n");
-        if (hasAssignee) {
-            sql.append("  AND ASSIGNEE_ = :assignee\n");
+        if (!hasAssignee && !hasGroups) {
+            return List.of();
         }
-        if (hasGroups) {
-            sql.append("""
-                      AND EXISTS (
-                        SELECT 1 FROM JSON_TABLE(t.CAND_GROUPS_JSON_, '$[*]' COLUMNS (g VARCHAR2(255) PATH '$')) jt
-                        WHERE jt.g IN (:groups))
-                    """);
+
+        String groupPredicate = """
+                EXISTS (
+                    SELECT 1 FROM JSON_TABLE(t.CAND_GROUPS_JSON_, '$[*]' COLUMNS (g VARCHAR2(255) PATH '$')) jt
+                    WHERE jt.g IN (:groups))""";
+
+        StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_TASK t\n"
+                + "WHERE STATE_ IN ('OPEN','CLAIMED') AND ENGINE_SYNC_ = 'SYNCED'\n  AND ");
+        if (hasAssignee && hasGroups) {
+            sql.append("(ASSIGNEE_ = :assignee OR ").append(groupPredicate).append(")\n");
+        } else if (hasAssignee) {
+            sql.append("ASSIGNEE_ = :assignee\n");
+        } else {
+            sql.append(groupPredicate).append("\n");
         }
         sql.append("ORDER BY CREATED_AT_ FETCH FIRST :limit ROWS ONLY");
 
