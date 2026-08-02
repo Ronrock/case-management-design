@@ -96,23 +96,77 @@ class PlanItemServiceTest extends OracleTestBase {
         assertThat(terminated.terminationReason()).isEqualTo("not needed");
     }
 
+    /**
+     * Review fix: the original {@code staleVersionsAreRejected} (inherited from the task brief)
+     * completed the item first, so by the time {@code terminate} ran the item was already
+     * COMPLETED — an ENDED state, not in {@code TERMINABLE} — and the throw came from the
+     * legal-state check ({@code code=illegal-transition}), never from the
+     * {@code OptimisticLockException -> CaseConflictException("version-conflict")} mapping at
+     * {@code PlanItemService.transition}. That mapping had no coverage at all: a rethrow that
+     * dropped the code, or a raw {@code OptimisticLockException} leaking past the service
+     * boundary, would have passed the old test.
+     *
+     * <p>This version keeps 'manual' in ENABLED — a state that IS still legal for {@code
+     * terminate} — and bumps its version out from under the held reference via a direct
+     * same-state {@code planItems.updateState} call (standing in for a concurrent writer), so
+     * the {@code expectedVersion} the test then passes to {@code terminate} is stale while the
+     * state check passes cleanly. That reaches the optimistic-lock catch block specifically, and
+     * the assertion pins the resulting code to {@code "version-conflict"} rather than merely
+     * {@code CaseConflictException} — which is the whole point of having two distinct codes.
+     * Confirmed to fail (during development) if {@code PlanItemService}'s catch block is changed
+     * to rethrow without the code, e.g. {@code new CaseConflictException(null, e.getMessage(),
+     * List.of())} — the "illegal-transition" code from a same-state check would not fool this
+     * assertion either, since it names the exact string.
+     */
     @Test
-    void staleVersionsAreRejected() {
-        PlanItem auto = item("auto");
-        planItemService.complete(caseId, auto.id(), auto.version(), alice);
+    void staleVersionAgainstAStillLegalStateYieldsVersionConflict() {
+        PlanItem manual = item("manual");
+        assertThat(manual.state()).isEqualTo(PlanItemState.ENABLED);
 
-        assertThatThrownBy(() -> planItemService.terminate(caseId, auto.id(), auto.version(), "x", alice))
-                .isInstanceOf(CaseConflictException.class);
+        // Simulates a concurrent writer: same state, but the UPDATE always bumps VERSION_, so
+        // the row now expects manual.version() + 1 while `manual` (and the version the test is
+        // about to pass to terminate) still names the old one.
+        planItems.updateState(manual, manual.version());
+
+        assertThatThrownBy(() -> planItemService.terminate(caseId, manual.id(), manual.version(), "x", alice))
+                .isInstanceOf(CaseConflictException.class)
+                .extracting(e -> ((CaseConflictException) e).code())
+                .isEqualTo("version-conflict");
+
+        // And the row itself is untouched by the rejected call.
+        assertThat(planItems.require(manual.id()).state()).isEqualTo(PlanItemState.ENABLED);
     }
 
+    /**
+     * Review fix: the original assertion ({@code after > before}) only proved SOME event was
+     * appended — it would still pass if the wrong event type, or an event for the wrong plan
+     * item, were emitted. This checks the actual {@code case.planitem.transitioned} event for
+     * this specific manual action.
+     *
+     * <p>Filters on {@code reason == "manual action"} (the literal {@code transition()} stamps
+     * on every manual transition), not just {@code planItemId}: 'manual' already has ONE
+     * transitioned event from case creation (its own AVAILABLE -&gt; ENABLED entry-criterion
+     * admission), so filtering on {@code planItemId} alone would see two events and the "exactly
+     * one" assertion would be testing the wrong thing. Filtering on the manual-action reason
+     * isolates precisely the event this test's own call produced.
+     */
     @Test
-    void everyTransitionEmitsAnEvent() {
+    void startingAnItemEmitsExactlyOneTransitionedEventWithTheRightShape() {
         PlanItem manual = item("manual");
-        long before = jdbc().sql("SELECT COUNT(*) FROM CM_EVENT").query(Long.class).single();
 
         planItemService.start(caseId, manual.id(), manual.version(), alice);
 
-        long after = jdbc().sql("SELECT COUNT(*) FROM CM_EVENT").query(Long.class).single();
-        assertThat(after).isGreaterThan(before);
+        List<Map<String, Object>> manualActionEvents = jdbc().sql("""
+                SELECT DATA_JSON_ FROM CM_EVENT
+                WHERE SUBJECT_ = :id AND TYPE_ LIKE '%case.planitem.transitioned' ORDER BY SEQ_""")
+                .param("id", caseId)
+                .query(String.class).list().stream()
+                .map(JsonCodec::toMap)
+                .filter(data -> manual.id().equals(data.get("planItemId")))
+                .filter(data -> "manual action".equals(data.get("reason")))
+                .toList();
+
+        assertThat(manualActionEvents).hasSize(1);
+        assertThat(manualActionEvents.get(0)).containsEntry("from", "ENABLED").containsEntry("to", "ACTIVE");
     }
 }
