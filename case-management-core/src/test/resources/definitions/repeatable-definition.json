@@ -1,0 +1,8 @@
+{
+  "key": "repeat-demo",
+  "name": "Repeat Demo",
+  "tenantId": "t1",
+  "planItems": [
+    { "defKey": "ping", "type": "MILESTONE", "name": "Ping", "repetition": true, "sortOrder": 10 }
+  ]
+}
