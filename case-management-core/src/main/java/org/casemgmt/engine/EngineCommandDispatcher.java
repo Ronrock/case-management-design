@@ -8,8 +8,10 @@ import java.util.Map;
 
 /**
  * Drains the engine command outbox against the real (remote) gateway and reports the resulting
- * sync state back onto CM_TASK, so {@code availableActions} can withhold {@code claim} until the
- * engine actually has the task.
+ * sync state back onto CM_TASK (for {@code CREATE_TASK}) or CM_LINKED_PROCESS (for {@code
+ * START_PROCESS}), so {@code availableActions} can withhold {@code claim} until the engine
+ * actually has the task, and a linked process's {@code PROC_INST_ID_} can be updated from its
+ * locally-minted placeholder to the engine's real id once confirmed.
  *
  * <p><b>Timeout assumption, for Task 25 (the production {@code RestClient} bean):</b> this
  * dispatcher's whole retry-versus-dead-letter decision depends on {@link EngineGateway} calls
@@ -23,9 +25,16 @@ import java.util.Map;
  */
 public class EngineCommandDispatcher {
 
-    /** Callback: (caseTaskId or planItemId, sync state, engine id). */
+    /**
+     * Callback: (correlation key, sync state, engine id). For {@code CREATE_TASK} the correlation
+     * key is {@code planItemId} (a human task is always backed by exactly one plan item). For
+     * {@code START_PROCESS} it is the {@code CM_LINKED_PROCESS} row id ({@code correlationId} in
+     * the enqueued payload, originally {@link StartProcessRequest#correlationId()} — Task 18
+     * review round 2: {@code planItemId} cannot serve this purpose because an ad hoc linked
+     * process legitimately has none).
+     */
     public interface SyncReporter {
-        void report(String taskOrPlanItemId, CaseTask.EngineSync sync, String engineId);
+        void report(String correlationKey, CaseTask.EngineSync sync, String engineId);
     }
 
     private final EngineCommandRepository commands;
@@ -72,19 +81,33 @@ public class EngineCommandDispatcher {
             case COMPLETE_TASK -> delegate.completeTask(str(p, "engineTaskId"), map(p.get("variables")));
             case START_PROCESS -> {
                 EngineProcessRef ref = delegate.startProcess(new StartProcessRequest(
-                        command.caseId(), str(p, "planItemId"),
+                        command.caseId(), blankToNull(str(p, "planItemId")),
                         str(p, "processDefinitionKey"), map(p.get("variables"))));
-                syncReporter.report(str(p, "planItemId"), CaseTask.EngineSync.SYNCED,
+                syncReporter.report(str(p, "correlationId"), CaseTask.EngineSync.SYNCED,
                         ref.processInstanceId());
             }
             case CANCEL_PROCESS -> delegate.cancelProcess(str(p, "processInstanceId"), str(p, "reason"));
         }
     }
 
+    /**
+     * Reports {@code FAILED} once a command is dead-lettered, so whatever row is waiting on it
+     * does not stay {@code PENDING} forever. {@code CREATE_TASK} and {@code START_PROCESS} use
+     * different keys in their payload ({@code planItemId} vs. {@code correlationId} — see {@link
+     * SyncReporter}'s Javadoc), so both are checked; a command only ever populates one of them,
+     * and {@code blankToNull} guards the {@code ""} sentinel {@link OutboxEngineGateway} writes
+     * for an absent value (an ad hoc linked process's {@code planItemId}, in particular) from
+     * being reported as a real correlation key.
+     */
     private void reportFailure(EngineCommand command) {
-        Object planItemId = command.payload().get("planItemId");
+        Map<String, Object> p = command.payload();
+        String planItemId = blankToNull(str(p, "planItemId"));
         if (planItemId != null) {
-            syncReporter.report(planItemId.toString(), CaseTask.EngineSync.FAILED, null);
+            syncReporter.report(planItemId, CaseTask.EngineSync.FAILED, null);
+        }
+        String correlationId = blankToNull(str(p, "correlationId"));
+        if (correlationId != null) {
+            syncReporter.report(correlationId, CaseTask.EngineSync.FAILED, null);
         }
     }
 

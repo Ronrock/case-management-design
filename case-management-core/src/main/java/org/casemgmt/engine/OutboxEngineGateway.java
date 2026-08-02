@@ -65,10 +65,17 @@ public class OutboxEngineGateway implements EngineGateway {
 
     @Override
     public EngineProcessRef startProcess(StartProcessRequest request) {
+        // "planItemId" is guarded like createHumanTask's assignee/formKey above: unlike a human
+        // task, a linked process legitimately has no plan item at all (an ad hoc process — see
+        // LinkedProcessService's Javadoc), and Map.of() throws NPE on a null value, not just a
+        // missing key. "correlationId" carries the CM_LINKED_PROCESS row id through so
+        // EngineCommandDispatcher can report the engine's confirmation back against THAT row
+        // instead of planItemId, which for an ad hoc process would have nothing to correlate on.
         enqueue(EngineCommand.Type.START_PROCESS, request.caseId(),
-                Map.of("planItemId", request.planItemId(),
+                Map.of("planItemId", request.planItemId() == null ? "" : request.planItemId(),
                         "processDefinitionKey", request.processDefinitionKey(),
-                        "variables", request.variables() == null ? Map.of() : request.variables()));
+                        "variables", request.variables() == null ? Map.of() : request.variables(),
+                        "correlationId", request.correlationId() == null ? "" : request.correlationId()));
         return new EngineProcessRef(null, request.processDefinitionKey());
     }
 
