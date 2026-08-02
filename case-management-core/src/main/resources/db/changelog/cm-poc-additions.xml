@@ -54,6 +54,26 @@
     </createIndex>
   </changeSet>
 
+  <!-- Task 19: same claim-by-UPDATE fix as cm-poc-engine-command-claim above, applied to the
+       webhook delivery outbox for the same reason — SELECT ... FOR UPDATE SKIP LOCKED releases
+       its lock the instant the SELECT returns on this codebase's autocommit connections, long
+       before the outbound HTTP call, so two dispatchers would claim the same delivery row. See
+       WebhookRepository.claimDueDeliveries. -->
+  <changeSet id="cm-poc-webhook-delivery-claim" author="casemgmt">
+    <addColumn tableName="CM_WEBHOOK_DELIVERY">
+      <column name="CLAIM_TOKEN_" type="VARCHAR2(64)"/>
+      <column name="CLAIMED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <sql>ALTER TABLE CM_WEBHOOK_DELIVERY DROP CONSTRAINT CK_CM_WHD_STATUS</sql>
+    <sql>
+      ALTER TABLE CM_WEBHOOK_DELIVERY ADD CONSTRAINT CK_CM_WHD_STATUS
+        CHECK (STATUS_ IN ('PENDING','DELIVERED','RETRYING','CLAIMED','DEAD'))
+    </sql>
+    <createIndex tableName="CM_WEBHOOK_DELIVERY" indexName="IX_CM_WHD_CLAIM">
+      <column name="CLAIM_TOKEN_"/>
+    </createIndex>
+  </changeSet>
+
   <changeSet id="cm-poc-engine-sync-columns" author="casemgmt">
     <addColumn tableName="CM_TASK">
       <column name="ENGINE_SYNC_" type="VARCHAR2(20)" defaultValue="SYNCED">
