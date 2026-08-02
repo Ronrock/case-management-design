@@ -97,6 +97,39 @@ class CaseServiceTest extends OracleTestBase {
         assertThat(closed.closedAt()).isNotNull();
     }
 
+    /**
+     * Task 15 review, Important 2: close() must bring the plan model into line the way cancel()
+     * already does. Completing "review" satisfies "reviewed"'s entry criterion
+     * (${items.review.state == 'COMPLETED'}) but nothing evaluates it before close() runs this
+     * fix — so before the fix, "reviewed" was left AVAILABLE forever under a CLOSED case with no
+     * CM_MILESTONE row. Now it must be properly achieved (not merely swept to TERMINATED, which
+     * would misrecord a genuinely-satisfied milestone as if it had been aborted), and no plan
+     * item may be left AVAILABLE or ACTIVE.
+     */
+    @Test
+    void closeResolvesTheMilestoneAndLeavesNoOpenPlanItem() {
+        CaseInstance created = cases.create("widget-review", "t1", null, "T",
+                CasePriority.MEDIUM, Map.of(), alice);
+        PlanItem review = planItems.findByCase(created.id()).stream()
+                .filter(i -> i.name().equals("review")).findFirst().orElseThrow();
+        planItems.updateState(review.withState(PlanItemState.COMPLETED), review.version());
+
+        cases.close(created.id(), cases.get(created.id()).version(), "approved", alice);
+
+        List<PlanItem> items = planItems.findByCase(created.id());
+        assertThat(items).allMatch(i -> i.state().isEnded());
+
+        PlanItem reviewed = items.stream()
+                .filter(i -> i.name().equals("reviewed")).findFirst().orElseThrow();
+        assertThat(reviewed.state()).isEqualTo(PlanItemState.COMPLETED);
+
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_MILESTONE WHERE CASE_ID_ = :id")
+                .param("id", created.id()).query(Integer.class).single()).isEqualTo(1);
+        assertThat(jdbc().sql("SELECT TYPE_ FROM CM_EVENT WHERE SUBJECT_ = :id")
+                .param("id", created.id()).query(String.class).list())
+                .anyMatch(t -> t.endsWith("case.milestone.achieved"));
+    }
+
     @Test
     void cancelFromAnyLiveStateIsAllowedAndTerminatesOpenPlanItems() {
         CaseInstance created = cases.create("widget-review", "t1", null, "T",

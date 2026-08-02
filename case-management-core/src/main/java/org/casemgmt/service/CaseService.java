@@ -8,6 +8,8 @@ import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
 import org.casemgmt.repo.*;
 import org.casemgmt.rules.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
@@ -48,6 +50,8 @@ public class CaseService {
      * unreachable by correct models rather than a real business limit.
      */
     static final int MAX_REPETITIONS_PER_ITEM = 500;
+
+    private static final Logger log = LoggerFactory.getLogger(CaseService.class);
 
     private final CaseRepository cases;
     private final CaseDefinitionRepository definitions;
@@ -152,6 +156,40 @@ public class CaseService {
         return saved;
     }
 
+    /**
+     * Closes a case, then brings its plan items into line the way every other terminal-state
+     * path in this codebase already does: {@code StageCompletion}'s autocomplete cascade
+     * terminates unstarted descendants at any depth, and {@link #cancel} terminates every open
+     * item outright. Before this fix {@code close} did neither — it only checked
+     * {@link StageCompletion#caseBlockers} and wrote the case row, so a case could close with a
+     * plan item still sitting AVAILABLE or ACTIVE: e.g. a milestone whose entry criterion became
+     * satisfied by the very same required item that just unblocked the close, but which nothing
+     * ever went back to evaluate, so it never got its {@code CM_MILESTONE} row or its achieved
+     * event.
+     *
+     * <p>Fixed with BOTH of the two remedies the review raised, not either alone, because they
+     * cover different failure modes:
+     * <ul>
+     * <li>{@link #reevaluate} first, so anything the plan model can <em>genuinely</em> resolve —
+     * a milestone whose criteria now hold, a stage that can now autocomplete — is recorded
+     * properly: a real {@link Transition}, a real event, a real {@code CM_MILESTONE} row where
+     * applicable. Terminating such an item outright instead (skipping straight to TERMINATED)
+     * would misrecord something that actually completed as if it had been aborted.</li>
+     * <li>An explicit termination sweep afterwards, identical in shape to {@link #cancel}'s,
+     * because {@code reevaluate} alone does not <em>guarantee</em> every item ends — an item
+     * gated on something that never happened (no entry criteria ever satisfied, e.g. an
+     * unstarted optional stage) would still be sitting open after {@code reevaluate} returns.
+     * The sweep is what makes "a CLOSED case carries no AVAILABLE/ACTIVE plan item" an actual
+     * invariant rather than something that merely usually happens to be true.</li>
+     * </ul>
+     *
+     * <p>Ordering matters: {@link StageCompletion#caseBlockers} is checked <em>before</em> either
+     * remedy runs, against the pre-close snapshot. Required items are only ever finished by an
+     * external actor (completing a human task) — {@code reevaluate} cannot do that on its own —
+     * so checking blockers first, and refusing to close (and therefore never touching the plan
+     * model) while one is open, is unaffected by moving the rest of this method's plan-item
+     * handling around it.
+     */
     @Transactional
     public CaseInstance close(String caseId, long expectedVersion, String outcome, Actor actor) {
         CaseInstance current = cases.require(caseId);
@@ -164,6 +202,13 @@ public class CaseService {
                     "Case cannot close while required plan items are open: "
                             + blockers.stream().map(PlanItem::name).toList(),
                     List.of("cancel", "update"));
+        }
+
+        reevaluate(caseId, actor);
+        for (PlanItem item : planItems.findByCase(caseId)) {
+            if (!item.state().isEnded()) {
+                planItems.updateState(item.withState(PlanItemState.TERMINATED), item.version());
+            }
         }
 
         CaseInstance closed = new CaseInstance(current.id(), current.engineId(), current.tenantId(),
@@ -241,6 +286,15 @@ public class CaseService {
         for (PlanItemDefinition repeatable : evaluator.repeatable(postTransition)) {
             PlanItem latest = postTransition.latest(repeatable.defKey());
             if (latest.repetitionNo() >= MAX_REPETITIONS_PER_ITEM) {
+                // Loud enough to notice a genuine runaway (a stuck repetition count is otherwise
+                // invisible — nothing else here fails or even changes shape), quiet enough not to
+                // fail the mutation that happened to trigger it (see the class-level reasoning for
+                // why this skips rather than throws).
+                log.warn("Case {}: repeatable plan item '{}' hit MAX_REPETITIONS_PER_ITEM ({}) — "
+                                + "no further instances will be created. This usually means the "
+                                + "item's entry criteria don't depend on anything that changes "
+                                + "between cycles; check the case definition.",
+                        caseId, repeatable.defKey(), MAX_REPETITIONS_PER_ITEM);
                 continue;
             }
             planItems.insert(instantiator.repeat(latest, repeatable));
