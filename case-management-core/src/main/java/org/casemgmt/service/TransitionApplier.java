@@ -31,6 +31,21 @@ import java.util.Map;
  * single point-in-time read; re-reading before each {@code updateState} call is what keeps the
  * optimistic-lock {@code version} correct across a chain of transitions for one item within a
  * single {@code apply} call.
+ *
+ * <p><b>{@link #persist}/{@link #sideEffects} split (Task 16):</b> {@link #apply} persists and
+ * then reacts, in one step per transition, which is exactly right for its callers (the evaluator
+ * hands it transitions for rows nobody has written yet). {@code PlanItemService}'s manual
+ * enable/start/complete/terminate actions are different: the caller already knows the exact
+ * {@code expectedVersion} for the item it just read and has to enforce a legal-transition check
+ * against it, so it does its own {@code planItems.updateState} rather than let {@code apply}
+ * blindly re-read-and-write. Calling {@code apply} afterward would persist the SAME item a
+ * second time — a redundant UPDATE, a second version bump, and (since the caller would then no
+ * longer know the final version without a re-read) a violation of the "build the return value
+ * from your own successful write, don't re-read" rule Task 4 established. {@link #sideEffects}
+ * is {@link #apply}'s per-transition body minus the write: it takes the already-persisted
+ * {@link PlanItem} and only does what {@link #apply} does after its own {@code updateState}
+ * call — engine task creation, milestone achievement, the transitioned event. This keeps every
+ * transition, manual or evaluator-driven, going through exactly one write path.
  */
 public class TransitionApplier {
 
@@ -54,18 +69,30 @@ public class TransitionApplier {
         for (Transition t : transitions) {
             PlanItem item = planItems.require(t.planItemId());
             PlanItem updated = planItems.updateState(item.withState(t.to()), item.version());
-            PlanItemDefinition def = snapshot.definitionOf(item);
-
-            if (t.to() == PlanItemState.ACTIVE && def.type() == PlanItemType.HUMAN_TASK) {
-                createHumanTask(snapshot, updated, def, actor);
-            }
-            if (t.to() == PlanItemState.COMPLETED && def.type() == PlanItemType.MILESTONE) {
-                achieveMilestone(snapshot, updated, actor);
-            }
-            publisher.publish(event(snapshot, EventTypes.PLAN_ITEM_TRANSITIONED, Map.of(
-                    "planItemId", updated.id(), "defKey", def.defKey(),
-                    "from", t.from().name(), "to", t.to().name(), "reason", t.reason())));
+            sideEffects(snapshot, t, updated, actor);
         }
+    }
+
+    /**
+     * Everything a transition implies beyond persisting the state itself: an engine task for a
+     * freshly-ACTIVE human task, a milestone row for a freshly-COMPLETED milestone, and always
+     * the {@code case.planitem.transitioned} event. Takes the already-persisted {@link PlanItem}
+     * (post-{@code updateState}, so {@code updated.version()} is the new version) rather than
+     * persisting it itself — see the class Javadoc for why {@code PlanItemService} needs this
+     * split instead of calling {@link #apply}.
+     */
+    public void sideEffects(CaseSnapshot snapshot, Transition t, PlanItem updated, Actor actor) {
+        PlanItemDefinition def = snapshot.definitionOf(updated);
+
+        if (t.to() == PlanItemState.ACTIVE && def.type() == PlanItemType.HUMAN_TASK) {
+            createHumanTask(snapshot, updated, def, actor);
+        }
+        if (t.to() == PlanItemState.COMPLETED && def.type() == PlanItemType.MILESTONE) {
+            achieveMilestone(snapshot, updated, actor);
+        }
+        publisher.publish(event(snapshot, EventTypes.PLAN_ITEM_TRANSITIONED, Map.of(
+                "planItemId", updated.id(), "defKey", def.defKey(),
+                "from", t.from().name(), "to", t.to().name(), "reason", t.reason())));
     }
 
     private void createHumanTask(CaseSnapshot snapshot, PlanItem item, PlanItemDefinition def, Actor actor) {

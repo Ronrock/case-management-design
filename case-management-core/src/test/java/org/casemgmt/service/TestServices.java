@@ -34,4 +34,14 @@ public final class TestServices {
                 new ParticipantRepository(jdbc), evaluator, new PlanModelInstantiator(),
                 new StageCompletion(), applier, publisher, "eng-test");
     }
+
+    public static PlanItemService planItemService(DataSource dataSource, EngineGateway gateway) {
+        JdbcClient jdbc = JdbcClient.create(dataSource);
+        var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        var applier = new TransitionApplier(new PlanItemRepository(jdbc), new CaseTaskRepository(jdbc),
+                new MilestoneRepository(jdbc), gateway, publisher);
+        return new PlanItemService(new PlanItemRepository(jdbc), caseService(dataSource, gateway),
+                applier, publisher);
+    }
 }
