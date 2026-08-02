@@ -23,8 +23,23 @@ public class MilestoneRepository {
             .param("name", name).update();
     }
 
-    public void achieve(String milestoneId, String actor) {
-        jdbc.sql("""
+    /**
+     * Idempotent by SQL: the {@code ACHIEVED_ = 0} predicate means only the FIRST caller to reach
+     * this UPDATE for a given milestone ever actually flips the row, no matter how many callers
+     * race here concurrently. Returns the number of rows the UPDATE actually matched (0 or 1) so
+     * a caller — {@link org.casemgmt.service.MilestoneService#achieve}, in particular — can tell
+     * "I just achieved it" (1) apart from "someone else already had" (0) using the SAME statement
+     * that performed the write, rather than a separate SELECT taken before the UPDATE. A
+     * pre-UPDATE read cannot safely answer that question under concurrency: two callers can both
+     * read {@code achieved = false} before either has written, race to this UPDATE, and — if the
+     * decision were based on that earlier read instead of this return value — both would believe
+     * they were the one who achieved it and both would publish a {@code milestone.achieved}
+     * event. Oracle serialises the two UPDATEs against the same row (the second blocks on the
+     * first's row lock, then re-evaluates {@code ACHIEVED_ = 0} against the post-commit value once
+     * unblocked), so exactly one of them ever sees {@code rows == 1}.
+     */
+    public int achieve(String milestoneId, String actor) {
+        return jdbc.sql("""
                 UPDATE CM_MILESTONE SET ACHIEVED_ = 1, ACHIEVED_AT_ = SYSTIMESTAMP, ACHIEVED_BY_ = :actor
                 WHERE ID_ = :id AND ACHIEVED_ = 0""")
             .param("actor", actor).param("id", milestoneId).update();

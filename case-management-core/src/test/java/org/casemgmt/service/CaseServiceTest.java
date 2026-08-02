@@ -288,6 +288,7 @@ class CaseServiceTest extends OracleTestBase {
 
     static class RecordingGateway implements EngineGateway {
         final List<HumanTaskRequest> created = new java.util.ArrayList<>();
+        final List<String> startedProcesses = new java.util.ArrayList<>();
         public EngineTaskRef createHumanTask(HumanTaskRequest r) {
             created.add(r);
             return new EngineTaskRef("engine-" + created.size(), r.name(), r.assignee(), r.caseId(), null);
@@ -295,6 +296,7 @@ class CaseServiceTest extends OracleTestBase {
         public void claimTask(String id, String user) {}
         public void completeTask(String id, Map<String, Object> v) {}
         public EngineProcessRef startProcess(StartProcessRequest r) {
+            startedProcesses.add(r.processDefinitionKey());
             return new EngineProcessRef("proc-1", r.processDefinitionKey());
         }
         public void cancelProcess(String id, String reason) {}

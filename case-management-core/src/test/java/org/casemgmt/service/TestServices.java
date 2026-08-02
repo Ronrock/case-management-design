@@ -53,4 +53,26 @@ public final class TestServices {
                 new CaseDefinitionRepository(dataSource), gateway, new FormValidator(),
                 planItemService(dataSource, gateway), new PlanItemRepository(jdbc), publisher);
     }
+
+    public static CommentService commentService(DataSource dataSource) {
+        JdbcClient jdbc = JdbcClient.create(dataSource);
+        var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        return new CommentService(new CommentRepository(jdbc), new CaseRepository(jdbc), publisher);
+    }
+
+    public static MilestoneService milestoneService(DataSource dataSource) {
+        JdbcClient jdbc = JdbcClient.create(dataSource);
+        var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        return new MilestoneService(new MilestoneRepository(jdbc), new CaseRepository(jdbc), publisher);
+    }
+
+    public static LinkedProcessService processService(DataSource dataSource, EngineGateway gateway) {
+        JdbcClient jdbc = JdbcClient.create(dataSource);
+        var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        return new LinkedProcessService(new LinkedProcessRepository(jdbc), new CaseRepository(jdbc),
+                gateway, publisher);
+    }
 }
