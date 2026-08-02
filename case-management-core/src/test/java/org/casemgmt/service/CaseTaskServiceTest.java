@@ -88,7 +88,7 @@ class CaseTaskServiceTest extends OracleTestBase {
                 Map.of("outcome", "not-a-valid-option"), alice))
                 .isInstanceOf(FormValidationException.class)
                 .satisfies(e -> assertThat(((FormValidationException) e).violations())
-                        .anySatisfy(v -> assertThat(v.pointer()).contains("outcome")));
+                        .anySatisfy(v -> assertThat(v.pointer()).isEqualTo("/outcome")));
 
         // The rejected payload must not have moved the task past CLAIMED: proves the
         // FormValidationException above came from schema validation, not a partial write.
@@ -118,5 +118,33 @@ class CaseTaskServiceTest extends OracleTestBase {
         // 'reviewed' milestone has entry criterion items.review.state == 'COMPLETED'
         assertThat(new MilestoneRepository(jdbc()).findByCase(caseId))
                 .anySatisfy(m -> assertThat(m.achieved()).isTrue());
+    }
+
+    /**
+     * Review fix (Important 2): {@code variables.get("outcome")} returns Java {@code null} for
+     * a missing key, and {@code String.valueOf(null)} used to turn that into the literal
+     * four-character string {@code "null"} instead of a real {@code null} — silently defeating
+     * any later {@code WHERE OUTCOME_ IS NULL} query. Uses a formKey-less plan item so this
+     * reaches {@code complete}'s outcome-extraction step directly, with no form schema in the
+     * way to reject the payload first (that would be the "wrong reason" trap: this test needs
+     * to prove the persisted value, not that validation runs).
+     */
+    @Test
+    void completingWithoutAnOutcomeKeyPersistsARealNullNotTheStringNull() throws Exception {
+        String json = """
+                {"key":"no-form-review","name":"No Form Review","tenantId":"t1",
+                 "planItems":[
+                   {"defKey":"plain","type":"HUMAN_TASK","name":"plain","sortOrder":10}]}""";
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        String noFormCaseId = cases.create("no-form-review", "t1", null, "T",
+                CasePriority.MEDIUM, Map.of(), alice).id();
+        CaseTask plainTask = tasks.findByCase(noFormCaseId).get(0);
+        assertThat(plainTask.formKey()).isNull();
+        CaseTask claimed = taskService.claim(plainTask.id(), plainTask.version(), alice);
+
+        CaseTask completed = taskService.complete(claimed.id(), claimed.version(), Map.of(), alice);
+
+        assertThat(completed.outcome()).isNull();
+        assertThat(tasks.require(completed.id()).outcome()).isNull();
     }
 }

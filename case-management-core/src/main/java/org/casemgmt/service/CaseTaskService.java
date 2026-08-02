@@ -126,14 +126,23 @@ public class CaseTaskService {
 
         CaseInstance c = cases.require(task.caseId());
         if (task.formKey() != null) {
-            definitions.formSchema(c.caseDefKey(), task.formKey())
-                    .ifPresent(schema -> formValidator.validate(schema, variables));
+            // Review fix (Minor): a declared formKey with no matching schema used to be
+            // silently treated as "nothing to validate" — exactly the silent form-contract
+            // failure the schema mechanism exists to prevent (spec §4.6). A typo'd formKey in
+            // a case definition (deploy time does not currently cross-check formKey against the
+            // "forms" map) would otherwise disable this task's entire safety net with no signal
+            // anywhere. Failing loudly here, the same way CaseSnapshot.definitionOf treats an
+            // unresolvable reference, surfaces the inconsistency instead of masking it.
+            Map<String, Object> schema = definitions.formSchema(c.caseDefKey(), task.formKey())
+                    .orElseThrow(() -> new IllegalStateException("Task " + taskId + " declares formKey '"
+                            + task.formKey() + "' but case definition '" + c.caseDefKey()
+                            + "' has no matching form schema"));
+            formValidator.validate(schema, variables);
         }
 
         engine.completeTask(task.engineTaskId(), variables);
 
-        CaseTask completed = withState(task, TaskState.COMPLETED, task.assignee(),
-                variables == null ? null : String.valueOf(variables.get("outcome")));
+        CaseTask completed = withState(task, TaskState.COMPLETED, task.assignee(), outcomeOf(variables));
         CaseTask saved = save(completed, expectedVersion);
 
         publisher.publish(event(c, EventTypes.TASK_COMPLETED,
@@ -147,6 +156,23 @@ public class CaseTaskService {
         planItems.complete(task.caseId(), planItem.id(), planItem.version(), actor);
 
         return saved;
+    }
+
+    /**
+     * Review fix: {@code variables.get("outcome")} returns Java {@code null} when the key is
+     * simply absent (as opposed to present with a null value — {@code Map.of} payloads can't
+     * even express that), and {@code String.valueOf(null)} silently turns that into the
+     * four-character string {@code "null"} — a real value that persists into {@code
+     * OUTCOME_} and ships in the {@code TASK_COMPLETED} event, defeating any later
+     * {@code WHERE OUTCOME_ IS NULL} query. This checks the extracted value for null itself
+     * before stringifying, so an absent or null {@code outcome} stays a real {@code null}.
+     */
+    private String outcomeOf(Map<String, Object> variables) {
+        if (variables == null) {
+            return null;
+        }
+        Object outcome = variables.get("outcome");
+        return outcome == null ? null : String.valueOf(outcome);
     }
 
     private CaseTask save(CaseTask task, long expectedVersion) {
