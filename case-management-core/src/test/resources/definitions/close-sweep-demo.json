@@ -1,0 +1,10 @@
+{
+  "key": "close-sweep-demo",
+  "name": "Close Sweep Demo",
+  "tenantId": "t1",
+  "planItems": [
+    { "defKey": "gate", "type": "HUMAN_TASK", "required": true, "sortOrder": 10 },
+    { "defKey": "followup", "type": "HUMAN_TASK",
+      "entryCriteria": ["${items.gate.state == 'COMPLETED'}"], "sortOrder": 20 }
+  ]
+}

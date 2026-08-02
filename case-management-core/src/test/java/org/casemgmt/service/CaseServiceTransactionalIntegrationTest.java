@@ -5,6 +5,7 @@ import org.casemgmt.domain.*;
 import org.casemgmt.engine.*;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.PlanItemRepository;
+import org.casemgmt.repo.WebhookRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -48,6 +49,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * report for the exact failure output). That confirms these tests actually exercise the
  * annotation rather than passing for some unrelated reason — a rollback test that stays green
  * without the annotation would prove nothing.
+ *
+ * <p><b>Round-2 review fix — CM_TASK/CM_WEBHOOK_DELIVERY coverage was vacuous.</b> The first
+ * cut injected the engine failure on the ONLY {@code createHumanTask} call each transaction
+ * made, which fires inside {@code TransitionApplier.createHumanTask} before {@code tasks.insert}
+ * runs — so no CM_TASK row was EVER written in either scenario, committed or not, and the
+ * CM_TASK assertion could not fail no matter what {@code @Transactional} did. CM_WEBHOOK_DELIVERY
+ * wasn't asserted at all, and no subscription was even seeded, so {@code EventPublisher.publish}
+ * never reached {@code enqueueDelivery}. Both definitions below now activate TWO human tasks
+ * where one gates on the other's completion but both fire in the SAME evaluator round: the
+ * {@link FailingGateway} lets the first succeed — writing a real CM_TASK row and, via a webhook
+ * subscription seeded in each test, a real CM_WEBHOOK_DELIVERY row — before failing on the
+ * second, so both tables genuinely have something to roll back before the assertions run.
  */
 class CaseServiceTransactionalIntegrationTest extends OracleTestBase {
 
@@ -59,13 +72,19 @@ class CaseServiceTransactionalIntegrationTest extends OracleTestBase {
 
     @BeforeEach
     void setUp() throws Exception {
-        deploy("/definitions/test-definition.json");
+        deploy("/definitions/txn-create-demo.json");
         deploy("/definitions/txn-close-demo.json");
 
         ctx = springContext(CaseServiceTestConfig.class);
         cases = ctx.getBean(CaseService.class);
         gateway = ctx.getBean(FailingGateway.class);
         planItems = new PlanItemRepository(jdbc());
+
+        // Matches every event for tenant t1, so any event genuinely published mid-transaction
+        // (case.created, task.created, plan-item transitions...) enqueues a real
+        // CM_WEBHOOK_DELIVERY row that rollback then has to actually remove.
+        new WebhookRepository(jdbc()).insert(CaseIds.newId(), "t1", "http://localhost/hook",
+                List.of("*"), "hash", 5);
     }
 
     @AfterEach
@@ -81,12 +100,16 @@ class CaseServiceTransactionalIntegrationTest extends OracleTestBase {
 
     @Test
     void createRollsBackEverythingOnAMidCreateEngineFailure() {
-        // "review" auto-activates during create()'s own reevaluate() call; failing there is
-        // exactly the review's probe: deep inside the post-insert side effects, after the case
-        // row, participant, plan items, event and audit row have all already run.
-        gateway.failAlways();
+        // "taskA" and "taskB" are both ungated and top-level, so create()'s reevaluate() admits
+        // both AVAILABLE -> ACTIVE in the SAME evaluator round; TransitionApplier then processes
+        // them in order. Letting taskA succeed first — a real CM_TASK row, a real
+        // CM_WEBHOOK_DELIVERY row via the subscription seeded in setUp() — before failing on
+        // taskB is what makes the CM_TASK/CM_WEBHOOK_DELIVERY assertions below capable of
+        // failing at all, unlike failing on the very first (and, before this fix, only) engine
+        // call this test made.
+        gateway.failOnTaskNamed("taskB");
 
-        assertThatThrownBy(() -> cases.create("widget-review", "t1", null, "T",
+        assertThatThrownBy(() -> cases.create("txn-create-demo", "t1", null, "T",
                 CasePriority.MEDIUM, Map.of(), alice))
                 .isInstanceOf(IllegalStateException.class);
 
@@ -95,14 +118,18 @@ class CaseServiceTransactionalIntegrationTest extends OracleTestBase {
         assertThat(countAll("CM_PLAN_ITEM")).isZero();
         assertThat(countAll("CM_EVENT")).isZero();
         assertThat(countAll("CM_AUDIT_LOG")).isZero();
+        assertThat(countAll("CM_TASK")).isZero();
+        assertThat(countAll("CM_WEBHOOK_DELIVERY")).isZero();
     }
 
     @Test
     void closeRollsBackEverythingOnAMidCloseEngineFailure() {
         // Let create() succeed first (only "gate" activates, and the gateway isn't failing yet),
         // then complete "gate" directly so close() is legally allowed to proceed. Closing then
-        // re-evaluates the plan model (Important 2's fix) and tries to activate "followup" —
-        // *that* is where this failure is injected, deep inside close()'s own transaction.
+        // re-evaluates the plan model (Important 2's fix): "followupA" and "followupB" both
+        // become eligible in the same round. The gateway lets followupA succeed — a real
+        // CM_TASK row, a real CM_WEBHOOK_DELIVERY row — before failing on followupB, so this
+        // transaction genuinely has rows in both tables to roll back, not just plan-item state.
         gateway.neverFail();
         CaseInstance created = cases.create("txn-close-demo", "t1", null, "T",
                 CasePriority.MEDIUM, Map.of(), alice);
@@ -112,8 +139,9 @@ class CaseServiceTransactionalIntegrationTest extends OracleTestBase {
         planItems.updateState(gate.withState(PlanItemState.COMPLETED), gate.version());
         int taskCountBeforeClose = countAll("CM_TASK");
         int eventCountBeforeClose = countAll("CM_EVENT");
+        int deliveryCountBeforeClose = countAll("CM_WEBHOOK_DELIVERY");
 
-        gateway.failOnTaskNamed("followup");
+        gateway.failOnTaskNamed("followupB");
         long versionBeforeClose = cases.get(created.id()).version();
 
         assertThatThrownBy(() -> cases.close(created.id(), versionBeforeClose, "approved", alice))
@@ -125,15 +153,20 @@ class CaseServiceTransactionalIntegrationTest extends OracleTestBase {
         assertThat(reloaded.closedAt()).isNull();
         assertThat(reloaded.version()).isEqualTo(versionBeforeClose);
 
-        // Nothing close()'s reevaluate()/sweep did — the "followup" plan-item transition, its
-        // CM_TASK row, the case.closed event, the case.close audit row — survives the rollback.
+        // Nothing close()'s reevaluate()/sweep did — followupA's plan-item transition, its
+        // CM_TASK row, its CM_WEBHOOK_DELIVERY row, the case.closed event, the case.close audit
+        // row — survives the rollback.
         assertThat(countAll("CM_TASK")).isEqualTo(taskCountBeforeClose);
         assertThat(countAll("CM_EVENT")).isEqualTo(eventCountBeforeClose);
+        assertThat(countAll("CM_WEBHOOK_DELIVERY")).isEqualTo(deliveryCountBeforeClose);
         assertThat(countWhere("CM_AUDIT_LOG", "ACTION_ = 'case.close'")).isZero();
 
-        PlanItem followup = planItems.findByCase(created.id()).stream()
-                .filter(i -> i.name().equals("followup")).findFirst().orElseThrow();
-        assertThat(followup.state()).isEqualTo(PlanItemState.AVAILABLE);
+        PlanItem followupA = planItems.findByCase(created.id()).stream()
+                .filter(i -> i.name().equals("followupA")).findFirst().orElseThrow();
+        PlanItem followupB = planItems.findByCase(created.id()).stream()
+                .filter(i -> i.name().equals("followupB")).findFirst().orElseThrow();
+        assertThat(followupA.state()).isEqualTo(PlanItemState.AVAILABLE);
+        assertThat(followupB.state()).isEqualTo(PlanItemState.AVAILABLE);
     }
 
     private int countAll(String table) {

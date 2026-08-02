@@ -4,7 +4,9 @@
   "tenantId": "t1",
   "planItems": [
     { "defKey": "gate", "type": "HUMAN_TASK", "required": true, "sortOrder": 10 },
-    { "defKey": "followup", "type": "HUMAN_TASK",
-      "entryCriteria": ["${items.gate.state == 'COMPLETED'}"], "sortOrder": 20 }
+    { "defKey": "followupA", "type": "HUMAN_TASK",
+      "entryCriteria": ["${items.gate.state == 'COMPLETED'}"], "sortOrder": 20 },
+    { "defKey": "followupB", "type": "HUMAN_TASK",
+      "entryCriteria": ["${items.gate.state == 'COMPLETED'}"], "sortOrder": 30 }
   ]
 }

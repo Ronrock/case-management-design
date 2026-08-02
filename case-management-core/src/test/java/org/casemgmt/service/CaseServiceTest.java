@@ -130,6 +130,52 @@ class CaseServiceTest extends OracleTestBase {
                 .anyMatch(t -> t.endsWith("case.milestone.achieved"));
     }
 
+    /**
+     * Task 15 review round 2, Important 1: a swept termination — a plan item close() (or
+     * cancel()) ends outright rather than via a "real" evaluator transition — must still
+     * produce the same {@code case.planitem.transitioned} event every other transition does.
+     * The first cut routed the sweep through a raw {@code planItems.updateState(...)}, which is
+     * a plain UPDATE with no event and no audit row: a consumer replaying case history from the
+     * event stream (the federation contract, spec §6.2) would see "followup" simply vanish with
+     * no explanation. Uses close-sweep-demo.json (gate required; followup entry-gated on gate
+     * COMPLETED) so close()'s own reevaluate() activates "followup" — making it a live ACTIVE
+     * item the sweep, not the evaluator, has to terminate.
+     */
+    @Test
+    void closeSweepsALeftoverActiveItemAndEmitsATransitionedEventForIt() throws Exception {
+        String json = new String(getClass().getResourceAsStream("/definitions/close-sweep-demo.json")
+                .readAllBytes(), StandardCharsets.UTF_8);
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+
+        CaseInstance created = cases.create("close-sweep-demo", "t1", null, "T",
+                CasePriority.MEDIUM, Map.of(), alice);
+        PlanItem gate = planItems.findByCase(created.id()).stream()
+                .filter(i -> i.name().equals("gate")).findFirst().orElseThrow();
+        planItems.updateState(gate.withState(PlanItemState.COMPLETED), gate.version());
+
+        cases.close(created.id(), cases.get(created.id()).version(), "approved", alice);
+
+        // close()'s own reevaluate() activates "followup" (its entry criterion now holds); the
+        // sweep then terminates it because close() cannot leave a live plan item behind.
+        PlanItem followup = planItems.findByCase(created.id()).stream()
+                .filter(i -> i.name().equals("followup")).findFirst().orElseThrow();
+        assertThat(followup.state()).isEqualTo(PlanItemState.TERMINATED);
+
+        List<Map<String, Object>> transitionEvents = jdbc().sql("""
+                SELECT DATA_JSON_ FROM CM_EVENT
+                WHERE SUBJECT_ = :id AND TYPE_ LIKE '%case.planitem.transitioned' ORDER BY SEQ_""")
+                .param("id", created.id())
+                .query(String.class).list().stream()
+                .map(JsonCodec::toMap)
+                .toList();
+
+        assertThat(transitionEvents).anySatisfy(data -> {
+            assertThat(data.get("planItemId")).isEqualTo(followup.id());
+            assertThat(data.get("to")).isEqualTo("TERMINATED");
+            assertThat(data.get("reason")).isEqualTo("case closed with plan item still open");
+        });
+    }
+
     @Test
     void cancelFromAnyLiveStateIsAllowedAndTerminatesOpenPlanItems() {
         CaseInstance created = cases.create("widget-review", "t1", null, "T",
@@ -141,6 +187,40 @@ class CaseServiceTest extends OracleTestBase {
         assertThat(cancelled.closedAt()).isNotNull();
         assertThat(planItems.findByCase(created.id()))
                 .allMatch(i -> i.state().isEnded());
+    }
+
+    /**
+     * Companion to {@link #closeSweepsALeftoverActiveItemAndEmitsATransitionedEventForIt} for
+     * {@link CaseService#cancel}'s own (pre-existing) sweep. Straight after create(), "intake"
+     * and "review" are ACTIVE and "reviewed" is AVAILABLE — none ended — so cancel() sweeps all
+     * three; every one of them must produce its own transitioned event with reason
+     * "case cancelled", not just the single case-level case.cancelled event.
+     */
+    @Test
+    void cancelEmitsATransitionedEventForEverySweptPlanItem() {
+        CaseInstance created = cases.create("widget-review", "t1", null, "T",
+                CasePriority.MEDIUM, Map.of(), alice);
+
+        cases.cancel(created.id(), created.version(), "duplicate", alice);
+
+        List<PlanItem> items = planItems.findByCase(created.id());
+        assertThat(items).allMatch(i -> i.state().isEnded());
+
+        List<Map<String, Object>> transitionEvents = jdbc().sql("""
+                SELECT DATA_JSON_ FROM CM_EVENT
+                WHERE SUBJECT_ = :id AND TYPE_ LIKE '%case.planitem.transitioned' ORDER BY SEQ_""")
+                .param("id", created.id())
+                .query(String.class).list().stream()
+                .map(JsonCodec::toMap)
+                .toList();
+
+        for (PlanItem item : items) {
+            assertThat(transitionEvents).anySatisfy(data -> {
+                assertThat(data.get("planItemId")).isEqualTo(item.id());
+                assertThat(data.get("to")).isEqualTo("TERMINATED");
+                assertThat(data.get("reason")).isEqualTo("case cancelled");
+            });
+        }
     }
 
     @Test

@@ -180,7 +180,10 @@ public class CaseService {
      * gated on something that never happened (no entry criteria ever satisfied, e.g. an
      * unstarted optional stage) would still be sitting open after {@code reevaluate} returns.
      * The sweep is what makes "a CLOSED case carries no AVAILABLE/ACTIVE plan item" an actual
-     * invariant rather than something that merely usually happens to be true.</li>
+     * invariant rather than something that merely usually happens to be true. It runs through
+     * {@link #sweepOpenPlanItems}, not a raw repository update — see that method's Javadoc for
+     * why (second review round: a raw update produced no event and no audit row, silently
+     * breaking the event-stream contract every other transition path in this codebase honors).</li>
      * </ul>
      *
      * <p>Ordering matters: {@link StageCompletion#caseBlockers} is checked <em>before</em> either
@@ -205,11 +208,10 @@ public class CaseService {
         }
 
         reevaluate(caseId, actor);
-        for (PlanItem item : planItems.findByCase(caseId)) {
-            if (!item.state().isEnded()) {
-                planItems.updateState(item.withState(PlanItemState.TERMINATED), item.version());
-            }
-        }
+        // Terminates every plan item still open — but not any CM_TASK row or live engine task
+        // an ACTIVE HUMAN_TASK item already has. See sweepOpenPlanItems' Javadoc: closing that
+        // gap needs CaseTaskRepository + an EngineGateway cancel call, task-lifecycle work.
+        sweepOpenPlanItems(caseId, "case closed with plan item still open", actor);
 
         CaseInstance closed = new CaseInstance(current.id(), current.engineId(), current.tenantId(),
                 current.caseDefId(), current.caseDefKey(), current.caseDefVersion(),
@@ -230,11 +232,9 @@ public class CaseService {
         CaseInstance current = cases.require(caseId);
         requireTransitionAllowed(current, CaseState.CANCELLED, "cancel");
 
-        for (PlanItem item : planItems.findByCase(caseId)) {
-            if (!item.state().isEnded()) {
-                planItems.updateState(item.withState(PlanItemState.TERMINATED), item.version());
-            }
-        }
+        // Same gap as close()'s sweep: terminates the plan item, not any CM_TASK row or live
+        // engine task an ACTIVE HUMAN_TASK already has. See sweepOpenPlanItems' Javadoc.
+        sweepOpenPlanItems(caseId, "case cancelled", actor);
 
         CaseInstance cancelled = new CaseInstance(current.id(), current.engineId(), current.tenantId(),
                 current.caseDefId(), current.caseDefKey(), current.caseDefVersion(),
@@ -299,6 +299,46 @@ public class CaseService {
             }
             planItems.insert(instantiator.repeat(latest, repeatable));
         }
+    }
+
+    /**
+     * Terminates every plan item still not {@link PlanItemState#isEnded()} for a case that is
+     * closing or cancelling — routed through {@link TransitionApplier#apply}, never a raw
+     * {@code planItems.updateState(...)}, so a swept termination produces the exact same
+     * {@code case.planitem.transitioned} event (and any audit trail {@code TransitionApplier}
+     * attaches to a transition) that every other transition in this codebase does.
+     *
+     * <p>Second review round found this the hard way: the first cut of both {@link #close} and
+     * {@link #cancel} called {@code planItems.updateState} directly in a loop — a plain UPDATE,
+     * no event, no audit row. That silently broke the invariant this codebase enforces
+     * everywhere else a plan item can end without an explicit user action: Task 9 made
+     * {@code StageCompletion}'s cascade terminations produce real {@link Transition}s
+     * specifically so the service layer would persist and report them, and every transition
+     * {@link TransitionApplier#apply} itself applies gets exactly one event. A raw update here
+     * would have made swept items vanish from the event stream with no explanation — and that
+     * stream is the federation contract (spec §6.2), not an implementation detail.
+     *
+     * <p><b>KNOWN GAP, not this method's to close:</b> this only ever touches
+     * {@code CM_PLAN_ITEM}. A HUMAN_TASK item that is ACTIVE at sweep time already has an open
+     * {@code CM_TASK} row (and, in remote mode, a live engine task); this terminates the plan
+     * item but does not cancel that task or notify the engine, leaving genuinely dead work
+     * sitting in someone's worklist. Reconciling {@code CM_TASK}/the engine on case close or
+     * cancel needs {@code CaseTaskRepository} plus an {@code EngineGateway} cancel call, which
+     * belongs to the task-lifecycle work, not the plan-item lifecycle this class owns — flagged
+     * here deliberately rather than improvised into this method.
+     */
+    private void sweepOpenPlanItems(String caseId, String reason, Actor actor) {
+        List<PlanItem> stillOpen = planItems.findByCase(caseId).stream()
+                .filter(item -> !item.state().isEnded())
+                .toList();
+        if (stillOpen.isEmpty()) {
+            return;
+        }
+        CaseSnapshot snapshot = snapshot(caseId);
+        List<Transition> sweep = stillOpen.stream()
+                .map(item -> new Transition(item.id(), item.state(), PlanItemState.TERMINATED, reason))
+                .toList();
+        applier.apply(snapshot, sweep, actor);
     }
 
     private void requireLive(CaseInstance c, String action) {
