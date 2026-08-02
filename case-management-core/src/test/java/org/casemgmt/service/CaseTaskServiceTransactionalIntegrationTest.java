@@ -3,21 +3,19 @@ package org.casemgmt.service;
 import org.casemgmt.OracleTestBase;
 import org.casemgmt.domain.*;
 import org.casemgmt.engine.*;
-import org.casemgmt.repo.CaseDefinitionRepository;
-import org.casemgmt.repo.CaseTaskRepository;
-import org.casemgmt.repo.PlanItemRepository;
+import org.casemgmt.event.EventPublisher;
+import org.casemgmt.repo.*;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.simple.JdbcClient;
 
 import javax.sql.DataSource;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -29,25 +27,53 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>{@link CaseTaskServiceTest} — like every other repository/service test in this module —
  * builds {@link CaseTaskService} with a plain {@code new}, which never puts it behind the Spring
- * AOP proxy that actually opens/commits/rolls back a transaction (see {@code
- * TransactionManagerConfig}). A plain-{@code new} test can prove {@code claim}/{@code complete}'s
- * SQL is correct; it cannot prove that a failing engine call partway through leaves nothing
- * committed. This test puts the REAL {@link CaseTaskService} bean under test via {@link
- * OracleTestBase#springContext}, the same pattern the other two use, and fails the engine calls
- * {@code claim}/{@code complete} make directly (not a side effect further downstream), since both
- * are called before any row for that action is written — exactly where a rollback matters most.
+ * AOP proxy that actually opens/commits/rolls back a transaction. This test puts the REAL {@link
+ * CaseTaskService} bean under test via {@link OracleTestBase#springContext}.
+ *
+ * <p><b>Why the two tests fail at different points, deliberately:</b>
+ * <ul>
+ *   <li>{@code complete()} calls {@code engine.completeTask} BEFORE its own {@code CM_TASK}
+ *   write, then — via {@code PlanItemService.complete}'s {@code reevaluate()} — can cascade into
+ *   a SECOND, later engine call ({@code createHumanTask} for whatever plan item the completion
+ *   just unblocked). Failing THAT second call, after the first task's own completion write has
+ *   already happened in the same transaction, is what gives {@code @Transactional} something
+ *   genuine to undo — the same technique {@code
+ *   CaseServiceTransactionalIntegrationTest.closeRollsBackEverythingOnAMidCloseEngineFailure}
+ *   uses. Failing the FIRST engine call instead (as an earlier draft of this test did) proves
+ *   nothing: that call happens before any write, so the assertions would hold identically with
+ *   or without {@code @Transactional} — exactly the "vacuous test" trap this suite's own review
+ *   note warns about, just for a transactional test instead of a validation one.</li>
+ *   <li>{@code claim()} has no such cascade: it makes exactly one engine call, {@code
+ *   engine.claimTask}, and it too precedes the only {@code CM_TASK} write the method makes.
+ *   There is no way to fail the engine call itself and have anything left to roll back. What
+ *   {@code @Transactional} actually buys {@code claim()} is atomicity between that write and the
+ *   {@code CM_EVENT}/{@code CM_AUDIT_LOG} writes {@code publish}/{@code audit} make right after
+ *   it — so this test proves THAT instead, injecting a failure into the audit write (a genuine
+ *   downstream step, not the engine) via {@link FailingAuditEventPublisher} once the claim write
+ *   has already happened.</li>
+ * </ul>
  *
  * <p><b>Mutation-tested manually</b>: temporarily removing {@code @Transactional} from {@code
- * claim} and from {@code complete} and re-running this class makes the corresponding assertions
- * fail — the CM_TASK row is left CLAIMED/COMPLETED and its version bumped even though the action
- * as a whole "failed" — confirming this test actually exercises the annotations.
+ * claim} makes {@code claimRollsBackWhenAuditingFails} fail (the task is left {@code CLAIMED}
+ * with its version bumped); removing it from {@code complete} makes {@code
+ * completeRollsBackWhenACascadingEngineCallFails} fail (the review task is left {@code
+ * COMPLETED}) — confirmed by running both with the annotations stripped during development.
  */
 class CaseTaskServiceTransactionalIntegrationTest extends OracleTestBase {
+
+    private static final String CASCADE_DEF = """
+            {"key":"txn-task-cascade","name":"Task Cascade","tenantId":"t1",
+             "planItems":[
+               {"defKey":"review","type":"HUMAN_TASK","name":"review","required":true,"sortOrder":10},
+               {"defKey":"followUp","type":"HUMAN_TASK","name":"followUp",
+                "entryCriteria":["${items.review.state == 'COMPLETED'}"],"sortOrder":20}
+             ]}""";
 
     private AnnotationConfigApplicationContext ctx;
     private CaseTaskService taskService;
     private CaseService cases;
     private FailingGateway gateway;
+    private FailingAuditEventPublisher publisher;
     private CaseTaskRepository tasks;
     private PlanItemRepository planItems;
     private final Actor alice = new Actor("alice", List.of("reviewers"));
@@ -56,20 +82,20 @@ class CaseTaskServiceTransactionalIntegrationTest extends OracleTestBase {
 
     @BeforeEach
     void setUp() throws Exception {
-        String json = new String(getClass().getResourceAsStream("/definitions/test-definition.json")
-                .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(CASCADE_DEF, "system");
 
         ctx = springContext(CaseTaskServiceTestConfig.class);
         taskService = ctx.getBean(CaseTaskService.class);
         cases = ctx.getBean(CaseService.class);
         gateway = ctx.getBean(FailingGateway.class);
+        publisher = ctx.getBean(FailingAuditEventPublisher.class);
         tasks = new CaseTaskRepository(jdbc());
         planItems = new PlanItemRepository(jdbc());
 
         gateway.neverFail();
-        caseId = cases.create("widget-review", "t1", null, "T", CasePriority.MEDIUM, Map.of(), alice).id();
-        reviewTask = tasks.findByCase(caseId).get(0);
+        caseId = cases.create("txn-task-cascade", "t1", null, "T", CasePriority.MEDIUM, Map.of(), alice).id();
+        reviewTask = tasks.findByCase(caseId).stream()
+                .filter(t -> t.name().equals("review")).findFirst().orElseThrow();
         assertThat(reviewTask.state()).isEqualTo(TaskState.OPEN);
     }
 
@@ -79,11 +105,11 @@ class CaseTaskServiceTransactionalIntegrationTest extends OracleTestBase {
     }
 
     @Test
-    void claimRollsBackWhenTheEngineClaimFails() {
+    void claimRollsBackWhenAuditingFails() {
         int eventCountBefore = countAll("CM_EVENT");
         int auditCountBefore = countAll("CM_AUDIT_LOG");
 
-        gateway.failOnClaim();
+        publisher.failNextAudit();
 
         assertThatThrownBy(() -> taskService.claim(reviewTask.id(), reviewTask.version(), alice))
                 .isInstanceOf(IllegalStateException.class);
@@ -93,35 +119,41 @@ class CaseTaskServiceTransactionalIntegrationTest extends OracleTestBase {
         assertThat(reloaded.assignee()).isNull();
         assertThat(reloaded.version()).isEqualTo(reviewTask.version());
 
+        // The CM_EVENT row publish() wrote right before the failing audit() call must also be
+        // gone: proof this is a whole-transaction rollback, not just the CM_TASK write escaping.
         assertThat(countAll("CM_EVENT")).isEqualTo(eventCountBefore);
         assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditCountBefore);
     }
 
     @Test
-    void completeRollsBackWhenTheEngineCompleteFails() {
+    void completeRollsBackWhenACascadingEngineCallFails() {
         CaseTask claimed = taskService.claim(reviewTask.id(), reviewTask.version(), alice);
-        PlanItem planItemBefore = planItems.require(claimed.planItemId());
+        PlanItem reviewItemBefore = planItems.require(claimed.planItemId());
+        int taskCountBefore = countAll("CM_TASK");
         int eventCountBefore = countAll("CM_EVENT");
         int auditCountBefore = countAll("CM_AUDIT_LOG");
-        int milestoneCountBefore = countAll("CM_MILESTONE");
 
-        gateway.failOnComplete();
+        // review's own completion write happens BEFORE this fires: reevaluate() only reaches
+        // followUp's createHumanTask after review is already persisted COMPLETED in this
+        // transaction. Failing here is what gives @Transactional something real to undo.
+        gateway.failOnTaskNamed("followUp");
 
-        assertThatThrownBy(() -> taskService.complete(claimed.id(), claimed.version(),
-                Map.of("outcome", "approve"), alice))
+        assertThatThrownBy(() -> taskService.complete(claimed.id(), claimed.version(), Map.of(), alice))
                 .isInstanceOf(IllegalStateException.class);
 
         CaseTask reloaded = tasks.require(claimed.id());
         assertThat(reloaded.state()).isEqualTo(TaskState.CLAIMED);
         assertThat(reloaded.version()).isEqualTo(claimed.version());
 
-        PlanItem planItemAfter = planItems.require(claimed.planItemId());
-        assertThat(planItemAfter.state()).isEqualTo(planItemBefore.state());
-        assertThat(planItemAfter.version()).isEqualTo(planItemBefore.version());
+        PlanItem reviewItemAfter = planItems.require(claimed.planItemId());
+        assertThat(reviewItemAfter.state()).isEqualTo(reviewItemBefore.state());
+        assertThat(reviewItemAfter.version()).isEqualTo(reviewItemBefore.version());
 
+        // No followUp CM_TASK row survives either, even though its creation is what triggered
+        // the failure in the first place.
+        assertThat(countAll("CM_TASK")).isEqualTo(taskCountBefore);
         assertThat(countAll("CM_EVENT")).isEqualTo(eventCountBefore);
         assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditCountBefore);
-        assertThat(countAll("CM_MILESTONE")).isEqualTo(milestoneCountBefore);
     }
 
     private int countAll(String table) {
@@ -129,11 +161,12 @@ class CaseTaskServiceTransactionalIntegrationTest extends OracleTestBase {
     }
 
     /**
-     * Registers the REAL {@link CaseTaskService} (and the {@link CaseService} it needs for
-     * fixture setup) as Spring {@code @Bean}s so {@code TransactionManagerConfig}'s auto-proxy
-     * creator wraps them. Delegates construction to {@link TestServices} so this wiring never
-     * drifts from what {@link CaseTaskServiceTest} already uses; only the {@link EngineGateway}
-     * differs (a controllable {@link FailingGateway} instead of the recording one).
+     * Registers the REAL {@link CaseTaskService} (and the {@link CaseService}/{@link
+     * PlanItemService} it needs) as Spring {@code @Bean}s so {@code TransactionManagerConfig}'s
+     * auto-proxy creator wraps them. {@link CaseTaskService} is wired by hand rather than via
+     * {@link TestServices#taskService} because this class needs to substitute {@link
+     * FailingAuditEventPublisher} for the plain {@link EventPublisher} that factory method
+     * builds internally and does not expose as a swappable argument.
      */
     @Configuration
     static class CaseTaskServiceTestConfig {
@@ -143,49 +176,55 @@ class CaseTaskServiceTransactionalIntegrationTest extends OracleTestBase {
         }
 
         @Bean
+        FailingAuditEventPublisher failingAuditEventPublisher(DataSource dataSource) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            return new FailingAuditEventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                    new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        }
+
+        @Bean
         CaseService caseService(DataSource dataSource, FailingGateway gateway) {
             return TestServices.caseService(dataSource, gateway);
         }
 
         @Bean
-        CaseTaskService taskService(DataSource dataSource, FailingGateway gateway) {
-            return TestServices.taskService(dataSource, gateway);
+        PlanItemService planItemService(DataSource dataSource, FailingGateway gateway) {
+            return TestServices.planItemService(dataSource, gateway);
+        }
+
+        @Bean
+        CaseTaskService taskService(DataSource dataSource, FailingGateway gateway,
+                                    PlanItemService planItemService, FailingAuditEventPublisher publisher) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            return new CaseTaskService(new CaseTaskRepository(jdbc), new CaseRepository(jdbc),
+                    new CaseDefinitionRepository(dataSource), gateway, new FormValidator(),
+                    planItemService, new PlanItemRepository(jdbc), publisher);
         }
     }
 
     /**
-     * An {@link EngineGateway} whose {@code claimTask}/{@code completeTask} failures are
-     * controlled per test. {@code createHumanTask} always succeeds (fixture setup needs it),
-     * unlike {@code CaseServiceTransactionalIntegrationTest.FailingGateway}, which controls
-     * that call instead — this class targets the two engine calls {@link CaseTaskService} itself
-     * makes directly.
+     * An {@link EngineGateway} whose {@code createHumanTask} failure is controlled per test —
+     * copies {@code CaseServiceTransactionalIntegrationTest.FailingGateway}'s shape rather than
+     * reusing it directly, since this class also needs {@code claimTask}/{@code completeTask} to
+     * stay reliable no-ops (the fault this suite injects for {@code claim}/{@code complete} is
+     * downstream of the engine call, not the call itself — see the class Javadoc).
      */
     static class FailingGateway implements EngineGateway {
-        private volatile boolean failClaim = false;
-        private volatile boolean failComplete = false;
+        private volatile java.util.function.Predicate<String> failOn = name -> false;
 
-        void neverFail() { failClaim = false; failComplete = false; }
-        void failOnClaim() { failClaim = true; }
-        void failOnComplete() { failComplete = true; }
+        void neverFail() { failOn = name -> false; }
+        void failOnTaskNamed(String name) { failOn = name::equals; }
 
         @Override
         public EngineTaskRef createHumanTask(HumanTaskRequest r) {
-            return new EngineTaskRef("engine-" + UUID.randomUUID(), r.name(), r.assignee(), r.caseId(), null);
+            if (failOn.test(r.name())) {
+                throw new IllegalStateException("simulated engine failure creating task '" + r.name() + "'");
+            }
+            return new EngineTaskRef("engine-" + java.util.UUID.randomUUID(), r.name(), r.assignee(), r.caseId(), null);
         }
 
-        @Override
-        public void claimTask(String id, String user) {
-            if (failClaim) {
-                throw new IllegalStateException("simulated engine failure claiming task '" + id + "'");
-            }
-        }
-
-        @Override
-        public void completeTask(String id, Map<String, Object> variables) {
-            if (failComplete) {
-                throw new IllegalStateException("simulated engine failure completing task '" + id + "'");
-            }
-        }
+        @Override public void claimTask(String id, String user) {}
+        @Override public void completeTask(String id, Map<String, Object> v) {}
 
         @Override
         public EngineProcessRef startProcess(StartProcessRequest r) {
@@ -194,5 +233,32 @@ class CaseTaskServiceTransactionalIntegrationTest extends OracleTestBase {
 
         @Override public void cancelProcess(String id, String reason) {}
         @Override public List<EngineTaskRef> findTasks(EngineTaskQuery q) { return List.of(); }
+    }
+
+    /**
+     * An {@link EventPublisher} whose {@code audit} call can be told to fail once, so a test can
+     * prove {@link CaseTaskService#claim} rolls back its own {@code CM_TASK}/{@code CM_EVENT}
+     * writes when the {@code CM_AUDIT_LOG} write that follows them, in the same transaction,
+     * fails — a genuine downstream failure {@code claim()} has no engine call left to simulate
+     * (see class Javadoc).
+     */
+    static class FailingAuditEventPublisher extends EventPublisher {
+        private volatile boolean failAudit = false;
+
+        FailingAuditEventPublisher(EventRepository events, AuditRepository audit, WebhookRepository webhooks,
+                                   String typePrefix, String engineId) {
+            super(events, audit, webhooks, typePrefix, engineId);
+        }
+
+        void failNextAudit() { failAudit = true; }
+
+        @Override
+        public void audit(String caseId, String tenantId, String actor, String action,
+                          String resourceType, String resourceId, Object before, Object after) {
+            if (failAudit) {
+                throw new IllegalStateException("simulated audit failure recording '" + action + "'");
+            }
+            super.audit(caseId, tenantId, actor, action, resourceType, resourceId, before, after);
+        }
     }
 }
