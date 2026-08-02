@@ -52,6 +52,21 @@ class EventPublisherTest extends OracleTestBase {
     }
 
     @Test
+    void publishStampsSourceFromTheConfiguredEngineIdEvenWhenTheCallerSuppliesAWrongOne() {
+        // Spec §6.2: source = casemgmt.engine-id is a hard rule. A caller passing a wrong or
+        // stale source must not be able to make it into the persisted envelope — publish()
+        // stamps source the same way it stamps type, discarding whatever the caller supplied.
+        CaseEvent wrongSource = new CaseEvent(org.casemgmt.domain.CaseIds.newId(),
+                "some-other-engine", "case.created", "eng-a:1", "t1", OffsetDateTime.now(),
+                Map.of("state", "ACTIVE"));
+
+        publisher.publish(wrongSource);
+
+        assertThat(events.after(0, 10)).singleElement()
+                .satisfies(e -> assertThat(e.event().source()).isEqualTo("eng-a"));
+    }
+
+    @Test
     void filtersPerCaseEventLogsBySubject() {
         publisher.publish(event("case.created", "eng-a:1"));
         publisher.publish(event("case.created", "eng-a:2"));

@@ -39,8 +39,17 @@ public class EventPublisher {
         this.engineId = engineId;
     }
 
+    /**
+     * Stamps {@code type} with the configured prefix AND {@code source} with the configured
+     * {@code engineId} — spec §6.2 makes {@code source = casemgmt.engine-id} a hard rule for the
+     * CloudEvents envelope, and federation depends on every event being reliably attributable to
+     * the engine that actually produced it. A caller-supplied {@link CaseEvent#source()} is
+     * deliberately discarded rather than trusted: nothing else in this class would otherwise stop
+     * a wrong or stale source from being persisted and fanned out.
+     */
     public long publish(CaseEvent event) {
-        CaseEvent stamped = event.withType(typePrefix + "." + event.type());
+        CaseEvent stamped = new CaseEvent(event.id(), engineId, typePrefix + "." + event.type(),
+                event.subject(), event.tenantId(), event.time(), event.data());
         long seq = events.append(stamped);
 
         for (WebhookRepository.Subscription sub : webhooks.active(stamped.tenantId())) {
