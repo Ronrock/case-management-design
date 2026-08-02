@@ -44,4 +44,13 @@ public final class TestServices {
         return new PlanItemService(new PlanItemRepository(jdbc), caseService(dataSource, gateway),
                 applier, publisher);
     }
+
+    public static CaseTaskService taskService(DataSource dataSource, EngineGateway gateway) {
+        JdbcClient jdbc = JdbcClient.create(dataSource);
+        var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        return new CaseTaskService(new CaseTaskRepository(jdbc), new CaseRepository(jdbc),
+                new CaseDefinitionRepository(dataSource), gateway, new FormValidator(),
+                planItemService(dataSource, gateway), new PlanItemRepository(jdbc), publisher);
+    }
 }

@@ -1,0 +1,171 @@
+package org.casemgmt.service;
+
+import org.casemgmt.domain.*;
+import org.casemgmt.engine.EngineGateway;
+import org.casemgmt.error.CaseConflictException;
+import org.casemgmt.error.OptimisticLockException;
+import org.casemgmt.event.CaseEvent;
+import org.casemgmt.event.EventPublisher;
+import org.casemgmt.event.EventTypes;
+import org.casemgmt.repo.CaseDefinitionRepository;
+import org.casemgmt.repo.CaseRepository;
+import org.casemgmt.repo.CaseTaskRepository;
+import org.casemgmt.repo.PlanItemRepository;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Worklist, claim and complete for {@code CM_TASK} rows — the human side of the case (spec
+ * §4.5/§4.6). Completing a task validates its payload against the declared form schema, tells
+ * the engine, marks the row COMPLETED, and completes the plan item behind it so the model
+ * re-evaluates (a task never outlives its plan item, and the plan item is what {@code
+ * PlanModelEvaluator} actually reasons about).
+ *
+ * <p><b>Claim/complete legality must agree with {@code ActionPolicy.listForTask}</b>
+ * (case-management-rest, Task 23) — checked directly against it while writing this class:
+ * <ul>
+ *   <li>{@code claim}: legal only from {@code OPEN}, and only once {@code engineSync == SYNCED}
+ *   (an unsynced task's engine counterpart may not exist yet — see {@code CaseTaskRepository
+ *   .worklist}'s Javadoc for the same rule applied to visibility). Both match {@code
+ *   ActionPolicy.listForTask}, which offers {@code claim} only for {@code OPEN} tasks and offers
+ *   nothing at all once {@code engineSync != SYNCED}.</li>
+ *   <li>{@code complete}: legal only from {@code CLAIMED}. {@code ActionPolicy.listForTask} only
+ *   ever advertises {@code complete} for a {@code CLAIMED} task assigned to the calling user —
+ *   this class enforces the state half of that (the identity half — "assigned to the calling
+ *   user" — is authorization, which is {@code ActionPolicy}'s job at the REST boundary, the same
+ *   division {@code PlanItemService} uses for its own actions). Requiring {@code CLAIMED} here
+ *   (not merely "not already ended") keeps the service exactly as permissive as the policy that
+ *   gates it: the policy never offers {@code complete} on an {@code OPEN} task, so the service
+ *   must not silently accept one either.</li>
+ * </ul>
+ *
+ * <p><b>Completion order (brief, spec §4.6):</b> validate the payload -&gt; complete the engine
+ * task -&gt; mark {@code CM_TASK} completed -&gt; complete the backing plan item -&gt; re-evaluate
+ * (the last two happen inside {@link PlanItemService#complete}). If the engine call fails, the
+ * whole transaction rolls back in embedded mode; in remote mode the command outbox retries it,
+ * and the task stays {@code CLAIMED} until it succeeds.
+ */
+public class CaseTaskService {
+
+    private final CaseTaskRepository tasks;
+    private final CaseRepository cases;
+    private final CaseDefinitionRepository definitions;
+    private final EngineGateway engine;
+    private final FormValidator formValidator;
+    private final PlanItemService planItems;
+    private final PlanItemRepository planItemRepo;
+    private final EventPublisher publisher;
+
+    public CaseTaskService(CaseTaskRepository tasks, CaseRepository cases,
+                           CaseDefinitionRepository definitions, EngineGateway engine,
+                           FormValidator formValidator, PlanItemService planItems,
+                           PlanItemRepository planItemRepo, EventPublisher publisher) {
+        this.tasks = tasks;
+        this.cases = cases;
+        this.definitions = definitions;
+        this.engine = engine;
+        this.formValidator = formValidator;
+        this.planItems = planItems;
+        this.planItemRepo = planItemRepo;
+        this.publisher = publisher;
+    }
+
+    /**
+     * "My work OR work I could pick up" — see {@code CaseTaskRepository.worklist}'s Javadoc for
+     * the OR-not-AND, empty-means-nothing rules this delegates straight through to. Passes the
+     * caller's own user id as {@code assignee} (not {@code null}) so a task already claimed by
+     * this caller stays visible even if it no longer matches any of the caller's current
+     * candidate groups.
+     */
+    public List<CaseTask> worklist(Actor actor, int limit) {
+        return tasks.worklist(actor.userId(), actor.groups(), limit);
+    }
+
+    public List<CaseTask> forCase(String caseId) {
+        return tasks.findByCase(caseId);
+    }
+
+    @Transactional
+    public CaseTask claim(String taskId, long expectedVersion, Actor actor) {
+        CaseTask task = tasks.require(taskId);
+        if (task.state() != TaskState.OPEN) {
+            throw new CaseConflictException("task-not-open",
+                    "Task is " + task.state() + (task.assignee() == null ? "" : " (assignee " + task.assignee() + ")"),
+                    task.state() == TaskState.CLAIMED ? List.of("complete") : List.of());
+        }
+        if (task.engineSync() != CaseTask.EngineSync.SYNCED) {
+            throw new CaseConflictException("engine-sync-pending",
+                    "Task is not yet created on the engine (sync state " + task.engineSync() + ")",
+                    List.of());
+        }
+
+        engine.claimTask(task.engineTaskId(), actor.userId());
+
+        CaseTask claimed = withState(task, TaskState.CLAIMED, actor.userId(), task.outcome());
+        CaseTask saved = save(claimed, expectedVersion);
+
+        CaseInstance c = cases.require(task.caseId());
+        publisher.publish(event(c, EventTypes.TASK_CLAIMED,
+                Map.of("taskId", taskId, "assignee", actor.userId())));
+        publisher.audit(task.caseId(), c.tenantId(), actor.userId(), "task.claim", "Task", taskId,
+                Map.of("state", task.state().name()), Map.of("state", "CLAIMED", "assignee", actor.userId()));
+        return saved;
+    }
+
+    @Transactional
+    public CaseTask complete(String taskId, long expectedVersion,
+                             Map<String, Object> variables, Actor actor) {
+        CaseTask task = tasks.require(taskId);
+        if (task.state() != TaskState.CLAIMED) {
+            throw new CaseConflictException("task-not-claimed",
+                    "Task is " + task.state() + "; only a claimed task can be completed", List.of());
+        }
+
+        CaseInstance c = cases.require(task.caseId());
+        if (task.formKey() != null) {
+            definitions.formSchema(c.caseDefKey(), task.formKey())
+                    .ifPresent(schema -> formValidator.validate(schema, variables));
+        }
+
+        engine.completeTask(task.engineTaskId(), variables);
+
+        CaseTask completed = withState(task, TaskState.COMPLETED, task.assignee(),
+                variables == null ? null : String.valueOf(variables.get("outcome")));
+        CaseTask saved = save(completed, expectedVersion);
+
+        publisher.publish(event(c, EventTypes.TASK_COMPLETED,
+                Map.of("taskId", taskId, "outcome", saved.outcome() == null ? "" : saved.outcome())));
+        publisher.audit(task.caseId(), c.tenantId(), actor.userId(), "task.complete", "Task", taskId,
+                Map.of("state", task.state().name()), Map.of("state", "COMPLETED"));
+
+        // Completing the task completes the plan item behind it, which re-evaluates the model
+        // (PlanItemService.complete already handles persistence, side effects and re-evaluation).
+        PlanItem planItem = planItemRepo.require(task.planItemId());
+        planItems.complete(task.caseId(), planItem.id(), planItem.version(), actor);
+
+        return saved;
+    }
+
+    private CaseTask save(CaseTask task, long expectedVersion) {
+        try {
+            return tasks.update(task, expectedVersion);
+        } catch (OptimisticLockException e) {
+            throw new CaseConflictException("version-conflict", e.getMessage(), List.of());
+        }
+    }
+
+    private CaseTask withState(CaseTask t, TaskState state, String assignee, String outcome) {
+        return new CaseTask(t.id(), t.caseId(), t.planItemId(), t.engineTaskId(), t.name(),
+                t.description(), state, assignee, t.delegatedBy(), t.candidateGroups(),
+                t.formKey(), t.priority(), t.dueAt(), outcome, t.engineSync(), t.version(),
+                t.createdAt(), t.updatedAt(), t.completedAt());
+    }
+
+    private CaseEvent event(CaseInstance c, String type, Map<String, Object> data) {
+        return new CaseEvent(CaseIds.newId(), publisher.engineId(), type, c.id(), c.tenantId(),
+                OffsetDateTime.now(), data);
+    }
+}
