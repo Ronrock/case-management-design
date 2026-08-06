@@ -4,6 +4,8 @@ import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.repo.*;
 import org.casemgmt.rules.*;
+import org.casemgmt.sla.SlaService;
+import org.casemgmt.sla.SlaSweeper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 import javax.sql.DataSource;
@@ -74,5 +76,21 @@ public final class TestServices {
                 new WebhookRepository(jdbc), "org.example.cm", "eng-test");
         return new LinkedProcessService(new LinkedProcessRepository(jdbc), new CaseRepository(jdbc),
                 gateway, publisher);
+    }
+
+    /**
+     * Takes a {@link JdbcClient} directly, unlike the factories above: unlike
+     * {@link CaseDefinitionRepository}, nothing {@link SlaService} depends on needs a raw
+     * {@link DataSource}, so there is no reason to require callers to hold one just to build
+     * a {@link JdbcClient} from it here.
+     */
+    public static SlaService slaService(JdbcClient jdbc) {
+        return new SlaService(new SlaRepository(jdbc), new CaseRepository(jdbc));
+    }
+
+    public static SlaSweeper slaSweeper(JdbcClient jdbc) {
+        var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        return new SlaSweeper(new SlaRepository(jdbc), new CaseRepository(jdbc), publisher);
     }
 }
