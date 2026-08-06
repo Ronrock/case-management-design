@@ -1,6 +1,7 @@
 package org.casemgmt.service;
 
 import org.casemgmt.domain.CaseIds;
+import org.casemgmt.engine.EngineCommand;
 import org.casemgmt.event.HmacSigner;
 import org.casemgmt.repo.WebhookRepository;
 import org.springframework.transaction.annotation.Transactional;
@@ -28,6 +29,14 @@ public class WebhookService {
         this.webhooks = webhooks;
     }
 
+    /**
+     * Default {@code MAX_RETRIES_} for a new subscription: the length of the shared backoff
+     * ladder, i.e. every rung once. Written as the ladder's own size rather than a literal 5 so
+     * the two cannot drift — {@code WebhookDispatcher.fail} reads this column back as the
+     * dead-letter threshold (review round 1; it used to be written here and never read).
+     */
+    public static final int DEFAULT_MAX_RETRIES = EngineCommand.BACKOFF.size();
+
     @Transactional
     public CreatedSubscription subscribe(String tenantId, String url, List<String> eventTypes, Actor actor) {
         byte[] bytes = new byte[32];
@@ -35,7 +44,7 @@ public class WebhookService {
         String secret = HexFormat.of().formatHex(bytes);
 
         String id = CaseIds.newId();
-        webhooks.insert(id, tenantId, url, eventTypes, HmacSigner.hash(secret), 5);
+        webhooks.insert(id, tenantId, url, eventTypes, HmacSigner.hash(secret), DEFAULT_MAX_RETRIES);
         return new CreatedSubscription(id, url, eventTypes, secret);
     }
 
