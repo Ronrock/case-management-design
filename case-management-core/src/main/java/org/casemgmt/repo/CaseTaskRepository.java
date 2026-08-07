@@ -59,6 +59,17 @@ public class CaseTaskRepository {
                 .param("tid", engineTaskId).query(CaseTaskRepository::map).optional();
     }
 
+    /**
+     * Looks up the (at most one) task backing a plan item — the correlation key
+     * {@code EngineCommandDispatcher.SyncReporter} reports {@code CREATE_TASK} confirmations
+     * against (Task 25's starter wiring: {@code CaseTaskRepository.findByCase} takes a case id,
+     * not a plan item id, so using it here silently matched nothing).
+     */
+    public Optional<CaseTask> findByPlanItemId(String planItemId) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM CM_TASK WHERE PLAN_ITEM_ID_ = :pid")
+                .param("pid", planItemId).query(CaseTaskRepository::map).optional();
+    }
+
     public List<CaseTask> findByCase(String caseId) {
         return jdbc.sql("SELECT " + COLUMNS + " FROM CM_TASK WHERE CASE_ID_ = :caseId ORDER BY CREATED_AT_")
                 .param("caseId", caseId).query(CaseTaskRepository::map).list();

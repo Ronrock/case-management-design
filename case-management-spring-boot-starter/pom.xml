@@ -29,5 +29,31 @@
       <artifactId>case-management-engine-remote</artifactId>
       <optional>true</optional>
     </dependency>
+    <!-- Test-only: AutoConfigurationTest drives ApplicationContextRunner against a real
+         in-memory H2 datasource (spring.datasource.url=jdbc:h2:mem:...) rather than mocking
+         DataSourceAutoConfiguration. Not a Testcontainers/Oracle test — no case-management
+         schema is created here, this only proves bean wiring and conditional startup. -->
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Every class in this module is an @AutoConfiguration — spring-boot-autoconfigure is a
+         genuine, direct compile-time dependency of the module's own main sources
+         (@AutoConfiguration, @ConditionalOnProperty, @ConditionalOnClass,
+         @ConditionalOnMissingBean), not merely something the tests need.
+         It previously only reached this classpath transitively, through the OPTIONAL
+         case-management-engine-embedded -> operaton-bpm-spring-boot-starter chain, which is
+         fragile (main compiled only by accident of what else happened to be optional/present)
+         and — empirically, on this reactor — did not extend to the TEST-compile classpath at
+         all, which is what AutoConfigurationTest's own DataSourceAutoConfiguration/
+         AutoConfigurations imports need. Declaring it directly, at compile scope, fixes both:
+         it is no longer contingent on an optional module being present, and it is visible to
+         both main and test compilation. Version comes from the Spring Boot BOM already imported
+         transitively (see root pom's operaton-bpm-spring-boot-starter BOM note). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-autoconfigure</artifactId>
+    </dependency>
   </dependencies>
 </project>

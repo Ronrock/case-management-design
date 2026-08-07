@@ -69,6 +69,14 @@
       <artifactId>ojdbc11</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- Task 25: ArchitectureTest enforces "core stays engine-free" and "no case-type
+         vocabulary in the service layer" mechanically. Test-scoped only, like every other
+         ArchUnit consumer in this reactor (case-management-poc-app). -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
