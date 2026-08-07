@@ -291,12 +291,34 @@ public class WebhookRepository {
     public record DeadLetter(String id, long eventSeq, int attempts,
                              Integer lastStatusCode, String lastError, OffsetDateTime failedAt) {}
 
+    /**
+     * Largest dead-letter listing one call returns (corrective round 2).
+     *
+     * <p>This query had no bound at all, and nothing downstream added one: the endpoint has no
+     * pagination, and {@code EventRepository.bySeqs} then built an {@code IN} list with one bind
+     * per row, which Oracle does eventually refuse (see that method's {@code MAX_IN_LIST} for the
+     * measured threshold — not the 1000 of folklore). The failure landed in exactly the scenario
+     * the endpoint exists for, since a restart dead-letters every pending delivery of every
+     * subscription at once. Capping the QUERY rather than only chunking the lookup is the better
+     * half of the fix, and the half that would still matter if the database had no limit at all:
+     * the response now embeds a full CloudEvent — {@code data} payload included — per row, so an
+     * unbounded queue was an unbounded response however the events were fetched.
+     *
+     * <p>200, and the listing is oldest-first, so the cap keeps the entries most likely to
+     * explain a failure rather than an arbitrary slice. Genuine pagination is the right answer
+     * and is deliberately not invented here — the contract
+     * ({@code GET /webhooks/{webhookId}/dead-letters}) declares no paging parameters, and adding
+     * them unilaterally is a contract change. Recorded in FINDINGS.md instead.
+     */
+    public static final int MAX_DEAD_LETTER_BATCH = 200;
+
     public List<DeadLetter> deadLetters(String webhookId) {
         return jdbc.sql("""
                 SELECT ID_, EVENT_SEQ_, ATTEMPTS_, LAST_STATUS_CODE_, LAST_ERROR_, FAILED_AT_
                 FROM CM_WEBHOOK_DELIVERY
-                WHERE WEBHOOK_ID_ = :id AND STATUS_ = 'DEAD' ORDER BY EVENT_SEQ_""")
-            .param("id", webhookId)
+                WHERE WEBHOOK_ID_ = :id AND STATUS_ = 'DEAD' ORDER BY EVENT_SEQ_
+                FETCH FIRST :limit ROWS ONLY""")
+            .param("id", webhookId).param("limit", MAX_DEAD_LETTER_BATCH)
             .query((rs, n) -> new DeadLetter(
                     rs.getString("ID_"),
                     rs.getLong("EVENT_SEQ_"), rs.getInt("ATTEMPTS_"),

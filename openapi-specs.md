@@ -1257,12 +1257,32 @@ paths:
                 items:
                   type: object
                   properties:
-                    # `event` is nullable on purpose: a delivery can be dead-lettered precisely
-                    # BECAUSE its event could not be resolved, and `lastError` says so. (Task 27)
+                    # `event` is OPTIONAL, and its absence is meaningful: a delivery can be
+                    # dead-lettered precisely BECAUSE its event could not be resolved (the
+                    # dispatcher records "event N not found" as the reason), in which case
+                    # `lastError` says so and this key is OMITTED. It is never sent as null.
+                    #
+                    # That is a deliberate choice forced by this document being openapi: 3.0.3
+                    # (corrective round 2). 3.0 cannot express a nullable $ref at all: a `$ref`
+                    # IGNORES ALL SIBLING KEYS, so `{$ref: ..., nullable: true}` silently drops
+                    # the nullable; and the usual workaround, `{nullable: true, allOf: [$ref]}`,
+                    # still evaluates the allOf branch against the null and fails on
+                    # CloudEvent's own `type: object` — verified against this suite's validator,
+                    # which reported exactly that. Both shapes were written and both rejected the
+                    # null. Omitting the key sidesteps the ambiguity entirely and is valid under
+                    # any validator, since `event` is not in a `required` list.
+                    #
+                    # Note the asymmetry with `lastStatusCode`/`failedAt` below, which ARE sent as
+                    # null: those are plain scalars, where 3.0's `nullable: true` works correctly.
+                    # The difference is a limitation of $ref in 3.0, not a modelling preference.
                     event: {$ref: '#/components/schemas/CloudEvent'}
                     attempts: {type: integer}
                     lastError: {type: string}
-                    failedAt: {type: string, format: date-time}
+                    # nullable for the same reason lastStatusCode is, plus one of its own: any row
+                    # dead-lettered BEFORE the cm-poc-webhook-delivery-failed-at changeset added
+                    # FAILED_AT_ has no value to report, and an upgraded deployment serves those
+                    # rows from the same endpoint.
+                    failedAt: {type: string, format: date-time, nullable: true}
                     # Two fields ADDED to this response in Task 27, when the endpoint was first
                     # implemented. Both are additive, so a client written against the original
                     # four fields is unaffected.

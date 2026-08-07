@@ -43,11 +43,19 @@ import java.util.function.Supplier;
  * original got 409 "still in progress". See {@link #releasesClaim} for exactly which failures
  * release and — just as deliberately — which do not.
  *
- * <p><b>A lost claim is reported, not ignored</b> (corrective round). {@code repo.complete}
- * returns whether this caller still owned the claim it is finalising; discarding that boolean
- * left the one moment the documented reclaim-lease double-execute becomes OBSERVABLE silently
- * unobserved — this caller would get its own 201 and body while the stored response, which every
- * later retry of that key replays, belonged to a different execution.
+ * <p><b>A losing race on {@code complete} is reported, not ignored</b> (corrective round).
+ * {@code repo.complete} returns whether it was the call that actually stored the response;
+ * discarding that boolean left the one moment the documented reclaim-lease double-execute becomes
+ * OBSERVABLE silently unobserved — a caller would return its own 201 and body while the STORED
+ * response, which every later retry of that key replays, came from a different execution.
+ *
+ * <p>Deliberately says the two executions raced, and does NOT name a winner (corrective round 2).
+ * {@code IdempotencyRepository.complete} guards on {@code RESPONSE_STATUS_ = 0}, i.e. on the row
+ * still being unfinished — it does not, and cannot, check WHO owns the claim, because reclaiming
+ * leaves the row at status 0 rather than stamping a new owner. So when caller A's lease expires
+ * and caller B reclaims it, whichever of them calls {@code complete} first wins and the other
+ * gets the {@code false} — and that loser can perfectly well be B, the legitimate holder. A 409
+ * is the right answer in both orderings; an attributed cause would be wrong in one of them.
  */
 public class IdempotencySupport {
 
@@ -100,21 +108,27 @@ public class IdempotencySupport {
         }
         if (!repo.complete(key, scope, successStatus, serializer.apply(value))) {
             // The guard on complete()'s UPDATE is only half the fix; this is the other half
-            // (corrective round). A false here means the claim this call thought it held had
-            // already been finalised by someone else — its lease expired, a duplicate request
-            // reclaimed it and stored ITS response. Returning normally would hand this caller a
-            // 201 and a body while the stored response, which every subsequent retry of this key
-            // replays, belongs to a different execution: two callers, two results, one key, and
-            // no signal anywhere. That is precisely the double-execute the reclaim lease is
+            // (corrective round). A false here means the row was already finalised, so the stored
+            // response — which every subsequent retry of this key replays — came from a different
+            // execution than this one: two callers, two results, one key, and, before this, no
+            // signal anywhere. That is precisely the double-execute the reclaim lease is
             // documented as risking, and the one moment it becomes observable.
+            //
+            // The message names the RACE and not a winner (corrective round 2). complete() guards
+            // on status, not on ownership — reclaiming leaves the row at status 0 — so the caller
+            // that loses this race may be either the original holder whose lease expired OR the
+            // reclaimer who legitimately took over. A 409 is correct either way; blaming "a
+            // concurrent request that reclaimed it", as the first version did, is backwards in
+            // one of the two orderings.
             //
             // Reported as a conflict rather than swallowed: the work DID happen (the operation
             // returned), so this is not a failure the client can retry into a clean state — it is
             // a genuine collision the client has to know about, which is what 409 means here and
             // what it already means for every other idempotency conflict this class raises.
             throw new IdempotencyConflictException(
-                    "Idempotency key " + key + " was completed by a concurrent request that "
-                            + "reclaimed it; this request's own work may have been performed twice");
+                    "Idempotency key " + key + " was completed concurrently by another request; "
+                            + "the stored response is that request's, and this request's own work "
+                            + "may have been performed twice");
         }
         return new Result<>(value, successStatus, false);
     }

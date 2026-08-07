@@ -112,31 +112,68 @@ public class EventRepository {
     }
 
     /**
-     * Events by exact sequence number, for callers holding a set of {@code EVENT_SEQ_} references
-     * rather than a cursor — today {@code GET /webhooks/{id}/dead-letters}, which the published
-     * contract requires to embed each undeliverable event's full CloudEvent
-     * ({@code openapi-specs.md:1245}).
+     * Largest {@code IN} list this repository will put in one statement.
      *
-     * <p>One query with an {@code IN} list, not a lookup per row: the natural alternative is the
-     * {@code after(seq - 1, 1)} trick {@code WebhookDispatcher.deliver} uses for its single row,
-     * and repeating that per dead letter would be a plain N+1 on a listing endpoint. Same
-     * {@code List.copyOf} + {@code IN (:seqs)} shape {@code PlanItemRepository.findByCases} uses.
-     * Returns whatever exists; a caller asking for a seq that is not there (an event purged, or
-     * the "event not found" dead-letter reason the dispatcher itself records) simply gets fewer
-     * rows back, which the caller must handle rather than assume a 1:1 result.
+     * <p><b>The famous "Oracle caps an IN list at 1000 expressions (ORA-01795)" is NOT the limit
+     * this build runs against, and the number here was checked rather than assumed.</b> Oracle
+     * 23ai raised that ceiling to 65,535, and measurement against the real container agrees: an
+     * unchunked 1,500-bind list succeeds, and a 70,000-bind one fails (as a
+     * {@code BadSqlGrammarException} out of the driver, not a recognisable ORA-01795). 500 is
+     * therefore conservative by two orders of magnitude, which is deliberate — it keeps each
+     * statement's bind count and parse cost modest, and it stays correct if this ever runs
+     * against a pre-23ai database where the 1000 limit does apply.
+     *
+     * <p>Recorded this precisely because the first version of this constant asserted the 1000
+     * figure from memory, and the test written to prove the chunking used 1,500 ids — which
+     * passes with the chunking stripped out. That test proved nothing until it was resized to
+     * cross the real threshold. See
+     * {@code WebhookDispatcherTest.bySeqsChunksSoAnOverLongInListCannotHitOra01795}.
+     */
+    private static final int MAX_IN_LIST = 500;
+
+    /**
+     * Events by exact sequence number, for callers holding a set of {@code EVENT_SEQ_} references
+     * rather than a cursor — today the dead-letter listing
+     * ({@code GET /webhooks/{webhookId}/dead-letters}), which the published contract requires to
+     * embed each undeliverable event's full CloudEvent.
+     *
+     * <p>One query per {@link #MAX_IN_LIST} ids, not a lookup per row: the natural alternative is
+     * the {@code after(seq - 1, 1)} trick {@code WebhookDispatcher.deliver} uses for its single
+     * row, and repeating that per dead letter would be a plain N+1 on a listing endpoint.
+     *
+     * <p><b>Chunked, and the analogy this Javadoc used to draw was wrong</b> (corrective round 2).
+     * It cited {@code PlanItemRepository.findByCases} as precedent for an unbounded
+     * {@code IN (:seqs)} — but that method is fed one listing PAGE and is bounded by page size,
+     * while this one was fed a whole dead-letter queue with no cap anywhere in its path. The
+     * failure is worst in precisely the scenario this endpoint exists for: a restart dead-letters
+     * every pending delivery of every subscription at once, which is exactly how a queue grows
+     * without bound and turns the endpoint into a driver-level SQL failure instead of the
+     * diagnostic it was added to be (the exact threshold is measured on {@link #MAX_IN_LIST}). The caller is capped too (see {@code WebhookRepository.deadLetters}), so today this
+     * never chunks in practice — it is chunked anyway so the METHOD is correct for any caller,
+     * rather than depending on every future one remembering a limit that lives somewhere else.
+     *
+     * <p>Returns whatever exists; a caller asking for a seq that is not there simply gets fewer
+     * rows back, and must handle that rather than assume a 1:1 result — see
+     * {@code EventController.deadLetterBody}, whose {@code event} field is nullable for exactly
+     * this reason.
      *
      * <p>Unaffected by {@link #after}'s cursor-gap limitation — this addresses rows by primary
      * key rather than walking a cursor, so there is no "did I skip one" question to answer.
      */
     public List<StoredEvent> bySeqs(java.util.Collection<Long> seqs) {
-        if (seqs.isEmpty()) {
+        List<Long> all = List.copyOf(seqs);
+        if (all.isEmpty()) {
             return List.of();
         }
-        return jdbc.sql("""
-                SELECT SEQ_, ID_, SOURCE_, TYPE_, SUBJECT_, TENANT_ID_, TIME_, DATA_JSON_
-                FROM CM_EVENT WHERE SEQ_ IN (:seqs) ORDER BY SEQ_""")
-            .param("seqs", List.copyOf(seqs))
-            .query(EventRepository::map).list();
+        List<StoredEvent> found = new java.util.ArrayList<>(all.size());
+        for (int from = 0; from < all.size(); from += MAX_IN_LIST) {
+            found.addAll(jdbc.sql("""
+                    SELECT SEQ_, ID_, SOURCE_, TYPE_, SUBJECT_, TENANT_ID_, TIME_, DATA_JSON_
+                    FROM CM_EVENT WHERE SEQ_ IN (:seqs) ORDER BY SEQ_""")
+                .param("seqs", all.subList(from, Math.min(from + MAX_IN_LIST, all.size())))
+                .query(EventRepository::map).list());
+        }
+        return found;
     }
 
     private static StoredEvent map(java.sql.ResultSet rs, int n) throws java.sql.SQLException {

@@ -10,9 +10,17 @@ fixed, and whether or not the code now works. Several were explicitly ruled **do
 fix** by the human partner and are marked as such. Nothing here has been softened because a later
 task made the symptom go away.
 
-**What was built:** 6 Maven modules, 33 endpoints under `/case-api/v2`, **384 tests, all green**,
+**What was built:** 6 Maven modules, 33 endpoints under `/case-api/v2`, **387 tests, all green**,
 all against real Oracle 23ai via Testcontainers (no H2 anywhere that touches the schema). Per
-module: core 242, rest 94, engine-embedded 10, engine-remote 11, starter 9, poc-app 18.
+module: core 244, rest 94, engine-embedded 10, engine-remote 11, starter 9, poc-app 19.
+
+> Counted from an actual `./mvnw clean install`, and reconciled two ways after an earlier figure
+> in this document was found to be wrong: surefire's per-module totals equal the sum of its
+> per-class reports, and the core figure reconciles against source as 253 `@Test` annotations
+> **minus** the 10 in the abstract `EngineGatewayContract` (which has no concrete subclass inside
+> core, so they run in the two engine modules instead) **plus** the 1 ArchUnit `@ArchTest` field
+> in `ArchitectureTest`, which a `@Test` grep does not see. Both static approximations are wrong
+> on their own; that is why the number cited is the run's.
 
 ---
 
@@ -454,10 +462,10 @@ There is no replay endpoint either: a dead-lettered delivery can now be *seen* a
 > **Correction (corrective round).** An earlier version of this paragraph said replay "needs a
 > decision about at-least-once-again semantics that nothing in the spec makes." **That is false,
 > and it was written without grepping the contract.** Three published documents specify it:
-> `openapi-specs.md:1265` defines `POST /webhooks/{webhookId}/dead-letters/redeliver` → `202
-> Redelivery scheduled`; `design principles.md:169` says DLQ entries "can be redelivered";
-> `db-design.md:355` gives the mechanic — "redelivery resets them to PENDING", which is the
-> at-least-once-again semantic claimed to be missing, stated exactly. Not implementing redelivery
+> `openapi-specs.md` defines `POST /webhooks/{webhookId}/dead-letters/redeliver` → `202
+> Redelivery scheduled`; `design principles.md` §6 says DLQ entries "can be redelivered";
+> `db-design.md` (the `CM_WEBHOOK_DELIVERY` entry) gives the mechanic — "redelivery resets them to
+> PENDING", which is the at-least-once-again semantic claimed to be missing, stated exactly. Not implementing redelivery
 > is a fine scope decision; calling it unspecified was not. **The accurate statement is: redelivery
 > is fully specified and deliberately not implemented in this PoC.** Reinstating it is small — one
 > `UPDATE ... SET STATUS_ = 'PENDING', NEXT_ATTEMPT_AT_ = SYSTIMESTAMP WHERE WEBHOOK_ID_ = :id AND
@@ -658,8 +666,10 @@ already knows about.
 closed the eight Importants added `GET /webhooks/{id}/dead-letters` and recorded, in this very
 document, that the endpoint "is not in `openapi-specs.md`" and that redelivery "needs a decision
 about at-least-once-again semantics that nothing in the spec makes". **Both claims were false.** The
-endpoint had been specified all along (`openapi-specs.md:1245`, `design principles.md:169`), and
-redelivery is specified in three places including its exact mechanic (`db-design.md:355`,
+endpoint had been specified all along (`openapi-specs.md`, path `/webhooks/{webhookId}/dead-letters`;
+`design principles.md` §6, "DLQ entries are visible via ... and can be redelivered"), and
+redelivery is specified in three places including its exact mechanic (`db-design.md`, the
+`CM_WEBHOOK_DELIVERY` entry:
 "redelivery resets them to PENDING"). Neither statement cost a single grep to check, and neither
 grep was run.
 
@@ -686,7 +696,7 @@ nor any active execution: they were compiled, and then **silently skipped, with 
 no "Tests run" line at all** — not "0 tests", not a skip notice, nothing to notice. Discovered in
 Task 11 and fixed centrally by making surefire run `**/*IT.java` reactor-wide under `test` and
 deleting the dead declaration. Tasks 24, 26 and 27 are entirely `*IT`-based and would all have been
-affected; **this document's own "384 tests green" claim depends on that fix**, which is why it is
+affected; **this document's own "387 tests green" claim depends on that fix**, which is why it is
 recorded here and not only in `pom.xml`'s comment. It is the same failure as the eight above, one
 level up: a mechanism that reports success while protecting nothing, invisible because the report
 looks exactly like the report you expect. The generalisation: **a green build is evidence only about
@@ -1071,6 +1081,28 @@ wave needed a fix wave" is a real data point about the process, not an embarrass
 The single cause behind the first four is one habit, now written up as the third grep in the
 vacuous-mechanisms section: **the contract was never opened.**
 
+**A second corrective round then found two more in the same path**, both of which are worth
+recording because each is a mechanism that read as protective and was not:
+
+- **The schema published to fix the divergence forbade the nulls the code emits.** `event` was
+  declared as a bare `$ref` with a comment beside it reading "nullable on purpose" — and in
+  OpenAPI 3.0 **a `$ref` ignores every sibling key**, so the comment was a statement of intent
+  with nothing enforcing it. The usual workaround (`{nullable: true, allOf: [$ref]}`) was tried
+  next and *also* rejected the null, because the `allOf` branch still evaluates against
+  `CloudEvent`'s `type: object`. 3.0 simply cannot express a nullable `$ref`. Resolved by having
+  the API **omit** the key instead — unambiguous under any validator, since `event` is optional —
+  and by declaring the two plain scalars (`failedAt`, `lastStatusCode`) `nullable: true`, where
+  3.0 works correctly. The conformance case now covers both null branches, which the original
+  case could not: it exercised only the fully-resolvable row.
+- **The `IN`-list finding was right, its stated cause was folklore, and the first test for it was
+  vacuous.** "Oracle caps an `IN` list at 1000 expressions (ORA-01795)" is not true of Oracle
+  23ai, which raised the ceiling to 65,535 — so the test written at 1,500 ids passed with the
+  chunking stripped out and proved nothing. Measured against the real container: 1,500 binds
+  succeed unchunked, 70,000 fail. Resized to 70,000, the test genuinely fails without the fix.
+  The underlying finding stands, and the more important half of the fix needed no limit at all:
+  the response embeds a full CloudEvent per row, so an unbounded queue was an unbounded response
+  regardless, and `deadLetters` is now capped at 200.
+
 **And one of the twelve was not a defect at all.** The review recorded as a Minor that
 `ProblemDetail.title` is never set and therefore omitted from every problem body. On Spring Framework
 7 that is false: `ProblemDetail.getTitle()` falls back to the status reason phrase when the field is
@@ -1085,8 +1117,9 @@ the same method that settled Task 25's `NoClassDefFoundError` dispute.
 **`GET /webhooks/{id}/dead-letters` diverged from a contract that already specified it.** An
 earlier version of this paragraph said the endpoint "is not covered by `openapi-specs.md`" and that
 "the published document does not describe it". **Both statements were false**, written without
-grepping the document: `openapi-specs.md:1245` has defined the operation — tags, parameters, and a
-200 response schema — all along, and `design principles.md:169` names it too.
+grepping the document: `openapi-specs.md`'s `/webhooks/{webhookId}/dead-letters` has defined the
+operation — tags, parameters, and a
+200 response schema — all along, and `design principles.md` §6 names it too.
 
 The real finding is worse than the one that was recorded, and it is an implementation defect rather
 than a documentation gap: **the endpoint was implemented from the table's columns instead of from
@@ -1113,18 +1146,47 @@ request went out" — the restart signature — from an HTTP failure, and that d
 unrecoverable once flattened into `lastError` prose. Both are additive and cannot break a client
 written against the original four.
 
+### A composition finding: the demo app could not reach a third of its own admin surface
+
+`ActionPolicy` gates three deployment-wide endpoints on the `admin` identity group —
+`POST /case-definitions`, `POST /webhooks`, and `GET /webhooks/{id}/dead-letters`. **`PocBootstrap`
+seeded no user holding that group.** alice, bob and carol carry `intake`/`handlers`/`reviewers` and
+a tenant group; none is an administrator.
+
+So for the entire build, **three of this API's 33 endpoints were unreachable in the one application
+whose stated job is to be the runnable demonstration of that API** — not refused by design, simply
+unreachable by anybody. Neither half was wrong on its own: the authorization rule is correct and
+well tested (in `case-management-rest`, whose own harness *does* seed an admin), and the seeding is
+correct for the three case-working personas the PoC scenario needs. The gap exists only in the
+composition, and nothing looked at both halves at once — the same shape as the webhook-restart
+finding, and the reason that one is written up as a composition too.
+
+It surfaced only because a conformance case needed to call one of those endpoints and could not.
+That is worth noting on its own: **an endpoint no test and no seeded user can reach is
+indistinguishable from an endpoint that does not work**, and nothing in a green build says which it
+is. Fixed by seeding `olivia` (`admin` + `tenant:t1`) — purely additive, no existing caller's
+privileges changed. Recorded here rather than only in the task report because a finding that lives
+only in a working note is a finding this document was supposed to carry.
+
 ### A third spec defect, found by the same test: `CloudEvent` never declared its own extensions
 
 Adding the dead-letter conformance case caused the **first** validation of a CloudEvent against the
 published `CloudEvent` schema anywhere in the suite — the two event feeds were never covered. It
 failed immediately: `CaseEvent.toCloudEvent` has always emitted a `tenantid` extension attribute,
 and `GET /events`/`GET /cases/{caseId}/events` add a `cursor` one, and the schema declared neither.
-Undeclared properties are an error to swagger-request-validator by default (the same behaviour
-documented on the `Page` schema), so **every CloudEvent this API has ever returned was
-non-conformant against its own published schema** — undetected for the whole build because nothing
-validated one. The envelope was always legal *CloudEvents* (1.0 permits extension attributes); it
-simply was not what this document said. Both are now declared, with a comment explaining that
-`cursor` appears on the feeds and deliberately not on a dead-letter entry.
+So **the published schema under-declared the payload the implementation has always sent** —
+undetected for the whole build because nothing validated one.
+
+To be precise about how strong that claim is: under OpenAPI 3.0's own semantics an unspecified
+`additionalProperties` is *permissive*, so the API was not breaching its contract in a strict
+reading — the envelope was legal CloudEvents (1.0 permits extension attributes) and legal against a
+permissive reading of the schema. What is unambiguous is that the schema did not describe what the
+code sends, and that **under the strict default this project's own conformance tooling uses** — the
+same swagger-request-validator behaviour already documented on the `Page` schema — every such
+response is rejected. A schema whose own repository's validator rejects the API's real output is
+wrong in the way that matters, whichever reading of 3.0 you prefer. Both extensions are now
+declared, with a comment explaining that `cursor` appears on the feeds and deliberately not on a
+dead-letter entry.
 
 This is the same lesson as the two corrections above, one level down: **a conformance suite is
 evidence only about the operations it exercises**, exactly as a green build is evidence only about

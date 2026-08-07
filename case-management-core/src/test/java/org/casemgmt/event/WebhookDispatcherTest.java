@@ -271,6 +271,87 @@ class WebhookDispatcherTest extends OracleTestBase {
     }
 
     /**
+     * Corrective round 2: {@code deadLetters} had no bound, and nothing downstream added one —
+     * the endpoint has no pagination and {@code EventRepository.bySeqs} then built an Oracle
+     * {@code IN} list with one bind per row, whose own ceiling is 1000 expressions (ORA-01795).
+     * The failure landed in exactly the scenario the endpoint exists for: a restart dead-letters
+     * every pending delivery at once, which is how a queue passes 1000 rows.
+     *
+     * <p>Seeds {@code MAX_DEAD_LETTER_BATCH + 5} dead rows and asserts the EXACT cap — not merely
+     * "fewer than everything", which any accidental filter would satisfy — and that the rows kept
+     * are the oldest by {@code EVENT_SEQ_}, so the cap preserves the entries most likely to
+     * explain a failure rather than an arbitrary slice.
+     *
+     * <p>Writes the rows directly rather than driving the dispatcher 205 times: this is about the
+     * query's shape, and 205 real HTTP failures would add a minute for nothing.
+     */
+    @Test
+    void deadLettersIsCappedAndOldestFirstSoAHugeQueueCannotOverflowTheInList() {
+        webhooks.insert("w-1", "t1", hookUrl(), List.of("*"), HmacSigner.hash("s3cret"), 5);
+        int total = WebhookRepository.MAX_DEAD_LETTER_BATCH + 5;
+        List<Long> seqs = new java.util.ArrayList<>();
+        for (int i = 0; i < total; i++) {
+            long seq = new EventRepository(jdbc()).append(new CaseEvent(CaseIds.newId(),
+                    "/engines/eng-test/cases", "org.example.cm.case.created", "eng-test:bulk",
+                    "t1", OffsetDateTime.now(), Map.of("n", i)));
+            seqs.add(seq);
+            jdbc().sql("""
+                    INSERT INTO CM_WEBHOOK_DELIVERY (ID_, WEBHOOK_ID_, EVENT_SEQ_, STATUS_,
+                        ATTEMPTS_, FAILED_AT_)
+                    VALUES (:id, 'w-1', :seq, 'DEAD', 5, SYSTIMESTAMP)""")
+                .param("id", CaseIds.newId()).param("seq", seq).update();
+        }
+
+        List<WebhookRepository.DeadLetter> dead = webhooks.deadLetters("w-1");
+
+        assertThat(dead).hasSize(WebhookRepository.MAX_DEAD_LETTER_BATCH);
+        assertThat(dead).extracting(WebhookRepository.DeadLetter::eventSeq)
+                .containsExactlyElementsOf(
+                        seqs.stream().sorted().limit(WebhookRepository.MAX_DEAD_LETTER_BATCH).toList());
+
+        // And the batched event lookup resolves every one of them.
+        assertThat(new EventRepository(jdbc()).bySeqs(seqs))
+                .extracting(EventRepository.StoredEvent::seq)
+                .containsExactlyElementsOf(seqs.stream().sorted().toList());
+    }
+
+    /**
+     * The other half of the same finding, and it needs its own test because the one above cannot
+     * reach it: {@code deadLetters}' cap keeps the id list at 200, so the cap test passes against
+     * an UNCHUNKED {@code bySeqs} and proves nothing about it.
+     *
+     * <p><b>The size here is measured, not assumed, and the first two attempts were vacuous.</b>
+     * The finding was written up against the well-known "Oracle caps an IN list at 1000
+     * expressions (ORA-01795)", so this test was first written with 1,500 ids — and stripping the
+     * chunking left it GREEN. Oracle 23ai, which this build runs against, raised that ceiling to
+     * 65,535. Resized to 70,000, the stripped version fails for real
+     * ({@code BadSqlGrammarException} out of the driver, with the whole bind list in the message);
+     * the chunked version passes. Costs about 0.6s of the class's ~43s, measured both ways.
+     *
+     * <p>The ids need not be real rows — an {@code IN} list is over-long whether or not the values
+     * match anything — so this needs no inserts. The one seq that DOES exist is buried in the
+     * middle and asserted present, so the chunking is not merely "did not throw": every chunk's
+     * results have to be accumulated rather than the first or last one winning.
+     */
+    @Test
+    void bySeqsChunksSoAnOverLongInListCannotOverflowTheStatement() {
+        long real = new EventRepository(jdbc()).append(new CaseEvent(CaseIds.newId(),
+                "/engines/eng-test/cases", "org.example.cm.case.created", "eng-test:chunk",
+                "t1", OffsetDateTime.now(), Map.of()));
+
+        // Deliberately far more than one statement may carry, with the real seq buried in the
+        // middle so a chunking bug that drops all but the first or last chunk is caught.
+        List<Long> overLong = new java.util.ArrayList<>();
+        for (long i = 1; i <= 70_000; i++) {
+            overLong.add(i == 35_000 ? real : real + 1_000_000 + i);
+        }
+
+        assertThat(new EventRepository(jdbc()).bySeqs(overLong))
+                .extracting(EventRepository.StoredEvent::seq)
+                .containsExactly(real);
+    }
+
+    /**
      * The class's headline timeout claim, previously unverified (review round 1): every {@code
      * fail()} in this suite came from the HTTP-500 path, where a status code exists. Drives a
      * genuinely hung subscriber through an injected short response timeout — the injection point

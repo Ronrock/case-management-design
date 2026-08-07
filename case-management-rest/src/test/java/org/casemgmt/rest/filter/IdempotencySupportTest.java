@@ -275,10 +275,14 @@ class IdempotencySupportTest {
      * every later retry of that key replays, belonged to the other execution. Two callers, two
      * results, one key, no signal.
      *
-     * <p>Attribution: the fake reports the lost claim by returning false from {@code complete}
-     * exactly as the guarded SQL does, and the assertion pins the message to the reclaim
-     * wording — a generic {@code IdempotencyConflictException} could also come from
+     * <p>Attribution: the fake reports the lost race by returning false from {@code complete}
+     * exactly as the guarded SQL does, and the assertion pins the message to this condition's own
+     * wording — a generic {@code IdempotencyConflictException} could equally come from
      * {@code begin}, which is a different condition entirely.
+     *
+     * <p>The message deliberately does not name a winner: {@code complete} guards on status, not
+     * on ownership, so the caller that loses may be either the original holder or the reclaimer.
+     * See {@code IdempotencySupport}'s Javadoc.
      */
     @Test
     void aClaimLostToAReclaimerIsReportedRatherThanSilentlyReturningOK() {
@@ -293,7 +297,7 @@ class IdempotencySupportTest {
         assertThatThrownBy(() -> new IdempotencySupport(reclaimed)
                 .execute("k1", "POST /cases", "{}", () -> "created", s -> s, v -> v, 201))
                 .isInstanceOf(IdempotencyConflictException.class)
-                .hasMessageContaining("reclaimed it");
+                .hasMessageContaining("completed concurrently by another request");
     }
 
     /**

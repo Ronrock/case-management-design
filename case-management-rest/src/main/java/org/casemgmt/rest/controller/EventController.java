@@ -187,19 +187,33 @@ public class EventController {
      *       from a 5xx once flattened into {@code lastError} prose.</li>
      * </ul>
      *
-     * <p>{@code event} may legitimately be absent: a delivery can be dead-lettered precisely
+     * <p>{@code event} may legitimately be missing: a delivery can be dead-lettered precisely
      * BECAUSE its event could not be found ({@code WebhookDispatcher.deliver} records exactly
-     * that reason), so a null here is real information rather than a lookup bug, and
+     * that reason), so its absence is real information rather than a lookup bug, and
      * {@code lastError} says which.
+     *
+     * <p><b>That case OMITS the key rather than sending {@code "event": null}</b> (corrective
+     * round 2), which is a contract constraint, not a style choice: {@code openapi-specs.md} is
+     * an OpenAPI <b>3.0</b> document, and 3.0 cannot express a nullable {@code $ref} — a
+     * {@code $ref} ignores sibling keys, so {@code nullable} is silently dropped, and the
+     * {@code {nullable: true, allOf: [$ref]}} workaround still evaluates the {@code allOf}
+     * branch against the null and fails on {@code CloudEvent}'s own {@code type: object}. Both
+     * shapes were written and both rejected the null (see
+     * {@code OpenApiConformanceIT.theDeadLetterQueuesNullBranchesConformToTheSpec}). An absent
+     * optional key is unambiguous under every validator. {@code lastStatusCode} and
+     * {@code failedAt} are still sent as null because they are plain scalars, where 3.0's
+     * {@code nullable: true} works — the asymmetry is a $ref limitation, nothing more.
      */
     private static Map<String, Object> deadLetterBody(WebhookRepository.DeadLetter d,
                                                       EventRepository.StoredEvent stored) {
-        // LinkedHashMap, not Map.of: lastStatusCode and event are both genuinely nullable, and
+        // LinkedHashMap, not Map.of: lastStatusCode and failedAt are both genuinely nullable, and
         // Map.of throws NPE on a null value — the same trap already fixed for CM_TASK.OUTCOME_
         // and several other response bodies in this codebase.
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", d.id());
-        body.put("event", stored == null ? null : stored.event().toCloudEvent());
+        if (stored != null) {
+            body.put("event", stored.event().toCloudEvent());
+        }
         body.put("attempts", d.attempts());
         body.put("lastStatusCode", d.lastStatusCode());
         body.put("lastError", d.lastError());

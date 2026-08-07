@@ -187,6 +187,78 @@ class OpenApiConformanceIT extends PocAppEmbeddedTestBase {
                 deadLetters.getBody().replaceFirst("\"specversion\":\"1.0\",", ""), "specversion");
     }
 
+    /**
+     * The NULL branches of the same response (corrective round 2). The case above exercises only
+     * the fully-resolvable row, which is why it did not catch that the schema this same change
+     * published <b>forbade the nulls the code emits</b>: `event` was declared as a bare
+     * {@code $ref}, and in OpenAPI 3.0 a {@code $ref} ignores every sibling key — so the comment
+     * beside it saying "nullable on purpose" was a statement of intent with nothing enforcing it,
+     * and `CloudEvent` being {@code type: object} rejects a JSON null outright. `failedAt` had no
+     * {@code nullable} either. Both are reachable: `event` when a delivery is dead-lettered
+     * because its event could not be resolved — the very reason {@code WebhookDispatcher} records
+     * as "event N not found" — and `failedAt` for any row dead-lettered before the
+     * {@code cm-poc-webhook-delivery-failed-at} changeset existed.
+     *
+     * <p><b>`failedAt: null` is a REAL response.</b> The column is nulled first, which is exactly
+     * the state an upgraded deployment's pre-existing DEAD rows are in, and the body then comes
+     * off the running application like every other assertion in this class.
+     *
+     * <p><b>`event: null` is derived from that real body</b>, and deliberately so:
+     * {@code FK_CM_WHD_EVENT} makes a delivery pointing at a non-existent event impossible to
+     * create, so the branch cannot be reached from a test without disabling a constraint the
+     * schema is entitled to rely on. Deriving the shape is the same technique the negative
+     * controls above already use, applied positively — and what is under test is the SCHEMA's
+     * treatment of a null, not the controller's ability to produce one.
+     */
+    @Test
+    void theDeadLetterQueuesNullBranchesConformToTheSpec() {
+        String webhookId = (String) ((Map) client(ADMIN).post().uri("/case-api/v2/webhooks")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("url", "http://127.0.0.1:1/hook", "eventTypes", java.util.List.of("*")))
+                .retrieve().toEntity(Map.class).getBody()).get("id");
+
+        long seq = events.append(new CaseEvent(CaseIds.newId(), "/engines/eng-a/cases",
+                "org.example.cm.case.created", "eng-a:spec-dlq-null", "t1",
+                OffsetDateTime.now(), Map.of("probe", true)));
+        webhooks.enqueueDelivery(CaseIds.newId(), webhookId, seq);
+        deadLetterEverythingFor(webhookId);
+
+        // Exactly the state a row dead-lettered before the FAILED_AT_ changeset is left in.
+        jdbc.sql("UPDATE CM_WEBHOOK_DELIVERY SET FAILED_AT_ = NULL WHERE WEBHOOK_ID_ = :w")
+                .param("w", webhookId).update();
+
+        ResponseEntity<String> withNullFailedAt = client(ADMIN).get()
+                .uri("/case-api/v2/webhooks/{id}/dead-letters", webhookId)
+                .retrieve().toEntity(String.class);
+        assertThat(withNullFailedAt.getStatusCode().value()).isEqualTo(200);
+        assertThat(withNullFailedAt.getBody())
+                .as("the null branch must actually be present, or this asserts nothing")
+                .contains("\"failedAt\":null");
+        assertConforms("/webhooks/{webhookId}/dead-letters", Request.Method.GET, 200,
+                withNullFailedAt.getBody());
+
+        // The unresolvable-event shape: the key is OMITTED, never sent as null. Derived from
+        // the real body above by deleting it, which is the exact JSON deadLetterBody() produces
+        // when bySeqs resolves nothing for the row.
+        String withoutEvent = withNullFailedAt.getBody()
+                .replaceFirst("\"event\":\\{.*?\\}\\},", "");
+        assertThat(withoutEvent).doesNotContain("\"event\"");
+        assertConforms("/webhooks/{webhookId}/dead-letters", Request.Method.GET, 200, withoutEvent);
+
+        // ...and an explicit null is NOT the shape the contract accepts, which is precisely why
+        // the controller omits the key. Pins the reason the omission exists, so nobody
+        // "simplifies" it back to a null that this document cannot express for a $ref.
+        assertRejected("/webhooks/{webhookId}/dead-letters", Request.Method.GET, 200,
+                withNullFailedAt.getBody().replaceFirst("\"event\":\\{.*?\\}\\}", "\"event\":null"),
+                "event");
+
+        // Negative control: nulls are permitted only where declared. `attempts` is not nullable,
+        // so this must still be rejected — otherwise "the schema accepts my nulls" would be
+        // satisfied by a schema that accepts anything.
+        assertRejected("/webhooks/{webhookId}/dead-letters", Request.Method.GET, 200,
+                withoutEvent.replaceFirst("\"attempts\":\\d+", "\"attempts\":null"), "attempts");
+    }
+
     /** Drains until this subscription's deliveries are all DEAD, so the GET has real rows. */
     private void deadLetterEverythingFor(String webhookId) {
         for (int pass = 0; pass < 10 && webhooks.deadLetters(webhookId).isEmpty(); pass++) {
