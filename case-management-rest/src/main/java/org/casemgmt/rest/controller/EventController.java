@@ -1,6 +1,7 @@
 package org.casemgmt.rest.controller;
 
 import org.casemgmt.domain.CaseInstance;
+import org.casemgmt.error.NotFoundException;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.WebhookRepository;
@@ -124,6 +125,56 @@ public class EventController {
         // The plaintext secret is returned once and never again — only its HMAC key is stored.
         body.put("secret", created.secret());
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
+    }
+
+    /**
+     * The dead-letter queue for one subscription (final whole-branch review, Important 6).
+     *
+     * <p>{@code WebhookService.deadLetters} existed and was reachable only from tests, which
+     * made the DLQ half a mechanism: {@code WebhookDispatcher} could dead-letter a delivery and
+     * nothing in the deployment could ever see that it had. That matters most in the one
+     * scenario most likely to happen — a restart, after which the in-memory secret map is empty,
+     * every pre-existing subscription's signing throws, and every pending delivery burns its
+     * retries into a queue nobody could read. This does not fix that (the secret's durability is
+     * the real fix, recorded in FINDINGS.md); it makes it visible.
+     *
+     * <p>Gated exactly like {@link #subscribe}: an administration action, plus the subscription
+     * must be the caller's own tenant's. Tenancy is enforced by resolving the id through the
+     * tenant-scoped {@code webhooks.list(tenantId)} rather than by a direct lookup, so another
+     * tenant's subscription id is reported absent rather than forbidden — the same
+     * "to this caller it does not exist" answer {@code CaseController} gives for a foreign case,
+     * and it keeps the endpoint from becoming an id-probing oracle.
+     */
+    @GetMapping("/webhooks/{webhookId}/dead-letters")
+    public List<Map<String, Object>> deadLetters(@PathVariable String webhookId,
+                                                 Authentication authentication) {
+        Actor actor = callers.actor(authentication);
+        policy.assertMayAdminister(callers.groups(actor), "subscribe-webhook");
+        String tenantId = callers.tenantId(actor);
+
+        webhooks.list(tenantId).stream()
+                .filter(s -> s.id().equals(webhookId))
+                .findFirst()
+                .orElseThrow(() -> new NotFoundException("WebhookSubscription", webhookId));
+
+        return webhooks.deadLetters(webhookId).stream()
+                .map(EventController::deadLetterBody)
+                .toList();
+    }
+
+    private static Map<String, Object> deadLetterBody(WebhookRepository.DeadLetter d) {
+        // LinkedHashMap, not Map.of: lastStatusCode is genuinely null for a transport-level
+        // failure (and for the signing failure a restart produces), and Map.of throws NPE on a
+        // null value — the same trap already fixed for CM_TASK.OUTCOME_ and several other
+        // response bodies in this codebase.
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", d.id());
+        body.put("webhookId", d.webhookId());
+        body.put("eventSeq", d.eventSeq());
+        body.put("attempts", d.attempts());
+        body.put("lastStatusCode", d.lastStatusCode());
+        body.put("lastError", d.lastError());
+        return body;
     }
 
     private static int clamp(int limit) {

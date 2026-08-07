@@ -186,6 +186,88 @@ class WebhookDispatcherTest extends OracleTestBase {
     }
 
     /**
+     * Final whole-branch review, Important 6: the restart composite, and the half of it this
+     * class can actually fix.
+     *
+     * <p>{@code drainOnce}'s generic handler used to call {@code fail(delivery, null, ...)}, so
+     * a failure raised BEFORE the HTTP call — which is exactly what a restart produces, since
+     * the in-memory secret map is empty and {@code HmacSigner.sign} throws — fell back to
+     * {@code BACKOFF.size()} (5) instead of reading the subscription's own {@code MAX_RETRIES_}.
+     * The same dead-config defect review round 1 fixed for the HTTP path and left in place on
+     * this one. The catch now carries whatever subscription {@code deliver} had loaded.
+     *
+     * <p>Attribution: {@code MAX_RETRIES_} is 1, and {@code fail} dead-letters once the
+     * PRE-increment attempt count has reached it — so with the fix the row is DEAD after the
+     * second pre-HTTP failure, and without it the same row is still RETRYING (it would take
+     * five). Both the status and the attempt count are pinned, and {@code lastError} confirms
+     * the failure is the signing one this finding is about, not some other throw that happened
+     * to reach the same handler.
+     */
+    @Test
+    void aPreHttpFailureUsesTheSubscriptionsOwnMaxRetriesNotTheLaddersLength() {
+        webhooks.insert("w-1", "t1", hookUrl(), List.of("*"), HmacSigner.hash("s3cret"), 1);
+        publishOne();
+
+        // The post-restart resolver: the plaintext secret is simply gone.
+        var restarted = new WebhookDispatcher(webhooks, new EventRepository(jdbc()), id -> null);
+
+        assertThat(restarted.drainOnce()).isEqualTo(1);
+        assertThat(statusOf("w-1")).isEqualTo("RETRYING");
+        assertThat(attemptsOf("w-1")).isEqualTo(1);
+
+        makeDue();
+        assertThat(restarted.drainOnce()).isEqualTo(1);
+
+        assertThat(received).isEmpty();
+        assertThat(lastErrorOf("w-1")).contains("Could not sign webhook payload");
+        assertThat(attemptsOf("w-1")).isEqualTo(2);
+        assertThat(statusOf("w-1")).isEqualTo("DEAD");   // RETRYING if the ladder's 5 were used
+    }
+
+    /**
+     * The observability half of the same finding: {@code deadLetters} now reports WHY a delivery
+     * died, not merely that it did. Before this, {@code WebhookRepository.Delivery} carried only
+     * the dispatcher's claim/mark fields, so a dead-letter listing could not distinguish a 500
+     * from a signing failure from a hung endpoint — which is the whole question a restart
+     * raises. Also pins the SQL-NULL status code: a pre-HTTP failure produced no HTTP status,
+     * and {@code getInt} would silently render that as 0, a code that does not exist.
+     */
+    @Test
+    void aDeadLetterReportsWhyItDiedIncludingAnAbsentHttpStatus() {
+        webhooks.insert("w-1", "t1", hookUrl(), List.of("*"), HmacSigner.hash("s3cret"), 1);
+        publishOne();
+        var restarted = new WebhookDispatcher(webhooks, new EventRepository(jdbc()), id -> null);
+        restarted.drainOnce();
+        makeDue();
+        restarted.drainOnce();
+
+        List<WebhookRepository.DeadLetter> dead = webhooks.deadLetters("w-1");
+
+        assertThat(dead).hasSize(1);
+        assertThat(dead.get(0).webhookId()).isEqualTo("w-1");
+        assertThat(dead.get(0).attempts()).isEqualTo(2);
+        assertThat(dead.get(0).lastError()).contains("Could not sign webhook payload");
+        assertThat(dead.get(0).lastStatusCode())
+                .as("a failure raised before the request went out has no HTTP status at all — "
+                        + "it must be null, never 0")
+                .isNull();
+
+        // Negative control: a real HTTP failure DOES carry its status through the same field,
+        // so the null above is discriminating on the absent-status case, not on the column
+        // never being populated.
+        webhooks.insert("w-2", "t1", hookUrl(), List.of("*"), HmacSigner.hash("s3cret"), 1);
+        publishOne();
+        responseCode = 500;
+        var http = dispatcher("s3cret");
+        http.drainOnce();
+        makeDue();
+        http.drainOnce();
+
+        assertThat(webhooks.deadLetters("w-2"))
+                .anySatisfy(d -> assertThat(d.lastStatusCode()).isEqualTo(500));
+    }
+
+    /**
      * The class's headline timeout claim, previously unverified (review round 1): every {@code
      * fail()} in this suite came from the HTTP-500 path, where a status code exists. Drives a
      * genuinely hung subscriber through an injected short response timeout — the injection point

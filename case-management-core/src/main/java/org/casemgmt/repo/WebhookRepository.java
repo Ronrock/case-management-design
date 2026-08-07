@@ -269,14 +269,40 @@ public class WebhookRepository {
             .update() == 1;
     }
 
-    /** Rows in DEAD state ARE the dead-letter queue (db-design.md §3.6). */
-    public List<Delivery> deadLetters(String webhookId) {
+    /**
+     * Rows in DEAD state ARE the dead-letter queue (db-design.md §3.6).
+     *
+     * <p>Returns {@link DeadLetter}, not {@link Delivery} (final whole-branch review, Important
+     * 6): this feeds {@code GET /webhooks/{id}/dead-letters}, and a dead-letter listing that
+     * cannot say WHY a delivery died is not observability. {@code Delivery} deliberately carries
+     * only what the dispatcher's claim/mark cycle needs, and {@code claimToken} — its one field
+     * beyond those below — is always {@code null} here anyway, because {@code mark*} clears it
+     * as it finalises the row. A separate record keeps the dispatcher's hot path unchanged.
+     */
+    public record DeadLetter(String id, String webhookId, long eventSeq, int attempts,
+                             Integer lastStatusCode, String lastError) {}
+
+    public List<DeadLetter> deadLetters(String webhookId) {
         return jdbc.sql("""
-                SELECT ID_, WEBHOOK_ID_, EVENT_SEQ_, ATTEMPTS_, CLAIM_TOKEN_
+                SELECT ID_, WEBHOOK_ID_, EVENT_SEQ_, ATTEMPTS_, LAST_STATUS_CODE_, LAST_ERROR_
                 FROM CM_WEBHOOK_DELIVERY
                 WHERE WEBHOOK_ID_ = :id AND STATUS_ = 'DEAD' ORDER BY EVENT_SEQ_""")
             .param("id", webhookId)
-            .query(DELIVERY_MAPPER)
+            .query((rs, n) -> new DeadLetter(
+                    rs.getString("ID_"), rs.getString("WEBHOOK_ID_"),
+                    rs.getLong("EVENT_SEQ_"), rs.getInt("ATTEMPTS_"),
+                    // getObject(Integer.class), NOT getInt: a transport-level failure (connect
+                    // refused, timeout, or a signing error raised before the request went out)
+                    // never produced an HTTP status at all and stores SQL NULL, which getInt
+                    // silently renders as 0 — a status code that does not exist. The obvious
+                    // remedy, getInt followed by rs.wasNull(), is worse than it looks and was
+                    // written here first: wasNull() reports on the LAST column read, so inside a
+                    // record constructor call it answers for whichever getter ran most recently
+                    // (ATTEMPTS_), not for the one being tested. Caught by
+                    // WebhookDispatcherTest.aDeadLetterReportsWhyItDiedIncludingAnAbsentHttpStatus,
+                    // which asserts null and got 0. getObject has no ordering hazard at all.
+                    rs.getObject("LAST_STATUS_CODE_", Integer.class),
+                    rs.getString("LAST_ERROR_")))
             .list();
     }
 

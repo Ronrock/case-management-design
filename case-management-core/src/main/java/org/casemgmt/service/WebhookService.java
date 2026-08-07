@@ -61,7 +61,17 @@ public class WebhookService {
         return webhooks.allForTenant(tenantId);
     }
 
-    public List<WebhookRepository.Delivery> deadLetters(String webhookId) {
+    /**
+     * The dead-letter queue for one subscription. Until Task 27 this was reachable only from
+     * tests — see {@code WebhookDispatcher}'s Javadoc on what a restart costs, and why a
+     * dead-letter queue nothing can read is half a mechanism. {@code EventController} now
+     * exposes it at {@code GET /webhooks/{id}/dead-letters}.
+     *
+     * <p>Takes no tenant: the caller must already have established that this subscription is
+     * theirs. {@code EventController} does that by resolving the id through
+     * {@link #list(String)}, which is tenant-scoped, so another tenant's id is simply not found.
+     */
+    public List<WebhookRepository.DeadLetter> deadLetters(String webhookId) {
         return webhooks.deadLetters(webhookId);
     }
 }

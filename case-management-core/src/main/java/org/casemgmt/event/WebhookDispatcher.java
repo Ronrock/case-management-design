@@ -65,6 +65,32 @@ import java.util.function.Function;
  * key held outside the case-management database) or per-subscription signing keys held in an
  * external secret store (e.g. Vault, KMS) that this class's {@code secretResolver} would call
  * out to instead. Do not "solve" this by adding a plaintext column to {@code CM_WEBHOOK_SUB}.
+ *
+ * <p><b>What a restart actually costs, stated as one thing</b> (final whole-branch review,
+ * Important 6). Three separately-recorded, individually-minor items compose into the single most
+ * likely thing to bite a deployment, and the composition was written down nowhere:
+ * <ol>
+ *   <li>the starter holds webhook secrets in an in-memory {@code ConcurrentHashMap};</li>
+ *   <li>after ANY restart {@code secretResolver.apply(sub.id())} returns {@code null} for every
+ *       PRE-EXISTING subscription, so {@link HmacSigner#sign} throws, and that throw happens
+ *       before the HTTP call — caught by {@link #drainOnce}'s generic handler;</li>
+ *   <li>that handler used to call {@code fail(delivery, null, ...)}, so {@link #fail} fell back
+ *       to {@code BACKOFF.size()} instead of reading the subscription's own
+ *       {@code MAX_RETRIES_} — the exact dead config review round 1 had fixed for the HTTP
+ *       path and left broken for this one.</li>
+ * </ol>
+ * Net effect: <b>restarting the application permanently dead-letters every pending delivery of
+ * every pre-existing subscription, into a queue with no endpoint to read it and no way to
+ * replay it.</b>
+ *
+ * <p>Fixed here as far as this class can reach: {@code drainOnce} now carries whatever
+ * subscription {@link #deliver} managed to load into the catch, so the retry ladder is the
+ * subscription's own on the pre-HTTP failure path too. That does NOT make the secret survive a
+ * restart — it cannot; see above — it makes the failure honest, bounded by configured policy
+ * rather than by an accident of which fallback fired. The observability half is closed by
+ * {@code GET /webhooks/{id}/dead-letters} (Task 27), which exposes
+ * {@code WebhookService.deadLetters} — until then reachable only from tests. The durability
+ * half remains open and is recorded in FINDINGS.md as the thing to fix before any deployment.
  */
 public class WebhookDispatcher {
 
@@ -133,21 +159,30 @@ public class WebhookDispatcher {
         List<WebhookRepository.Delivery> due =
                 webhooks.claimDueDeliveries(WebhookRepository.MAX_CLAIM_BATCH);
         for (WebhookRepository.Delivery delivery : due) {
+            // Holds whatever subscription `deliver` managed to load before it threw, so a
+            // failure raised BEFORE the HTTP call — most importantly HmacSigner.sign throwing
+            // because secretResolver returned null — still gets the subscription's own
+            // MAX_RETRIES_ rather than fail()'s no-subscription fallback. See the composite
+            // note in this class's Javadoc for why that mattered so much.
+            var sub = new java.util.concurrent.atomic.AtomicReference<WebhookRepository.Subscription>();
             try {
-                deliver(delivery);
+                deliver(delivery, sub);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                fail(delivery, null, null, describe(e));
+                fail(delivery, sub.get(), null, describe(e));
                 return due.size();
             } catch (Exception e) {
-                fail(delivery, null, null, describe(e));
+                fail(delivery, sub.get(), null, describe(e));
             }
         }
         return due.size();
     }
 
-    private void deliver(WebhookRepository.Delivery delivery) throws Exception {
+    private void deliver(WebhookRepository.Delivery delivery,
+                         java.util.concurrent.atomic.AtomicReference<WebhookRepository.Subscription> loaded)
+            throws Exception {
         WebhookRepository.Subscription sub = webhooks.require(delivery.webhookId());
+        loaded.set(sub);
         EventRepository.StoredEvent stored = events.after(delivery.eventSeq() - 1, 1).stream()
                 .filter(e -> e.seq() == delivery.eventSeq()).findFirst().orElse(null);
         if (stored == null) {
