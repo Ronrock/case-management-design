@@ -85,9 +85,13 @@ public class PlanItemRepository {
     /**
      * Optimistic update of a plan item's lifecycle state.
      *
-     * <p>Follows the pattern established by {@code CaseRepository.update} (Task 4/5): this
-     * module has no transaction manager, so the UPDATE and any follow-up read are two
-     * independently auto-committed statements with nothing tying them together. Re-reading
+     * <p>Follows the pattern established by {@code CaseRepository.update} (Task 4/5): a
+     * repository call may run with no surrounding transaction at all, in which case the UPDATE
+     * and any follow-up read are two independently auto-committed statements with nothing tying
+     * them together. (Corrected in Task 27: this used to say the MODULE has no transaction
+     * manager, which stopped being true at Task 5 — {@code TransactionManagerConfig} is in this
+     * module. The conclusion is unchanged, because the untransacted case is the weakest
+     * environment this method must be correct in.) Re-reading
      * the row after a successful UPDATE would risk returning a concurrent writer's state as
      * if it confirmed this call's own write. Instead, since the WHERE clause already proves
      * the UPDATE matched exactly one row at {@code expectedVersion}, the post-state is

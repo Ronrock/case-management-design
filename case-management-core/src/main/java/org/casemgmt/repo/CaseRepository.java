@@ -65,9 +65,17 @@ public class CaseRepository {
      * never retried here, always surfaced as 412 by the REST layer.
      *
      * <p>Deliberately does NOT re-read the row after the UPDATE to build its return value.
-     * This module runs with no transaction boundary (no {@code @Transactional}, a plain
-     * pooled {@code DataSource}), so the UPDATE and a follow-up SELECT would be two
-     * independently auto-committed statements with nothing tying them together. If another
+     * A repository call may run with no transaction boundary at all — {@code JdbcClient} on a
+     * plain pooled {@code DataSource}, which is how this module's own tests build it and how
+     * any caller outside a {@code @Transactional} service reaches it — in which case the UPDATE
+     * and a follow-up SELECT are two independently auto-committed statements with nothing tying
+     * them together. (Corrected in Task 27: an earlier version of this paragraph said this
+     * MODULE has no transaction manager. That stopped being true at Task 5 —
+     * {@code org.casemgmt.config.TransactionManagerConfig} lives in this module and the starter
+     * imports it, so services here really do run inside proxied transactions. The conclusion
+     * below is unaffected and holds either way, which is why it survived the correction: the
+     * no-transaction case is the weakest environment this method must be correct in, and
+     * building the return value locally is correct in all of them.) If another
      * writer's UPDATE landed and committed in the gap between this call's UPDATE and its
      * SELECT, the SELECT would silently return THAT writer's state and version — this
      * caller would get no exception and would reasonably (but wrongly) believe the returned

@@ -3,6 +3,7 @@ package org.casemgmt.repo;
 import org.casemgmt.domain.*;
 import org.casemgmt.error.NotFoundException;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
 import javax.sql.DataSource;
@@ -51,12 +52,11 @@ public class CaseDefinitionRepository {
      * Writes the CM_CASE_DEF row and every CM_PLAN_ITEM_DEF row it explodes into as one
      * atomic unit.
      *
-     * <p>This module has no transaction boundary at all: {@link #jdbc} and {@code dataSource}
-     * are a plain pooled {@code DataSource} (HikariCP) handed straight to
-     * {@link JdbcClient#create}, with no Spring {@code ApplicationContext},
-     * {@code PlatformTransactionManager}, or {@code @Transactional} anywhere in
-     * case-management-core — {@code OracleTestBase} builds the pool directly, the same way
-     * production wiring will have to. Before this fix, each of {@code insert}'s N+1 statements
+     * <p>A caller may reach this method with no surrounding transaction at all — {@link #jdbc}
+     * and {@code dataSource} are a plain pooled {@code DataSource} (HikariCP), which is exactly
+     * how {@code OracleTestBase} and {@code TestServices} build it, and {@code
+     * CaseDefinitionService.deploy} carries no {@code @Transactional} today. Before this fix,
+     * each of {@code insert}'s N+1 statements
      * (one CM_CASE_DEF row, N CM_PLAN_ITEM_DEF rows) ran as its own independently
      * autocommitted call, each on whatever connection Hikari happened to hand out. A failure
      * partway through the plan-item loop — a constraint violation, a lost connection, a bad
@@ -68,37 +68,74 @@ public class CaseDefinitionRepository {
      * throw a confusing {@code CriterionEvaluationException} far from the real cause, or
      * evaluate against a null with no error at all.
      *
-     * <p>Fixed by taking one physical {@link Connection} from the pool, disabling autocommit
+     * <p>Fixed by taking one physical {@link Connection}, disabling autocommit
      * on it directly, running every INSERT against that single connection through a
      * throwaway {@link SingleConnectionDataSource} wrapper (constructed with
      * {@code suppressClose=true} so that JdbcClient's normal per-statement
      * connection-release doesn't actually close the shared connection out from under the
      * loop — without that flag the second INSERT would fail with "connection closed" after
-     * the first), then committing once at the end or rolling back on any exception. Not
-     * {@code @Transactional}: that annotation needs a {@code PlatformTransactionManager}
-     * bean from a Spring context, and this module deliberately has neither — reaching for it
-     * here would silently do nothing (no AOP proxy to intercept the call) rather than fail
-     * loudly, which is worse than not having transactions at all.
+     * the first), then committing once at the end or rolling back on any exception.
+     *
+     * <p><b>{@link DataSourceUtils#getConnection}, not {@code dataSource.getConnection()}</b>
+     * (final whole-branch review, Important 7). This method used to take a raw pooled
+     * connection, and an earlier version of this Javadoc asserted that was safe because "this
+     * module deliberately has neither [an {@code ApplicationContext} nor a
+     * {@code PlatformTransactionManager}]". That has been false since Task 5:
+     * {@code org.casemgmt.config.TransactionManagerConfig} lives in THIS module, the starter
+     * imports it, and half the services here are genuinely proxied. The raw
+     * {@code getConnection()} was safe only by the accident that {@code
+     * CaseDefinitionService.deploy} happens not to be {@code @Transactional} — and the moment
+     * someone adds that annotation (an entirely reasonable next change; deploy writes no audit
+     * row today and someone will want one), a raw connection would put these INSERTs on a
+     * SECOND physical connection and commit them outside the enclosing transaction, so a
+     * rollback of the caller's work would leave the definition behind. The Javadoc that should
+     * have warned them said the opposite.
+     *
+     * <p>{@code DataSourceUtils.getConnection}/{@code releaseConnection} is the participating
+     * pair: inside a Spring-managed transaction it returns THAT transaction's connection, and
+     * the {@code setAutoCommit(false)}/{@code commit()} below are then skipped (see the guard in
+     * the code — driving a synchronized connection's commit directly would commit the enclosing
+     * transaction's work early, which is worse than the bug being fixed). With no transaction
+     * in progress it behaves exactly as before: a fresh pooled connection this method owns,
+     * commits and releases itself. {@code releaseConnection} likewise only really closes a
+     * connection this method actually owns.
      */
     public void insert(CaseDefinition d) {
-        try (Connection conn = dataSource.getConnection()) {
-            boolean priorAutoCommit = conn.getAutoCommit();
-            conn.setAutoCommit(false);
+        Connection conn = DataSourceUtils.getConnection(dataSource);
+        // True when DataSourceUtils handed back a connection bound to an enclosing Spring
+        // transaction. That transaction owns the commit/rollback and the autocommit setting;
+        // this method must not touch any of them, and it does not need to — its whole purpose,
+        // "these N+1 statements land or do not land together", is already guaranteed by the
+        // enclosing transaction, on the very same connection.
+        boolean enlisted = DataSourceUtils.isConnectionTransactional(conn, dataSource);
+        try {
+            boolean priorAutoCommit = enlisted || conn.getAutoCommit();
+            if (!enlisted) {
+                conn.setAutoCommit(false);
+            }
             JdbcClient txJdbc = JdbcClient.create(new SingleConnectionDataSource(conn, true));
             try {
                 insertCaseDefRow(txJdbc, d);
                 for (PlanItemDefinition p : d.planItems()) {
                     insertPlanItemDefRow(txJdbc, d.id(), p);
                 }
-                conn.commit();
+                if (!enlisted) {
+                    conn.commit();
+                }
             } catch (RuntimeException e) {
-                rollbackQuietly(conn);
+                if (!enlisted) {
+                    rollbackQuietly(conn);
+                }
                 throw e;
             } finally {
-                conn.setAutoCommit(priorAutoCommit);
+                if (!enlisted) {
+                    conn.setAutoCommit(priorAutoCommit);
+                }
             }
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to deploy case definition " + d.id(), e);
+        } finally {
+            DataSourceUtils.releaseConnection(conn, dataSource);
         }
     }
 
