@@ -201,6 +201,52 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
     }
 
     /**
+     * Final whole-branch review, Minor: {@code TaskController} resolved {@code If-Match} BEFORE
+     * the tenant check, against an unfiltered lookup — so {@code If-Match: *} distinguished an
+     * existing foreign-tenant task from a nonexistent id. {@code ETagSupport.expectedVersion}
+     * answers 412 {@code precondition-failed} for a wildcard with no current representation and
+     * proceeds otherwise, so a foreign task got past that point and only then hit the tenant
+     * check, while a made-up id was refused earlier and differently.
+     * {@code CaseController.expectedVersion} was given a tenant filter for exactly this reason;
+     * the task path was not, and the asymmetry with its own sibling is what made it a defect.
+     *
+     * <p>The assertion is that the two ids are INDISTINGUISHABLE to the foreign caller — same
+     * status and same {@code code} — not merely that each is refused. "Both are refused" is
+     * satisfied by the defective version too (412 and 404 are both refusals); the oracle is the
+     * difference between them, so the difference is what has to disappear.
+     */
+    @Test
+    void ifMatchStarCannotDistinguishAnotherTenantsTaskFromANonexistentOne() {
+        deployAndCreateCase();
+
+        Map<String, Object> task = (Map<String, Object>) ((List<?>) client("bob").get()
+                .uri("/tasks?limit=50").retrieve().toEntity(List.class).getBody()).get(0);
+
+        ResponseEntity<Map> foreignTask = client(OTHER_TENANT_USER).post()
+                .uri("/tasks/{id}/claim", task.get("id"))
+                .header("If-Match", "*")
+                .retrieve().toEntity(Map.class);
+        ResponseEntity<Map> nonexistent = client(OTHER_TENANT_USER).post()
+                .uri("/tasks/{id}/claim", "task-that-does-not-exist")
+                .header("If-Match", "*")
+                .retrieve().toEntity(Map.class);
+
+        assertThat(foreignTask.getStatusCode().value())
+                .as("an existing foreign-tenant task and a made-up id must be indistinguishable")
+                .isEqualTo(nonexistent.getStatusCode().value());
+        assertThat(foreignTask.getBody().get("code")).isEqualTo(nonexistent.getBody().get("code"));
+        assertThat(foreignTask.getStatusCode().value()).isEqualTo(404);
+
+        // Negative control: for the task's OWN tenant, If-Match: * is still a working wildcard
+        // and not simply broken — otherwise "indistinguishable" is satisfied by refusing
+        // everyone.
+        ResponseEntity<Map> owner = client("bob").post().uri("/tasks/{id}/claim", task.get("id"))
+                .header("If-Match", "*")
+                .retrieve().toEntity(Map.class);
+        assertThat(owner.getStatusCode().value()).isEqualTo(200);
+    }
+
+    /**
      * Fix round 1, review finding I4. {@code CM_IDEMPOTENCY_KEY} is keyed on
      * {@code (KEY_, SCOPE_)}; with a constant scope, two callers picking the same key collide —
      * and with identical bodies the second one is handed the FIRST one's case id and replayed

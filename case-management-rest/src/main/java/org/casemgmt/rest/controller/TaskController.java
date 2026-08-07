@@ -87,10 +87,11 @@ public class TaskController {
                                               @RequestHeader(value = "If-Match", required = false) String ifMatch,
                                               Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        long version = expectedVersion(ifMatch, taskId);
 
+        // Tenant check BEFORE If-Match (final whole-branch review, Minor). See expectedVersion.
         CaseTask current = taskRepo.require(taskId);
         visibleCaseOf(current.caseId(), actor);
+        long version = expectedVersion(ifMatch, taskId, actor);
         policy.assertAllowedOnTask(current, actor.userId(),
                 callers.roles(current.caseId(), actor), callers.groups(actor), "claim");
 
@@ -105,10 +106,11 @@ public class TaskController {
                                                  @RequestBody(required = false) CompleteTaskRequest request,
                                                  Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        long version = expectedVersion(ifMatch, taskId);
 
+        // Tenant check BEFORE If-Match (final whole-branch review, Minor). See expectedVersion.
         CaseTask current = taskRepo.require(taskId);
         visibleCaseOf(current.caseId(), actor);
+        long version = expectedVersion(ifMatch, taskId, actor);
         policy.assertAllowedOnTask(current, actor.userId(),
                 callers.roles(current.caseId(), actor), callers.groups(actor), "complete");
 
@@ -118,9 +120,30 @@ public class TaskController {
                 .body(respond(completed, actor));
     }
 
-    private long expectedVersion(String ifMatch, String taskId) {
+    /**
+     * Resolves {@code If-Match} for this task, including the {@code *} wildcard.
+     *
+     * <p><b>Tenant-filtered, and called only after the tenant check</b> (final whole-branch
+     * review, Minor). Both were missing: {@code If-Match} used to be resolved before
+     * {@code visibleCaseOf} ran, against an unfiltered lookup, so {@code If-Match: *} answered
+     * 412 for an id that does not exist and proceeded for an id that exists in ANOTHER tenant —
+     * an existence oracle across the tenant boundary. {@code CaseController.expectedVersion} was
+     * given exactly this filter for exactly this reason; the task path was not, and the asymmetry
+     * with its own sibling is what made it a defect rather than a choice.
+     *
+     * <p>Belt and braces, deliberately. The reordering alone closes it (the caller now throws
+     * before this method runs), and the filter alone would too, but each is one edit away from
+     * being undone by someone who does not know the other is load-bearing: a future action method
+     * that forgets the ordering still gets a tenant-safe answer, and a refactor that "simplifies"
+     * the filter still cannot see past the ordering.
+     */
+    private long expectedVersion(String ifMatch, String taskId, Actor actor) {
         return ETagSupport.expectedVersion(ifMatch, "task " + taskId,
                 () -> taskRepo.findById(taskId)
+                        .filter(t -> caseRepo.findById(t.caseId())
+                                .map(c -> c.tenantId() != null
+                                        && c.tenantId().equals(callers.tenantId(actor)))
+                                .orElse(false))
                         .map(t -> OptionalLong.of(t.version()))
                         .orElseGet(OptionalLong::empty));
     }

@@ -323,6 +323,116 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
                 .retrieve().toEntity(Map.class).getStatusCode().value()).isEqualTo(201);
     }
 
+    /**
+     * <b>Corrects a finding, rather than fixing one.</b> The final whole-branch review recorded
+     * as a Minor that "{@code ProblemDetail.title} is never set, so it is omitted from every
+     * problem body", making every response incomplete against RFC 9457 §3.1. On Spring Framework
+     * 7 (Boot 4) that is false: {@code ProblemDetail.getTitle()} falls back to the status reason
+     * phrase when the field is null, so the wire body has always carried a conformant title. The
+     * proposed fix — {@code setTitle(status.getReasonPhrase())} in {@code ProblemDetailHandler}
+     * — was written, this test passed, the setter was stripped, and this test passed again with
+     * identical values. It wrote exactly what the getter derives and could never change an
+     * outcome, so it was dropped instead of kept (see {@code ProblemDetailHandler.decorate}).
+     *
+     * <p>This test stays regardless, because the ASSERTION is real even though the fix was not:
+     * it pins "the body a client actually receives carries a title", whoever supplies the value,
+     * and it is what would catch a future Spring upgrade that removed the fallback. Asserted
+     * across two distinct statuses, since §3.1 requires {@code title} to summarise the TYPE and
+     * therefore to track the status rather than be one constant string, and alongside
+     * {@code code}, so a change that filled in {@code title} by clobbering the field clients
+     * switch on would still fail here.
+     */
+    @Test
+    void everyProblemBodyCarriesAnRfc9457Title() {
+        Map<String, Object> created = deployAndCreateCase();
+        String id = (String) created.get("id");
+
+        ResponseEntity<Map> missingIfMatch = alice().patch().uri("/cases/{id}", id)
+                .contentType(MERGE_PATCH).body(Map.of("title", "New title"))
+                .retrieve().toEntity(Map.class);
+        assertThat(missingIfMatch.getStatusCode().value()).isEqualTo(428);
+        assertThat(missingIfMatch.getBody())
+                .containsEntry("code", "if-match-required")
+                .containsEntry("title", "Precondition Required");
+
+        ResponseEntity<Map> notFound = alice().get().uri("/cases/{id}", "eng-a:nope")
+                .retrieve().toEntity(Map.class);
+        assertThat(notFound.getStatusCode().value()).isEqualTo(404);
+        assertThat(notFound.getBody())
+                .containsEntry("code", "not-found")
+                .containsEntry("title", "Not Found");
+    }
+
+    /**
+     * Final whole-branch review, Minor: {@code ProblemDetailHandler} did not extend
+     * {@code ResponseEntityExceptionHandler}, so every exception Spring MVC raises BEFORE a
+     * handler runs escaped the advice entirely. The sharpest of those is a malformed request
+     * body ({@code HttpMessageNotReadableException}) — the one error a generic consumer is most
+     * likely to trigger while learning the API — which shipped as Spring's default error page
+     * instead of problem+json.
+     *
+     * <p>Sends bytes that are not JSON at all, so the failure happens in the message converter
+     * with no handler method ever invoked. Asserts the full contract shape, not just the status:
+     * the media type, the stable {@code code}, and the {@code title} — a 400 that arrived as
+     * {@code text/html} would satisfy a status-only assertion.
+     */
+    @Test
+    void aMalformedRequestBodyIsProblemJsonLikeEveryOtherError() {
+        ResponseEntity<Map> response = alice().post().uri("/cases")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body("{ this is not json")
+                .retrieve().toEntity(Map.class);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        assertThat(response.getHeaders().getContentType().toString())
+                .startsWith("application/problem+json");
+        assertThat(response.getBody())
+                .containsEntry("code", "invalid-request")
+                .containsEntry("title", "Bad Request")
+                .containsKey("detail");
+    }
+
+    /**
+     * Final whole-branch review, Minor: the 500 {@code model-error} path copied
+     * {@code e.getMessage()} straight into the client-visible {@code detail}. Exception messages
+     * in this codebase quote plan-item ids, case-definition keys, state names and raw criterion
+     * expressions, so that is information disclosure on a fault the client did not cause and can
+     * do nothing about.
+     *
+     * <p>Triggers a real {@code CriterionEvaluationException} by deploying a definition whose
+     * entry criterion is not a valid expression, then creating a case of it — the evaluator runs
+     * inside {@code CaseService.create}. Asserts BOTH halves: the contract shape survives (still
+     * problem+json, still a stable {@code code}), and the leaked identifier is absent from the
+     * entire serialised body, not merely from {@code detail} — a message copied into some other
+     * property would leak just as much.
+     */
+    @Test
+    void aServerFaultDoesNotLeakTheExceptionMessageToTheClient() {
+        String key = "leaky-model";
+        alice().post().uri("/case-definitions").contentType(MediaType.APPLICATION_JSON)
+                .body("""
+                        {"key":"%s","name":"Leaky","tenantId":"%s",
+                         "planItems":[
+                           {"defKey":"gate","type":"HUMAN_TASK","name":"gate",
+                            "entryCriteria":["${ this is not a valid juel expression }"],
+                            "sortOrder":10}]}""".formatted(key, TENANT))
+                .retrieve().toEntity(Map.class);
+
+        ResponseEntity<String> raw = alice().post().uri("/cases")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("caseDefinitionKey", key, "tenantId", TENANT, "title", "T"))
+                .retrieve().toEntity(String.class);
+
+        assertThat(raw.getStatusCode().value()).isEqualTo(500);
+        assertThat(raw.getHeaders().getContentType().toString())
+                .startsWith("application/problem+json");
+        assertThat(raw.getBody())
+                .contains("\"code\":\"model-error\"")
+                .as("the plan-item defKey the exception message quotes must not reach the client")
+                .doesNotContain("gate")
+                .doesNotContain("juel");
+    }
+
     private Map<String, Object> openTask(String caseId) {
         ResponseEntity<List> tasks = alice().get().uri("/cases/{id}/tasks", caseId)
                 .retrieve().toEntity(List.class);
