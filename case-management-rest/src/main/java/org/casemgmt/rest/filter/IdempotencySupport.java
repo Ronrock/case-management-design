@@ -1,6 +1,17 @@
 package org.casemgmt.rest.filter;
 
+import org.casemgmt.error.CaseConflictException;
+import org.casemgmt.error.FormValidationException;
+import org.casemgmt.error.InvalidCaseDefinitionException;
+import org.casemgmt.error.NotFoundException;
+import org.casemgmt.error.OptimisticLockException;
+import org.casemgmt.error.PreconditionRequiredException;
 import org.casemgmt.repo.IdempotencyRepository;
+import org.casemgmt.rest.error.ForbiddenException;
+import org.casemgmt.rest.error.InvalidRequestException;
+import org.casemgmt.rest.error.MalformedETagException;
+import org.casemgmt.rest.error.PreconditionFailedException;
+import org.springframework.web.ErrorResponse;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -21,6 +32,15 @@ import java.util.function.Supplier;
  * statement as long as neither this method nor its caller opens a surrounding transaction
  * across the whole call; {@code operation.get()} is free to run its own, separate
  * {@code @Transactional} business logic in between (that is the expected shape).
+ *
+ * <p><b>Failure releases the claim, for client errors only</b> (final whole-branch review,
+ * Important 4). The build recorded the double-execute half of the lease trade-off and not this
+ * half, which is the more common one: with {@code begin}'s row already committed, an operation
+ * that threw left the key claimed with nothing to clean it up, so an ordinary 400/404/422
+ * wedged that {@code Idempotency-Key} for the whole {@code LEASE_MINUTES} window — a retry with
+ * a corrected payload got 409 "already used with a different payload", and a retry with the
+ * original got 409 "still in progress". See {@link #releasesClaim} for exactly which failures
+ * release and — just as deliberately — which do not.
  */
 public class IdempotencySupport {
 
@@ -62,9 +82,63 @@ public class IdempotencySupport {
         if (stored.isPresent()) {
             return new Result<>(deserializer.apply(stored.get().body()), stored.get().status(), true);
         }
-        T value = operation.get();
+        T value;
+        try {
+            value = operation.get();
+        } catch (RuntimeException e) {
+            if (releasesClaim(e)) {
+                repo.release(key, scope);
+            }
+            throw e;
+        }
         repo.complete(key, scope, successStatus, serializer.apply(value));
         return new Result<>(value, successStatus, false);
+    }
+
+    /**
+     * Whether a failed operation should hand its idempotency claim straight back (final
+     * whole-branch review, Important 4).
+     *
+     * <p><b>Yes for client errors.</b> Every type listed here is one {@code ProblemDetailHandler}
+     * maps to a 4xx, plus Spring's own {@link ErrorResponse}-carrying exceptions with a 4xx
+     * status (which covers {@code ResponseStatusException} and the handler-resolved 4xx shapes).
+     * The defining property is not the status number but what it implies: the request was
+     * refused, the operation's own {@code @Transactional} boundary rolled back, and NOTHING was
+     * written. Holding the claim after that is pure harm — the client corrects its payload,
+     * retries with the same {@code Idempotency-Key}, and is told the key "was already used with
+     * a different payload"; retrying the original payload is told it "is still in progress" for
+     * the whole {@code LEASE_MINUTES} window. That fires on ordinary validation errors, which
+     * makes it the common path.
+     *
+     * <p><b>No for anything else.</b> A server fault, or a type this method does not recognise,
+     * says nothing about whether the operation's side effects landed — an engine call may have
+     * gone out, an outbox row may have committed. Releasing the claim there would let a retry
+     * repeat those effects, which is the precise thing an idempotency key is for. Such a claim
+     * is instead left to expire on {@code IdempotencyRepository}'s existing lease
+     * ({@code LEASE_MINUTES}), which is the conservative recovery path already in place for a
+     * caller that crashed outright. This is a deliberate asymmetry, not an omission.
+     *
+     * <p>Fails CLOSED by construction: an unrecognised exception keeps the claim. Adding a type
+     * here is a decision that its throw site never leaves side effects behind.
+     */
+    private static boolean releasesClaim(RuntimeException e) {
+        if (e instanceof NotFoundException
+                || e instanceof CaseConflictException
+                || e instanceof OptimisticLockException
+                || e instanceof PreconditionRequiredException
+                || e instanceof FormValidationException
+                || e instanceof InvalidCaseDefinitionException
+                || e instanceof MalformedETagException
+                || e instanceof PreconditionFailedException
+                || e instanceof InvalidRequestException
+                || e instanceof ForbiddenException) {
+            return true;
+        }
+        // Deliberately NOT IdempotencyConflictException: that one is thrown by repo.begin above,
+        // before this try block is even entered, and if it ever reached here it would mean some
+        // OTHER caller owns the claim — releasing it would be exactly wrong.
+        return e instanceof ErrorResponse response
+                && response.getStatusCode().is4xxClientError();
     }
 
     private static String sha256(String body) {

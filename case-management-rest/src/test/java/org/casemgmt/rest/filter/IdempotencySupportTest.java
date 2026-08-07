@@ -1,7 +1,21 @@
 package org.casemgmt.rest.filter;
 
+import org.casemgmt.error.CaseConflictException;
+import org.casemgmt.error.FormValidationException;
+import org.casemgmt.error.IdempotencyConflictException;
+import org.casemgmt.error.InvalidCaseDefinitionException;
+import org.casemgmt.error.NotFoundException;
+import org.casemgmt.error.OptimisticLockException;
+import org.casemgmt.error.PreconditionRequiredException;
 import org.casemgmt.repo.IdempotencyRepository;
+import org.casemgmt.rest.error.ForbiddenException;
+import org.casemgmt.rest.error.InvalidRequestException;
+import org.casemgmt.rest.error.MalformedETagException;
+import org.casemgmt.rest.error.PreconditionFailedException;
+import org.casemgmt.rules.PlanModelLoopException;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -24,12 +38,26 @@ import static org.assertj.core.api.Assertions.*;
  */
 class IdempotencySupportTest {
 
+    /**
+     * <p><b>Models the in-progress claim, not just the stored response</b> (final whole-branch
+     * review, Important 4). The earlier version of this fake returned {@code Optional.empty()}
+     * for any key it had no stored RESPONSE for — so a key that had been claimed and never
+     * completed looked, to this fake, exactly like a key never used. That made the wedge this
+     * class exists to prevent structurally invisible to every test here: the claim leak could
+     * not be reproduced against it. It now mirrors {@code IdempotencyRepository.begin}'s three
+     * real branches — a completed row replays, an in-flight row with a matching hash conflicts
+     * ("still in progress"), and a differing hash conflicts ("different payload") — so
+     * {@link #aClientErrorReleasesTheClaimSoACorrectedRetrySucceeds} genuinely fails without the
+     * release rather than passing on a fake that forgives everything.
+     */
     static class FakeIdempotencyRepository extends IdempotencyRepository {
         record BeginCall(String key, String scope, String hash) {}
 
         final List<BeginCall> beginCalls = new ArrayList<>();
         final List<String> completedKeys = new ArrayList<>();
+        final List<String> releasedKeys = new ArrayList<>();
         final Map<String, StoredResponse> stored = new HashMap<>();
+        private final Map<String, String> inProgressHashes = new HashMap<>();
 
         FakeIdempotencyRepository() {
             super(null);
@@ -38,13 +66,33 @@ class IdempotencySupportTest {
         @Override
         public Optional<StoredResponse> begin(String key, String scope, String requestHash) {
             beginCalls.add(new BeginCall(key, scope, requestHash));
-            return Optional.ofNullable(stored.get(key + "|" + scope));
+            String row = key + "|" + scope;
+            StoredResponse completed = stored.get(row);
+            if (completed != null) {
+                return Optional.of(completed);
+            }
+            String claimedHash = inProgressHashes.get(row);
+            if (claimedHash != null) {
+                throw new IdempotencyConflictException(claimedHash.equals(requestHash)
+                        ? "A request with idempotency key " + key + " is still in progress"
+                        : "Idempotency key " + key + " was already used with a different payload");
+            }
+            inProgressHashes.put(row, requestHash);
+            return Optional.empty();
         }
 
         @Override
-        public void complete(String key, String scope, int status, String responseJson) {
+        public boolean complete(String key, String scope, int status, String responseJson) {
             completedKeys.add(key);
+            inProgressHashes.remove(key + "|" + scope);
             stored.put(key + "|" + scope, new StoredResponse(status, responseJson));
+            return true;
+        }
+
+        @Override
+        public boolean release(String key, String scope) {
+            releasedKeys.add(key);
+            return inProgressHashes.remove(key + "|" + scope) != null;
         }
     }
 
@@ -112,5 +160,128 @@ class IdempotencySupportTest {
         support.execute("k2", "POST /cases", "body-b", () -> "v", s -> s, v -> v, 201);
 
         assertThat(repo.beginCalls.get(0).hash()).isNotEqualTo(repo.beginCalls.get(1).hash());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Final whole-branch review, Important 4: begin() commits an IN_PROGRESS row before the
+    // operation runs; if the operation then threw, nothing released it. The build recorded the
+    // double-execute half of that lease trade-off; this failure half — which fires on ORDINARY
+    // validation errors, not crashes — was recorded nowhere and is the more common path.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * The whole client-visible symptom, end to end through this class: a 422 form violation,
+     * then a corrected retry on the SAME key. Without the release the retry never reaches the
+     * operation at all — {@code begin} sees the still-claimed row and throws
+     * {@code IdempotencyConflictException}.
+     */
+    @Test
+    void aClientErrorReleasesTheClaimSoACorrectedRetrySucceeds() {
+        assertThatThrownBy(() -> support.execute("k1", "POST /cases", "{\"bad\":1}",
+                () -> { throw new FormValidationException(
+                        List.of(new FormValidationException.Violation("/x", "required"))); },
+                s -> s, v -> v, 201))
+                .isInstanceOf(FormValidationException.class);
+
+        // The client symptom, asserted directly: the corrected retry must reach the operation.
+        // Without the release this line throws IdempotencyConflictException("already used with
+        // a different payload") — the fake models begin()'s real three branches, so the wedge
+        // reproduces here rather than being forgiven by an over-permissive stub.
+        var retry = support.execute("k1", "POST /cases", "{\"good\":1}",
+                () -> "created", s -> s, v -> v, 201);
+
+        assertThat(retry.value()).isEqualTo("created");
+        assertThat(retry.replayed()).isFalse();
+        assertThat(repo.releasedKeys).containsExactly("k1");
+    }
+
+    /**
+     * Each of the client-error types {@code ProblemDetailHandler} maps to a 4xx releases, plus
+     * Spring's own {@link org.springframework.web.ErrorResponse}-carrying 4xx. Enumerated rather
+     * than sampled: this list IS the contract, and a type silently dropped from
+     * {@code releasesClaim} would otherwise go unnoticed.
+     */
+    @Test
+    void everyClientErrorShapeReleasesTheClaim() {
+        List<RuntimeException> clientErrors = List.of(
+                new NotFoundException("Case", "c-1"),
+                new CaseConflictException("illegal-state", "no", List.of()),
+                new OptimisticLockException("Case", "c-1", 3L),
+                new PreconditionRequiredException(),
+                new FormValidationException(List.of()),
+                new InvalidCaseDefinitionException("k", "bad"),
+                new MalformedETagException("bad etag", new IllegalArgumentException("x")),
+                new PreconditionFailedException("gone"),
+                new InvalidRequestException("bad enum"),
+                new ForbiddenException("Case c-1 is not visible"),
+                new ResponseStatusException(HttpStatus.BAD_REQUEST, "spring's own"));
+
+        for (RuntimeException error : clientErrors) {
+            FakeIdempotencyRepository fresh = new FakeIdempotencyRepository();
+            assertThatThrownBy(() -> new IdempotencySupport(fresh)
+                    .execute("k", "POST /cases", "{}", () -> { throw error; }, s -> s, v -> v, 201))
+                    .isSameAs(error);
+            assertThat(fresh.releasedKeys)
+                    .as(error.getClass().getSimpleName() + " must release the claim")
+                    .containsExactly("k");
+            assertThat(fresh.completedKeys).isEmpty();
+        }
+    }
+
+    /**
+     * The deliberate asymmetry, and the reason this is not simply "release on any exception".
+     * A server fault says nothing about whether the operation's side effects landed — an engine
+     * call may have gone out, an outbox row may have committed — so the claim is left to expire
+     * on the repository's lease instead of letting a retry repeat them. Also the fail-closed
+     * proof: an exception type {@code releasesClaim} does not recognise keeps the claim.
+     */
+    @Test
+    void aServerErrorKeepsTheClaimSoARetryCannotRepeatUnknownSideEffects() {
+        List<RuntimeException> serverErrors = List.of(
+                new PlanModelLoopException("eng-a:1", 20),
+                new IllegalStateException("something unrecognised blew up"),
+                new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "spring's own 500"));
+
+        for (RuntimeException error : serverErrors) {
+            FakeIdempotencyRepository fresh = new FakeIdempotencyRepository();
+            assertThatThrownBy(() -> new IdempotencySupport(fresh)
+                    .execute("k", "POST /cases", "{}", () -> { throw error; }, s -> s, v -> v, 201))
+                    .isSameAs(error);
+            assertThat(fresh.releasedKeys)
+                    .as(error.getClass().getSimpleName() + " must NOT release the claim")
+                    .isEmpty();
+        }
+    }
+
+    /**
+     * A failing operation must never record a response either — a 4xx that stored a body would
+     * make every later retry replay the failure as though it had succeeded.
+     */
+    @Test
+    void aFailedOperationStoresNoResponse() {
+        assertThatThrownBy(() -> support.execute("k1", "POST /cases", "{}",
+                () -> { throw new NotFoundException("Case", "c-1"); }, s -> s, v -> v, 201))
+                .isInstanceOf(NotFoundException.class);
+
+        assertThat(repo.completedKeys).isEmpty();
+        assertThat(repo.stored).isEmpty();
+    }
+
+    /**
+     * Negative control for the whole block: a SUCCESSFUL operation must not release anything.
+     * Without this, "the claim was released" is satisfiable by releasing unconditionally, which
+     * would disable idempotency altogether while every test above still passed.
+     */
+    @Test
+    void aSuccessfulOperationReleasesNothingAndStillReplays() {
+        support.execute("k1", "POST /cases", "{}", () -> "created", s -> s, v -> v, 201);
+
+        assertThat(repo.releasedKeys).isEmpty();
+
+        var replay = support.execute("k1", "POST /cases", "{}",
+                () -> { throw new AssertionError("operation must not run on replay"); },
+                s -> s, v -> v, 201);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.value()).isEqualTo("created");
     }
 }

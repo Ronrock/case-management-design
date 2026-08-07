@@ -32,8 +32,8 @@ import java.util.Optional;
  * identical constraint shape.
  *
  * <p><b>Abandoned-claim reclaim</b> (review finding, Important — I5): if the caller that won
- * {@code begin()} crashes, or its own operation throws, before it ever calls {@code complete},
- * the row is stuck at status 0 forever with no automatic release — {@link
+ * {@code begin()} crashes before it ever calls {@code complete} or {@link #release}, the row is
+ * stuck at status 0 with no automatic release — {@link
  * #purgeOlderThanHours} deletes it eventually, but at the spec's 48h retention window that is
  * a 48-hour wedge on every retry of that key, not an acceptable recovery path. {@code begin}
  * instead treats an in-progress row older than {@link #LEASE_MINUTES} as abandoned and lets a
@@ -118,13 +118,61 @@ public class IdempotencyRepository {
                 "A request with idempotency key " + key + " is still in progress — retry shortly");
     }
 
-    public void complete(String key, String scope, int status, String responseJson) {
-        jdbc.sql("""
+    /**
+     * Records the response for a claim this caller still owns.
+     *
+     * <p><b>Guarded on {@code RESPONSE_STATUS_ = 0}, and the affected-row count is returned</b>
+     * (final whole-branch review, Important 4). Without the guard this was an unconditional
+     * {@code UPDATE ... WHERE KEY_ = :key AND SCOPE_ = :scope}, so a duplicate or late
+     * {@code complete()} — a caller whose lease had expired and been reclaimed by someone else,
+     * who then finished anyway — silently overwrote a response another caller had already
+     * stored, and every subsequent replay served the wrong body. Same failure shape, and now
+     * the same remedy, as {@link WebhookRepository#markDelivered}'s claim-token guard: the
+     * stale write matches no row and the caller is told, instead of the store quietly ending up
+     * in a state neither caller decided on.
+     *
+     * @return {@code true} if this caller still owned the in-progress claim and the response was
+     *         stored; {@code false} if the row was already finalised by someone else (nothing
+     *         was written)
+     */
+    public boolean complete(String key, String scope, int status, String responseJson) {
+        return jdbc.sql("""
                 UPDATE CM_IDEMPOTENCY_KEY SET RESPONSE_STATUS_ = :status, RESPONSE_JSON_ = :body
-                WHERE KEY_ = :key AND SCOPE_ = :scope""")
+                WHERE KEY_ = :key AND SCOPE_ = :scope AND RESPONSE_STATUS_ = :inProgress""")
             .param("status", status).param("body", responseJson)
             .param("key", key).param("scope", scope)
-            .update();
+            .param("inProgress", IN_PROGRESS_STATUS)
+            .update() == 1;
+    }
+
+    /**
+     * Releases an in-progress claim so the same key can be retried immediately (final
+     * whole-branch review, Important 4).
+     *
+     * <p>{@link #begin} commits an IN_PROGRESS row before the caller's operation runs — that is
+     * the whole point, it is a cross-request mutex. If the operation then throws, nothing used
+     * to clean up: the key stayed claimed until {@link #LEASE_MINUTES} expired. The client
+     * fixed its payload, retried with the same {@code Idempotency-Key}, and got 409 "already
+     * used with a different payload"; retrying the ORIGINAL payload got 409 "still in progress"
+     * for five minutes. That fires on ordinary validation errors — a 400, a 422 form violation,
+     * a 404 — not just on crashes, so it is the common path, not the exotic one.
+     *
+     * <p>DELETE rather than a status flip: the row exists only to hold a claim, and a released
+     * claim must be indistinguishable from a key never used, or {@link #begin}'s
+     * {@code DuplicateKeyException} branch would compare the retry's hash against a claim that
+     * was abandoned — turning a legitimate corrected retry into the same 409 this exists to
+     * prevent. Guarded on {@code RESPONSE_STATUS_ = 0} so it can never delete a row that
+     * already carries a real, replayable response: a stale releaser affects zero rows.
+     *
+     * @return {@code true} if an in-progress claim was actually released
+     */
+    public boolean release(String key, String scope) {
+        return jdbc.sql("""
+                DELETE FROM CM_IDEMPOTENCY_KEY
+                WHERE KEY_ = :key AND SCOPE_ = :scope AND RESPONSE_STATUS_ = :inProgress""")
+            .param("key", key).param("scope", scope)
+            .param("inProgress", IN_PROGRESS_STATUS)
+            .update() == 1;
     }
 
     /** Retention: 48h, per spec §6.4. Call from a scheduled job. */
