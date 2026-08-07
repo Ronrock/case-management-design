@@ -398,6 +398,51 @@ class SlaServiceTest extends OracleTestBase {
                 "holidays", List.of()));
     }
 
+    /**
+     * Final whole-branch review, Important 8: {@code SlaSweeper.sweep()} is
+     * {@code @Transactional} and iterates everything {@code dueRecords} returns, so an unbounded,
+     * unordered result set means one transaction holding row locks across {@code CM_SLA_RECORD}
+     * and {@code CM_CASE} for the whole backlog — a lock convoy — and two sweepers taking rows in
+     * different orders can deadlock (ORA-00060), which escapes {@code processOne}'s per-record
+     * {@code OptimisticLockException} catch and rolls the entire batch back.
+     *
+     * <p>Seeds {@code MAX_SWEEP_BATCH + 5} due records and asserts BOTH halves at once:
+     * <ul>
+     *   <li>the batch is capped at {@code MAX_SWEEP_BATCH} — not merely "fewer than everything",
+     *       which any accidental filter would satisfy;</li>
+     *   <li>the rows returned are exactly the {@code MAX_SWEEP_BATCH} lowest ids in ascending
+     *       order — which pins the {@code ORDER BY} itself, not just that some prefix came back.
+     *       Ids are minted so their lexical order is a shuffle of their insertion order, so a
+     *       query with no {@code ORDER BY} would have to return insertion order AND have it
+     *       coincide with id order to pass by luck.</li>
+     * </ul>
+     * The records are inserted directly rather than through {@code startClocks} because this is
+     * about the query's shape, and 205 policy-driven clock starts would be slow for no gain.
+     */
+    @Test
+    void dueRecordsIsCappedAndOrderedSoTheSweeperCannotLockTheWholeBacklog() {
+        int total = SlaRepository.MAX_SWEEP_BATCH + 5;
+        OffsetDateTime overdue = OffsetDateTime.now().minusHours(1);
+        List<String> ids = new java.util.ArrayList<>();
+        for (int i = 0; i < total; i++) {
+            // Lexically ordered ids whose sequence deliberately does NOT follow insertion order:
+            // inserted 0, 204, 1, 203, ... so "returns the lowest ids" and "returns the
+            // first-inserted rows" are different answers and the assertion can tell them apart.
+            int n = (i % 2 == 0) ? i / 2 : total - 1 - (i / 2);
+            String id = "sla-%04d".formatted(n);
+            ids.add(id);
+            slaRepo.insertRecord(new SlaRecord(id, caseId, "tgt-first", "RUNNING",
+                    overdue.minusHours(1), overdue, overdue, null, null, 0L, 0L));
+        }
+
+        List<SlaRecord> due = slaRepo.dueRecords(OffsetDateTime.now());
+
+        assertThat(due).hasSize(SlaRepository.MAX_SWEEP_BATCH);
+        assertThat(due).extracting(SlaRecord::id)
+                .containsExactlyElementsOf(ids.stream().sorted()
+                        .limit(SlaRepository.MAX_SWEEP_BATCH).toList());
+    }
+
     private Map<String, Object> officeCalendarJson() {
         Map<String, String> hours = Map.of("from", "09:00", "to", "17:00");
         return Map.of(

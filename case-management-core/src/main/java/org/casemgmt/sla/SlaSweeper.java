@@ -59,7 +59,23 @@ public class SlaSweeper {
         this.publisher = publisher;
     }
 
-    /** @return how many due records this pass actually warned or breached */
+    /**
+     * @return how many due records this pass actually warned or breached
+     *
+     * <p><b>Bounded, ordered batch</b> (final whole-branch review, Important 8). This method is
+     * {@code @Transactional} and iterates everything {@link SlaRepository#dueRecords} returns, so
+     * for as long as it runs it holds row locks across {@code CM_SLA_RECORD} and — through
+     * {@code cases.require}/{@code updateSlaStatusMonotonic} — {@code CM_CASE}. With an unbounded
+     * result set that is one transaction locking the whole backlog on a live, user-facing table:
+     * a lock convoy waiting for the first busy day (a backlog after an outage, the first sweep
+     * after a bulk import). {@code dueRecords} now returns at most
+     * {@link SlaRepository#MAX_SWEEP_BATCH} rows, oldest id first; whatever is left over is due
+     * again on the next tick, which is every 60s by default. The {@code ORDER BY} is the other
+     * half: without a total order two concurrent sweepers can take the same rows in different
+     * sequences and deadlock (ORA-00060), and that arrives as a {@code DataAccessException} —
+     * which escapes {@link #processOne}'s per-record {@code OptimisticLockException} catch and
+     * takes the whole batch down with it.
+     */
     @Transactional
     public int sweep() {
         OffsetDateTime now = OffsetDateTime.now();

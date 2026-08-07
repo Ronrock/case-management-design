@@ -150,7 +150,42 @@ public class SlaRepository {
                 r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), expectedVersion + 1);
     }
 
-    /** Running clocks past their warning or breach threshold — the sweeper's work list. */
+    /**
+     * Largest work list one {@link #dueRecords} call will hand back — the bounded-batch
+     * invariant {@link WebhookRepository#MAX_CLAIM_BATCH} already establishes for the webhook
+     * outbox, applied here for the same reason (final whole-branch review, Important 8).
+     *
+     * <p>{@code SlaSweeper.sweep()} is {@code @Transactional} and iterates everything this
+     * returns, so an unbounded result set means one transaction holding row locks across
+     * {@code CM_SLA_RECORD} AND {@code CM_CASE} for the entire backlog — {@code CaseRepository}'s
+     * own Javadoc already states the consequence ("the sweeper holds the row lock for its whole
+     * batch, so a concurrent edit blocks on it"). On a live, user-facing table that is a lock
+     * convoy waiting for the first busy day: a backlog after an outage, or the first sweep after
+     * a bulk import, would block ordinary case edits for as long as the batch runs.
+     *
+     * <p>200 rather than the webhook outbox's 20 because the two batches cost entirely different
+     * things: a webhook delivery makes an outbound HTTP call bounded by a claim lease, while one
+     * SLA record is a handful of local statements. The bound that matters here is transaction
+     * duration and lock-hold time, not a lease. Leftover records are simply picked up by the next
+     * sweep — the query is a "what is due" predicate, not a claim, so nothing is lost by
+     * returning a prefix of it.
+     */
+    public static final int MAX_SWEEP_BATCH = 200;
+
+    /**
+     * Running clocks past their warning or breach threshold — the sweeper's work list, oldest
+     * first and bounded to {@link #MAX_SWEEP_BATCH}.
+     *
+     * <p><b>{@code ORDER BY ID_} is not cosmetic</b> (final whole-branch review, Important 8).
+     * Without it two concurrent sweepers can walk the same due records in different orders and
+     * deadlock (ORA-00060) — and that surfaces as a {@code DataAccessException}, which escapes
+     * {@code SlaSweeper.processOne}'s per-record {@code OptimisticLockException} catch and rolls
+     * back the entire batch. A total order shared by every sweeper makes the deadlock
+     * structurally impossible: two callers taking the same rows in the same sequence queue on
+     * the first contended row instead of each holding what the other wants. It also makes the
+     * {@code FETCH FIRST} prefix deterministic, so a record can never be starved by an unstable
+     * row order across sweeps.
+     */
     public List<SlaRecord> dueRecords(OffsetDateTime now) {
         // Plain string concatenation, not a text block spanning the "+ RECORD_COLUMNS +": a text
         // block strips trailing whitespace from every line, including the line ending "SELECT
@@ -158,8 +193,10 @@ public class SlaRepository {
         // "SELECTID_, ..." -> ORA-00900. findByCase/require below use the same plain-string
         // style for exactly this reason.
         return jdbc.sql("SELECT " + RECORD_COLUMNS + " FROM CM_SLA_RECORD "
-                + "WHERE STATUS_ = 'RUNNING' AND (DUE_AT_ <= :now OR WARN_AT_ <= :now)")
-            .param("now", now).query(SlaRepository::mapRecord).list();
+                + "WHERE STATUS_ = 'RUNNING' AND (DUE_AT_ <= :now OR WARN_AT_ <= :now) "
+                + "ORDER BY ID_ FETCH FIRST :batch ROWS ONLY")
+            .param("now", now).param("batch", MAX_SWEEP_BATCH)
+            .query(SlaRepository::mapRecord).list();
     }
 
     private static SlaRecord mapRecord(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
