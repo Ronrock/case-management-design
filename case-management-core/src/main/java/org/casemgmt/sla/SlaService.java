@@ -15,6 +15,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -88,11 +89,27 @@ public class SlaService {
                 record.startedAt(), record.dueAt(), record.warnAt(), OffsetDateTime.now(), reason,
                 record.pausedTotalSeconds(), record.version()), expectedVersion);
 
+        // reason may be null (a target with no configured PAUSED_STATES_JSON_ accepts any
+        // reason, including none — see assertValidPauseReason). Map.of rejects null values, and
+        // Phase 6's REST layer will bind this as an optional body field, so this is reachable in
+        // production, not just theoretically. Omit the key entirely rather than store a null or
+        // substitute an empty string that could be misread as "reason given but blank".
+        Map<String, Object> eventData = new HashMap<>();
+        eventData.put("slaId", paused.id());
+        eventData.put("targetId", paused.targetId());
+        if (reason != null) {
+            eventData.put("reason", reason);
+        }
         publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(), EventTypes.SLA_PAUSED,
-                caseId, c.tenantId(), OffsetDateTime.now(),
-                Map.of("slaId", paused.id(), "targetId", paused.targetId(), "reason", reason)));
+                caseId, c.tenantId(), OffsetDateTime.now(), eventData));
+
+        Map<String, Object> auditAfter = new HashMap<>();
+        auditAfter.put("status", "PAUSED");
+        if (reason != null) {
+            auditAfter.put("reason", reason);
+        }
         publisher.audit(caseId, c.tenantId(), actor.userId(), "sla.pause", "SlaRecord", paused.id(),
-                Map.of("status", "RUNNING"), Map.of("status", "PAUSED", "reason", reason));
+                Map.of("status", "RUNNING"), auditAfter);
 
         return paused;
     }

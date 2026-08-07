@@ -80,6 +80,29 @@ class SlaServiceTest extends OracleTestBase {
                 calNl.addDuration(before, Duration.ofHours(3)), calNl.addDuration(after, Duration.ofHours(3)));
     }
 
+    /**
+     * Fix round 2: every other S2 test in this class calls {@code startClocks} as setup BEFORE
+     * capturing its event/audit baseline, so deleting {@code startClocks}'s own {@code
+     * publisher.publish}/{@code publisher.audit} calls (SlaService.java ~67-72) left every
+     * existing test green — the baseline already included whatever startClocks wrote. This
+     * captures the baseline first.
+     */
+    @Test
+    void startClocksWritesAnSlaStartedEventAndAuditEntryPerTarget() {
+        int eventCountBefore = eventTypes().size();
+        int auditCountBefore = auditActions().size();
+
+        sla.startClocks(caseId, "pol-1", alice);
+
+        // setUp() seeds exactly one target ("tgt-first") on "pol-1".
+        List<String> events = eventTypes();
+        assertThat(events).hasSize(eventCountBefore + 1);
+        assertThat(events.get(events.size() - 1)).endsWith("case.sla.started");
+        List<String> actions = auditActions();
+        assertThat(actions).hasSize(auditCountBefore + 1);
+        assertThat(actions.get(actions.size() - 1)).isEqualTo("sla.start");
+    }
+
     @Test
     void pauseRecordsWhenTheClockStopped() {
         sla.startClocks(caseId, "pol-1", alice);
@@ -223,6 +246,28 @@ class SlaServiceTest extends OracleTestBase {
 
         // The rejected attempt must not have touched the record.
         assertThat(slaRepo.require(record.id()).status()).isEqualTo("RUNNING");
+    }
+
+    /**
+     * Fix round 2 regression: a target with no configured {@code PAUSED_STATES_JSON_} accepts
+     * any reason — including none. {@code assertValidPauseReason} short-circuits on the empty
+     * list, so a null reason used to flow straight into two {@code Map.of(...)} calls (event data
+     * and audit "after"), which reject null values with an NPE. Phase 6's REST layer will bind
+     * this as an optional body field, so a null reason is reachable in production.
+     */
+    @Test
+    void pauseAcceptsANullReasonWhenNoPauseReasonsAreConfigured() {
+        slaRepo.insertTarget("tgt-open", "pol-1", "open", "Open target", "PT1H", null,
+                List.of(), List.of());
+        sla.startClocks(caseId, "pol-1", alice);
+        SlaRecord record = slaRepo.findByCase(caseId).stream()
+                .filter(r -> slaRepo.target(r.targetId()).targetKey().equals("open"))
+                .findFirst().orElseThrow();
+
+        SlaRecord paused = sla.pause(caseId, record.id(), record.version(), null, alice);
+
+        assertThat(paused.status()).isEqualTo("PAUSED");
+        assertThat(paused.pausedReason()).isNull();
     }
 
     @Test

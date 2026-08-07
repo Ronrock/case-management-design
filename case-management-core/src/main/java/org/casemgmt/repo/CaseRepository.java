@@ -83,6 +83,26 @@ public class CaseRepository {
      * {@code SYSTIMESTAMP}), so the timestamp written to the row and the timestamp on the
      * returned object are the exact same value — no second read needed to learn what the
      * server actually stored.
+     *
+     * <p><b>{@code SLA_STATUS_} is deliberately absent from the SET list (fix round 2, review
+     * finding "SLA_STATUS_ is now silently stompable"):</b> this method's own Javadoc above
+     * explains why it never re-reads before returning — the caller's in-memory {@code
+     * CaseInstance} is trusted as current for every column THIS method owns. {@code SLA_STATUS_}
+     * is not one of them; {@code SlaSweeper} owns it exclusively via {@link
+     * #updateSlaStatusMonotonic}. Before this fix, a full-row {@code update} call built from a
+     * case read BEFORE a concurrent sweep committed a breach would carry that stale value
+     * (typically {@code NONE} or {@code WARNING}) right back over the sweeper's write — the
+     * optimistic {@code VERSION_} check does not protect this column at all, since the sweeper's
+     * write deliberately does not bump {@code VERSION_} (see {@link #updateSlaStatusMonotonic}),
+     * so the user's stale-read UPDATE still matches and silently overwrites {@code BREACHED} with
+     * whatever the user last saw — permanently, since a record already {@code BREACHED} is never
+     * re-selected by {@link org.casemgmt.repo.SlaRepository#dueRecords} and nothing else
+     * re-derives the column. Dropping the column from this SET list closes that window
+     * completely: nothing this method writes can ever race the sweeper's column again. The
+     * returned {@link CaseInstance}'s {@code slaStatus()} still reflects the caller's
+     * (possibly now-stale) view rather than a fresh read — consistent with this method's
+     * no-re-read contract for every other column — but that staleness can no longer reach the
+     * database.
      */
     public CaseInstance update(CaseInstance c, long expectedVersion) {
         OffsetDateTime updatedAt = OffsetDateTime.now();
@@ -91,7 +111,7 @@ public class CaseRepository {
         int rows = jdbc.sql("""
                 UPDATE CM_CASE SET
                     TITLE_ = :title, STATE_ = :state, PRIORITY_ = :priority,
-                    ASSIGNEE_ = :assignee, QUEUE_ID_ = :queueId, SLA_STATUS_ = :slaStatus,
+                    ASSIGNEE_ = :assignee, QUEUE_ID_ = :queueId,
                     OUTCOME_ = :outcome, CANCEL_REASON_ = :cancelReason,
                     VARIABLES_JSON_ = :variables, CLOSED_AT_ = :closedAt,
                     UPDATED_AT_ = :updatedAt, VERSION_ = VERSION_ + 1
@@ -99,7 +119,6 @@ public class CaseRepository {
             .param("title", c.title()).param("state", c.state().name())
             .param("priority", c.priority().name()).param("assignee", c.assignee())
             .param("queueId", c.queueId())
-            .param("slaStatus", slaStatus)
             .param("outcome", c.outcome()).param("cancelReason", c.cancelReason())
             .param("variables", JsonCodec.toJson(c.variables()))
             .param("closedAt", c.closedAt())
@@ -129,7 +148,9 @@ public class CaseRepository {
      * the sweeper should never have to retry (or abort a whole batch, see {@code SlaSweeper}'s
      * Javadoc) just because a user saved the case's title. {@code SLA_STATUS_} is explicitly
      * documented as denormalized in {@code db-design.sql} for exactly this reason: it is owned by
-     * the sweeper, not by the user's optimistic version.
+     * the sweeper, not by the user's optimistic version. Since fix round 2, {@link #update} above
+     * no longer writes this column at all (see its Javadoc) — this method is now the ONLY writer
+     * of {@code SLA_STATUS_} after row creation, not merely the recommended one.
      *
      * <p>Monotonic against downgrade from {@code BREACHED}: {@link
      * org.casemgmt.repo.SlaRepository#dueRecords} has no stable ordering, so a case with one
