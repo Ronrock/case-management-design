@@ -31,7 +31,7 @@ class PlanItemServiceTest extends OracleTestBase {
                  "planItems":[
                    {"defKey":"manual","type":"HUMAN_TASK","name":"Manual","manualActivation":true,"sortOrder":10},
                    {"defKey":"auto","type":"HUMAN_TASK","name":"Auto","sortOrder":20}]}""";
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
 
         gateway = new CaseServiceTest.RecordingGateway();
         cases = TestServices.caseService(dataSource(), gateway);

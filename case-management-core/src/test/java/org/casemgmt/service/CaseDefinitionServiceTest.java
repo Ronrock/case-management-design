@@ -27,7 +27,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
 
     @Test
     void deploysVersionOneAndExplodesPlanItems() {
-        CaseDefinition def = service.deploy(json, "alice");
+        CaseDefinition def = service.deploy(json, "alice", "t1");
 
         assertThat(def.id()).isEqualTo("widget-review:1");
         assertThat(def.versionNo()).isEqualTo(1);
@@ -40,8 +40,8 @@ class CaseDefinitionServiceTest extends OracleTestBase {
 
     @Test
     void redeployingTheSameKeyIncrementsTheVersion() {
-        service.deploy(json, "alice");
-        CaseDefinition second = service.deploy(json, "alice");
+        service.deploy(json, "alice", "t1");
+        CaseDefinition second = service.deploy(json, "alice", "t1");
 
         assertThat(second.versionNo()).isEqualTo(2);
         assertThat(second.id()).isEqualTo("widget-review:2");
@@ -49,8 +49,8 @@ class CaseDefinitionServiceTest extends OracleTestBase {
 
     @Test
     void findLatestReturnsTheHighestVersion() {
-        service.deploy(json, "alice");
-        service.deploy(json, "alice");
+        service.deploy(json, "alice", "t1");
+        service.deploy(json, "alice", "t1");
 
         var latest = new CaseDefinitionRepository(dataSource()).findLatest("widget-review", "t1");
 
@@ -60,7 +60,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
 
     @Test
     void servesFormSchemasByKey() {
-        service.deploy(json, "alice");
+        service.deploy(json, "alice", "t1");
 
         var schema = new CaseDefinitionRepository(dataSource()).formSchema("widget-review", "reviewForm");
 
@@ -70,14 +70,14 @@ class CaseDefinitionServiceTest extends OracleTestBase {
 
     @Test
     void planItemDefaultsManualActivationToFalseWhenAbsent() {
-        CaseDefinition def = service.deploy(json, "alice");
+        CaseDefinition def = service.deploy(json, "alice", "t1");
         assertThat(def.planItem("reviewed").manualActivation()).isFalse();
     }
 
     @Test
     void listLatestReturnsOnlyTheNewestVersionPerKey() {
-        service.deploy(json, "alice");
-        service.deploy(json, "alice");
+        service.deploy(json, "alice", "t1");
+        service.deploy(json, "alice", "t1");
 
         var latest = new CaseDefinitionRepository(dataSource()).listLatest("t1");
 
@@ -87,7 +87,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
 
     @Test
     void findByIdAndRequireLoadTheStoredDefinitionWithPlanItems() {
-        CaseDefinition deployed = service.deploy(json, "alice");
+        CaseDefinition deployed = service.deploy(json, "alice", "t1");
 
         var repo = new CaseDefinitionRepository(dataSource());
         assertThat(repo.findById(deployed.id())).isPresent();
@@ -100,7 +100,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
     void rejectsADefinitionWhosePlanItemNamesAnUnknownParentStageKey() {
         String badJson = json.replace("\"defKey\": \"intake\"", "\"defKey\": \"intake-renamed\"");
 
-        assertThatThrownBy(() -> service.deploy(badJson, "alice"))
+        assertThatThrownBy(() -> service.deploy(badJson, "alice", "t1"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("review")
                 .hasMessageContaining("intake");
@@ -114,7 +114,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
         // if it were ever to reach the database instead.
         String badJson = json.replace("\"defKey\": \"reviewed\"", "\"defKey\": \"review\"");
 
-        assertThatThrownBy(() -> service.deploy(badJson, "alice"))
+        assertThatThrownBy(() -> service.deploy(badJson, "alice", "t1"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("duplicate")
                 .hasMessageContaining("review");

@@ -95,7 +95,7 @@ class CaseServiceTransactionalIntegrationTest extends OracleTestBase {
     private void deploy(String resourcePath) throws Exception {
         String json = new String(getClass().getResourceAsStream(resourcePath).readAllBytes(),
                 StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
     }
 
     @Test

@@ -1,11 +1,13 @@
 package org.casemgmt.rest.controller;
 
 import org.casemgmt.domain.CaseInstance;
+import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.repo.CommentRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.MilestoneRepository;
+import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.dto.Dtos.CommentRequest;
 import org.casemgmt.rest.dto.Dtos.StartProcessRequest;
@@ -60,16 +62,19 @@ public class CollaborationController {
     private final MilestoneService milestones;
     private final LinkedProcessService processes;
     private final CaseService cases;
+    private final PlanItemRepository planItems;
     private final ActionPolicy policy;
     private final CallerResolver callers;
 
     public CollaborationController(CommentService comments, MilestoneService milestones,
                                    LinkedProcessService processes, CaseService cases,
-                                   ActionPolicy policy, CallerResolver callers) {
+                                   PlanItemRepository planItems, ActionPolicy policy,
+                                   CallerResolver callers) {
         this.comments = comments;
         this.milestones = milestones;
         this.processes = processes;
         this.cases = cases;
+        this.planItems = planItems;
         this.policy = policy;
         this.callers = callers;
     }
@@ -149,6 +154,16 @@ public class CollaborationController {
      * I6). It was hardcoded {@code null}, which made the outbox correlation Task 18 built for
      * plan-item-backed processes unreachable from HTTP. {@code If-Match} is accepted and checked
      * against the case, for the same reason as {@link #achieve}.
+     *
+     * <p>Exposing that field also made it caller-controlled, so it is validated against the URL's
+     * case (fix round 2, review finding Important 1) — the same defect shape as M9, on the
+     * sibling endpoint M9's fix did not cover. {@code LinkedProcessService.start} does not check
+     * it and {@code CM_LINKED_PROCESS.PLAN_ITEM_ID_} has no foreign key, so without this a caller
+     * with {@code owner} on their own case could write a linked-process row pointing at a plan
+     * item of another case — and that value propagates: {@code OutboxEngineGateway} copies it into
+     * the command payload, so a dead-lettered {@code START_PROCESS} has
+     * {@code EngineCommandDispatcher.reportFailure} write against a row in a case the request
+     * merely named.
      */
     @PostMapping("/processes")
     public ResponseEntity<Map<String, Object>> startProcess(@PathVariable String caseId,
@@ -161,9 +176,33 @@ public class CollaborationController {
         policy.assertAllowedOnCollaboration(cases.snapshot(c), callers.roles(caseId, actor),
                 "start-process");
 
+        requirePlanItemOfCase(request.planItemId(), caseId);
+
         LinkedProcessRepository.LinkedProcessRow row = processes.start(caseId, request.planItemId(),
                 request.processDefinitionKey(), request.variables(), actor);
         return ResponseEntity.status(HttpStatus.CREATED).body(processBody(row));
+    }
+
+    /**
+     * Rejects a {@code planItemId} that is not this case's. {@code null} stays legal — the spec
+     * makes the field optional, for a process started ad hoc rather than to fulfil a plan item.
+     *
+     * <p>An unknown id and a foreign id get the identical answer on purpose: distinguishing them
+     * would turn this endpoint into an existence oracle for plan items the caller cannot see.
+     * The check runs AFTER the policy check, so an unauthorized caller learns nothing about plan
+     * items either way.
+     */
+    private void requirePlanItemOfCase(String planItemId, String caseId) {
+        if (planItemId == null) {
+            return;
+        }
+        boolean belongs = planItems.findById(planItemId)
+                .filter(item -> item.caseId().equals(caseId))
+                .isPresent();
+        if (!belongs) {
+            throw new CaseConflictException("wrong-case",
+                    "Plan item " + planItemId + " does not belong to case " + caseId, List.of());
+        }
     }
 
     /** Loads the case, or reports it absent when it is not this caller's tenant's. */

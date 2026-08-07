@@ -58,7 +58,7 @@ class PlanItemServiceTransactionalIntegrationTest extends OracleTestBase {
                 {"key":"txn-manual-model","name":"Manual","tenantId":"t1",
                  "planItems":[
                    {"defKey":"manual","type":"HUMAN_TASK","name":"manual","manualActivation":true,"sortOrder":10}]}""";
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
 
         ctx = springContext(PlanItemServiceTestConfig.class);
         planItemService = ctx.getBean(PlanItemService.class);

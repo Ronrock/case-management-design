@@ -404,6 +404,66 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
                 .getStatusCode().value()).isEqualTo(200);
     }
 
+    /**
+     * Fix round 2, review finding Important 1. Exposing {@code planItemId} on
+     * {@code POST /cases/{id}/processes} made it caller-controlled, and nothing downstream
+     * validates it: {@code LinkedProcessService.start} only loads the case, and
+     * {@code CM_LINKED_PROCESS.PLAN_ITEM_ID_} has no foreign key. alice is {@code owner} of BOTH
+     * cases here, so the policy passes on either — the refusal can only be the ownership check,
+     * not authorization.
+     */
+    @Test
+    void aProcessCannotBeCorrelatedToAPlanItemOfADifferentCase() {
+        deployDefinition();
+        String caseA = (String) createCase("case A").getBody().get("id");
+        String caseB = (String) createCase("case B").getBody().get("id");
+
+        String foreignPlanItemId = (String) planItems(caseB).get(0).get("id");
+        String ownPlanItemId = (String) planItems(caseA).get(0).get("id");
+
+        ResponseEntity<Map> refused = alice().post().uri("/cases/{id}/processes", caseA)
+                .header("If-Match", "\"0\"")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("processDefinitionKey", "some-process",
+                        "planItemId", foreignPlanItemId))
+                .retrieve().toEntity(Map.class);
+
+        assertThat(refused.getStatusCode().value()).isEqualTo(409);
+        assertThat(refused.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(refused.getBody()).containsEntry("code", "wrong-case");
+
+        // No row was written to either case.
+        assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseA)
+                .retrieve().toEntity(List.class).getBody()).isEmpty();
+        assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseB)
+                .retrieve().toEntity(List.class).getBody()).isEmpty();
+
+        // An id that names no plan item at all gets the identical answer — no existence oracle.
+        ResponseEntity<Map> unknown = alice().post().uri("/cases/{id}/processes", caseA)
+                .header("If-Match", "\"0\"")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("processDefinitionKey", "some-process", "planItemId", "no-such-item"))
+                .retrieve().toEntity(Map.class);
+        assertThat(unknown.getStatusCode().value()).isEqualTo(409);
+        assertThat(unknown.getBody()).containsEntry("code", "wrong-case");
+
+        // The case's OWN plan item is accepted, so the refusal is the correlation and not the
+        // field being rejected outright...
+        ResponseEntity<Map> accepted = alice().post().uri("/cases/{id}/processes", caseA)
+                .header("If-Match", "\"0\"")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("processDefinitionKey", "some-process", "planItemId", ownPlanItemId))
+                .retrieve().toEntity(Map.class);
+        assertThat(accepted.getStatusCode().value()).isEqualTo(201);
+        assertThat(accepted.getBody()).containsEntry("planItemId", ownPlanItemId);
+
+        // ...and omitting it entirely stays legal, as the spec declares.
+        assertThat(alice().post().uri("/cases/{id}/processes", caseA).header("If-Match", "\"0\"")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("processDefinitionKey", "some-process"))
+                .retrieve().toEntity(Map.class).getStatusCode().value()).isEqualTo(201);
+    }
+
     private void givenARunningSlaClock(String caseId) {
         List<Map<String, Object>> allDay = List.of(Map.of("from", "00:00", "to", "23:59"));
         slaRepo.insertCalendar("cal-auth", Map.of("timezone", "Europe/Amsterdam",

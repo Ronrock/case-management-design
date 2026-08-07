@@ -237,6 +237,78 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
         assertThat(alicesRetry.getBody().get("id")).isEqualTo(alices.getBody().get("id"));
     }
 
+    /**
+     * Fix round 2, review finding Important 2. {@code CaseDefinitionService} read {@code tenantId}
+     * out of the submitted document, so the deploy endpoint was the one place left where a caller
+     * chose the tenant they wrote into. dave is a legitimate administrator — the {@code admin}
+     * gate passes for him — of tenant t2, and the fixture document declares {@code "tenantId":
+     * "t1"}. Publishing it would put HIS plan model behind t1's case type: every future t1 case of
+     * that key instantiates it, because {@code CaseService.create} resolves through
+     * {@code findLatest(key, tenant)}.
+     */
+    @Test
+    void anAdministratorCannotDeployACaseDefinitionIntoAnotherTenant() {
+        deployDefinition();
+
+        ResponseEntity<Map> refused = client(OTHER_TENANT_USER).post().uri("/case-definitions")
+                .contentType(MediaType.APPLICATION_JSON).body(definitionJson())
+                .retrieve().toEntity(Map.class);
+
+        assertThat(refused.getStatusCode().value()).isEqualTo(403);
+        assertThat(refused.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(refused.getBody()).containsEntry("code", "forbidden");
+
+        // t1's definition is untouched: still version 1, still alice's.
+        ResponseEntity<Map> t1Definition = alice().get()
+                .uri("/case-definitions/{k}?tenantId={t}", DEFINITION_KEY, TENANT)
+                .retrieve().toEntity(Map.class);
+        assertThat(t1Definition.getBody()).containsEntry("version", 1);
+
+        // dave IS an administrator, so the admin gate is not what refused him: a deploy under
+        // his OWN tenant succeeds on the same endpoint with the same credentials.
+        //
+        // Deliberately a DIFFERENT definition key. Deploying t1's key into t2 is not merely
+        // refused by policy, it cannot be represented at all: db-design.sql derives
+        // CM_CASE_DEF.ID_ as "{key}:{version}" (line 27) while UQ_CM_CASE_DEF is
+        // UNIQUE (KEY_, VERSION_NO_, TENANT_ID_) (line 41) and nextVersion() counts per tenant,
+        // so t1's and t2's first version of one key both mint the id "widget-review:1" and
+        // collide on the primary key. That is a pre-existing schema inconsistency, reported as a
+        // new finding in fix round 2 rather than papered over here — using a distinct key keeps
+        // this test about the tenant rule it exists to prove.
+        String t2Definition = definitionJson()
+                .replace("\"widget-review\"", "\"t2-review\"")
+                .replace("\"tenantId\": \"t1\"", "\"tenantId\": \"t2\"");
+        ResponseEntity<Map> ownTenant = client(OTHER_TENANT_USER).post().uri("/case-definitions")
+                .contentType(MediaType.APPLICATION_JSON).body(t2Definition)
+                .retrieve().toEntity(Map.class);
+        assertThat(ownTenant.getStatusCode().value()).isEqualTo(201);
+        assertThat(ownTenant.getBody()).containsEntry("tenantId", "t2")
+                .containsEntry("version", 1);
+
+        // ...and a document that names no tenant at all binds to the caller's, rather than
+        // landing untenanted where no tenant-scoped listing would ever find it again.
+        ResponseEntity<Map> untenanted = client(OTHER_TENANT_USER).post().uri("/case-definitions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(t2Definition.replace("\"tenantId\": \"t2\",", ""))
+                .retrieve().toEntity(Map.class);
+        assertThat(untenanted.getStatusCode().value()).isEqualTo(201);
+        assertThat(untenanted.getBody()).containsEntry("tenantId", "t2")
+                .containsEntry("version", 2);
+
+        // Each administrator sees only their own tenant's definitions, at their own versions.
+        assertThat((List<Map<String, Object>>) client(OTHER_TENANT_USER).get()
+                .uri("/case-definitions").retrieve().toEntity(List.class).getBody())
+                .singleElement()
+                .satisfies(d -> assertThat(d).containsEntry("key", "t2-review")
+                        .containsEntry("version", 2).containsEntry("tenantId", "t2"));
+
+        assertThat((List<Map<String, Object>>) alice().get().uri("/case-definitions")
+                .retrieve().toEntity(List.class).getBody())
+                .singleElement()
+                .satisfies(d -> assertThat(d).containsEntry("key", DEFINITION_KEY)
+                        .containsEntry("version", 1).containsEntry("tenantId", TENANT));
+    }
+
     @Test
     void aCaseCannotBeCreatedIntoAnotherTenant() {
         deployDefinition();

@@ -19,12 +19,26 @@ public class CaseDefinitionService {
         this.repo = repo;
     }
 
-    /** Parses the definition JSON, assigns the next version for its key and stores it. */
+    /**
+     * Parses the definition JSON, assigns the next version for its key and stores it.
+     *
+     * <p><b>{@code tenantId} is a parameter, not a field of the document</b> (Task 24 fix round 2,
+     * review finding Important 2). It used to be read straight from the submitted JSON, which made
+     * the deploy endpoint the one place a caller could still choose the tenant they wrote into —
+     * contradicting the invariant fix round 1 established everywhere else ("the tenant comes from
+     * the principal and from nothing else") and letting any holder of the global {@code admin}
+     * group publish a new version of another tenant's case definition. Every future case of that
+     * key in that tenant then instantiates the attacker's plan model, because
+     * {@code CaseService.create} resolves the definition through {@code findLatest(key, tenant)}.
+     *
+     * <p>A {@code tenantId} in the document is now ignored here. The REST layer validates it
+     * against the caller's own tenant before calling this, so the two can never disagree
+     * silently; an internal caller that constructs both is trivially consistent by construction.
+     */
     @SuppressWarnings("unchecked")
-    public CaseDefinition deploy(String json, String deployedBy) {
+    public CaseDefinition deploy(String json, String deployedBy, String tenantId) {
         Map<String, Object> doc = JsonCodec.toMap(json);
         String key = required(doc, "key");
-        String tenantId = (String) doc.get("tenantId");
         int version = repo.nextVersion(key, tenantId);
         String id = key + ":" + version;
 

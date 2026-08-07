@@ -82,7 +82,7 @@ class CaseTaskServiceTransactionalIntegrationTest extends OracleTestBase {
 
     @BeforeEach
     void setUp() throws Exception {
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(CASCADE_DEF, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(CASCADE_DEF, "system", "t1");
 
         ctx = springContext(CaseTaskServiceTestConfig.class);
         taskService = ctx.getBean(CaseTaskService.class);

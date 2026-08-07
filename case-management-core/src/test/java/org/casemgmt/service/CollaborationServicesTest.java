@@ -37,7 +37,7 @@ class CollaborationServicesTest extends OracleTestBase {
     void setUp() throws Exception {
         String json = new String(getClass().getResourceAsStream("/definitions/test-definition.json")
                 .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
 
         gateway = new CaseServiceTest.RecordingGateway();
         cases = TestServices.caseService(dataSource(), gateway);

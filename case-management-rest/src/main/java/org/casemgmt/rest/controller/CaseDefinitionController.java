@@ -3,6 +3,7 @@ package org.casemgmt.rest.controller;
 import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.repo.CaseDefinitionRepository;
+import org.casemgmt.repo.JsonCodec;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.service.Actor;
@@ -58,21 +59,38 @@ public class CaseDefinitionController {
      * participant row to consult: the gate is an identity group, which is the only vocabulary
      * that exists above a single case.
      *
+     * <p><b>The tenant comes from the principal</b> (fix round 2, review finding Important 2).
+     * This was the one endpoint on fix round 1's list where that ruling was not applied:
+     * {@code CaseDefinitionService} read {@code tenantId} out of the submitted document, so any
+     * holder of the global {@code admin} group — including a tenant t2 administrator — could
+     * publish a new version of another tenant's case definition, which every future case of that
+     * key in that tenant then instantiates. A {@code tenantId} in the document is now validated
+     * against the caller's own rather than trusted (403 if it names another), and a document that
+     * omits it deploys under the caller's tenant instead of silently landing untenanted where no
+     * tenant-scoped listing would ever find it.
+     *
      * <p>Takes the raw request body as a {@code String} — {@code CaseDefinitionService.deploy}
      * parses it itself with core's Jackson 2 {@code JsonCodec}, and handing it a string keeps
      * the two Jackson generations on the classpath from meeting: nothing here binds the
-     * definition document through Spring's Jackson 3 converters and back.
+     * definition document through Spring's Jackson 3 converters and back. Reading the document's
+     * {@code tenantId} here parses it a second time, with the same Jackson 2 codec; that is a
+     * deliberate trade for keeping the service's contract self-contained (it takes the tenant it
+     * must use, and consults the document for nothing else).
      */
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> deploy(@RequestBody String definitionJson,
                                                       Authentication authentication) {
         Actor actor = callers.actor(authentication);
         policy.assertMayAdminister(callers.groups(actor), "deploy-case-definition");
-        CaseDefinition deployed = service.deploy(definitionJson, actor.userId());
+        String tenantId = callers.requireTenant(actor,
+                (String) JsonCodec.toMap(definitionJson).get("tenantId"));
+
+        CaseDefinition deployed = service.deploy(definitionJson, actor.userId(), tenantId);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", deployed.id());
         body.put("key", deployed.key());
         body.put("version", deployed.versionNo());
+        body.put("tenantId", deployed.tenantId());
         body.put("planItems", deployed.planItems().size());
         return ResponseEntity.status(HttpStatus.CREATED)
                 .location(URI.create("/case-api/v2/case-definitions/" + deployed.key()))

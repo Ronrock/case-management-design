@@ -29,7 +29,7 @@ class CaseServiceTest extends OracleTestBase {
     void setUp() throws Exception {
         String json = new String(getClass().getResourceAsStream("/definitions/test-definition.json")
                 .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
 
         gateway = new RecordingGateway();
         cases = TestServices.caseService(dataSource(), gateway);
@@ -145,7 +145,7 @@ class CaseServiceTest extends OracleTestBase {
     void closeSweepsALeftoverActiveItemAndEmitsATransitionedEventForIt() throws Exception {
         String json = new String(getClass().getResourceAsStream("/definitions/close-sweep-demo.json")
                 .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
 
         CaseInstance created = cases.create("close-sweep-demo", "t1", null, "T",
                 CasePriority.MEDIUM, Map.of(), alice);
@@ -249,7 +249,7 @@ class CaseServiceTest extends OracleTestBase {
     void repetitionIsBoundedAgainstRunawayGrowth() throws Exception {
         String json = new String(getClass().getResourceAsStream("/definitions/repeatable-definition.json")
                 .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
 
         CaseInstance created = cases.create("repeat-demo", "t1", null, "T",
                 CasePriority.MEDIUM, Map.of(), alice);

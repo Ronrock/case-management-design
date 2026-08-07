@@ -30,7 +30,7 @@ class CaseTaskServiceTest extends OracleTestBase {
     void setUp() throws Exception {
         String json = new String(getClass().getResourceAsStream("/definitions/test-definition.json")
                 .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
 
         gateway = new CaseServiceTest.RecordingGateway();
         cases = TestServices.caseService(dataSource(), gateway);
@@ -135,7 +135,7 @@ class CaseTaskServiceTest extends OracleTestBase {
                 {"key":"no-form-review","name":"No Form Review","tenantId":"t1",
                  "planItems":[
                    {"defKey":"plain","type":"HUMAN_TASK","name":"plain","sortOrder":10}]}""";
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system");
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
         String noFormCaseId = cases.create("no-form-review", "t1", null, "T",
                 CasePriority.MEDIUM, Map.of(), alice).id();
         CaseTask plainTask = tasks.findByCase(noFormCaseId).get(0);
