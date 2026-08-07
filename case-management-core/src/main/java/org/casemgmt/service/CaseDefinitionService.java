@@ -40,7 +40,7 @@ public class CaseDefinitionService {
         Map<String, Object> doc = JsonCodec.toMap(json);
         String key = required(doc, "key");
         int version = repo.nextVersion(key, tenantId);
-        String id = key + ":" + version;
+        String id = definitionId(tenantId, key, version);
 
         List<PlanItemDefinition> items = new ArrayList<>();
         List<Map<String, Object>> raw = (List<Map<String, Object>>) doc.getOrDefault("planItems", List.of());
@@ -114,6 +114,39 @@ public class CaseDefinitionService {
                         + "', but no plan item with that defKey exists in this definition");
             }
         }
+    }
+
+    /**
+     * The {@code CM_CASE_DEF.ID_} primary key: {@code {tenant}:{key}:{version}}.
+     *
+     * <p><b>Tenant-qualified since Task 24 fix round 3.</b> It used to be {@code {key}:{version}},
+     * which contradicted the schema's own {@code UQ_CM_CASE_DEF UNIQUE (KEY_, VERSION_NO_,
+     * TENANT_ID_)}: that constraint says two tenants may each hold version 1 of one key, but
+     * {@link CaseDefinitionRepository#nextVersion} counts within a tenant, so both tenants'
+     * first deploy of {@code widget-review} minted the same id and the second collided on the
+     * primary key (reproduced against real Oracle as {@code ORA-00001 ... PK_CM_CASE_DEF ...
+     * row with column values (ID_:'widget-review:1') already exists}). The effect was that a
+     * multi-tenant deployment could host any given case-definition key in exactly one tenant.
+     *
+     * <p>Per-tenant version numbering is kept, deliberately, over the alternative of making the
+     * id unique by counting versions globally per key: that would make a tenant's first-ever
+     * deploy land at, say, v7 because another tenant had deployed six times — confusing for
+     * operators, and it leaks one tenant's activity level to another.
+     *
+     * <p>A null tenant (an untenanted definition — {@code TENANT_ID_} is nullable, and
+     * {@code findLatest(key, null)} exists to read one back) yields an empty first segment,
+     * e.g. {@code :widget-review:1}. That cannot collide with a real tenant's id: Oracle
+     * normalises an empty string to NULL, so no row can carry a zero-length {@code TENANT_ID_}.
+     *
+     * <p>The id is opaque to every consumer — nothing in this codebase parses or reconstructs it,
+     * verified by grep before the change — so widening the format needed no migration. Note
+     * that {@code ID_} is {@code VARCHAR2(64)} while {@code KEY_} is {@code VARCHAR2(255)}: a
+     * long key could already overflow the id column before this change, and the tenant prefix
+     * consumes a little more of that budget. Not newly broken, and not widened here, but worth
+     * knowing.
+     */
+    private static String definitionId(String tenantId, String key, int version) {
+        return (tenantId == null ? "" : tenantId) + ":" + key + ":" + version;
     }
 
     private static String required(Map<String, Object> m, String field) {

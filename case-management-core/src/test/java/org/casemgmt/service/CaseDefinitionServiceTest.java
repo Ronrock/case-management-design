@@ -29,7 +29,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
     void deploysVersionOneAndExplodesPlanItems() {
         CaseDefinition def = service.deploy(json, "alice", "t1");
 
-        assertThat(def.id()).isEqualTo("widget-review:1");
+        assertThat(def.id()).isEqualTo("t1:widget-review:1");
         assertThat(def.versionNo()).isEqualTo(1);
         assertThat(def.planItems()).hasSize(3);
         assertThat(def.planItem("review").required()).isTrue();
@@ -44,7 +44,7 @@ class CaseDefinitionServiceTest extends OracleTestBase {
         CaseDefinition second = service.deploy(json, "alice", "t1");
 
         assertThat(second.versionNo()).isEqualTo(2);
-        assertThat(second.id()).isEqualTo("widget-review:2");
+        assertThat(second.id()).isEqualTo("t1:widget-review:2");
     }
 
     @Test
