@@ -69,6 +69,21 @@ public class CaseManagementProperties {
         private long engineCommandIntervalMs = 5_000;
         private long slaSweepIntervalMs = 60_000;
 
+        /**
+         * How often {@code CM_IDEMPOTENCY_KEY} is purged (final whole-branch review, Important
+         * 5). Hourly, not seconds like the outbox drains: this is a retention sweep, not a work
+         * queue, and its only job is to keep the table from growing one row per create forever.
+         */
+        private long idempotencyPurgeIntervalMs = 3_600_000;
+
+        /**
+         * Retention window for {@code CM_IDEMPOTENCY_KEY}, in hours. 48 is spec §6.4's own
+         * figure. Until this sweep existed, {@code IdempotencyRepository.purgeOlderThanHours}
+         * had no caller anywhere — grep found only its own Javadoc and a test comment — so §6.4
+         * was documented, implemented, and never actually run.
+         */
+        private int idempotencyRetentionHours = 48;
+
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public long getWebhookIntervalMs() { return webhookIntervalMs; }
@@ -77,6 +92,10 @@ public class CaseManagementProperties {
         public void setEngineCommandIntervalMs(long v) { this.engineCommandIntervalMs = v; }
         public long getSlaSweepIntervalMs() { return slaSweepIntervalMs; }
         public void setSlaSweepIntervalMs(long v) { this.slaSweepIntervalMs = v; }
+        public long getIdempotencyPurgeIntervalMs() { return idempotencyPurgeIntervalMs; }
+        public void setIdempotencyPurgeIntervalMs(long v) { this.idempotencyPurgeIntervalMs = v; }
+        public int getIdempotencyRetentionHours() { return idempotencyRetentionHours; }
+        public void setIdempotencyRetentionHours(int v) { this.idempotencyRetentionHours = v; }
     }
 
     public boolean isEnabled() { return enabled; }

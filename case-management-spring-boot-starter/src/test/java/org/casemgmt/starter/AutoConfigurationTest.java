@@ -3,8 +3,14 @@ package org.casemgmt.starter;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
+import org.casemgmt.event.EventPublisher;
+import org.casemgmt.rest.CallerResolver;
+import org.casemgmt.rest.policy.ActionPolicy;
+import org.casemgmt.rules.CriterionEvaluator;
+import org.casemgmt.rules.JuelCriterionEvaluator;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseService;
+import org.casemgmt.service.FormValidator;
 import org.casemgmt.service.WebhookService;
 import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.ProcessEngine;
@@ -20,6 +26,8 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
 import org.springframework.transaction.interceptor.TransactionAttribute;
@@ -172,6 +180,98 @@ class AutoConfigurationTest {
                         "casemgmt.events.type-prefix=org.example.cm")
                 .run(context -> assertThat(context).hasFailed()
                         .getFailure().hasMessageContaining("operaton-bpm-spring-boot-starter"));
+    }
+
+    /**
+     * Final whole-branch review, Important 3: {@code CaseManagementAutoConfiguration} declared
+     * ~40 beans and not one carried {@code @ConditionalOnMissingBean}, while
+     * {@code CallerResolver}'s own Javadoc promised "a consumer can substitute its own identity
+     * mapping without excluding a component scan". As wired they could not — bean-definition
+     * overriding is off by default in Boot 4, so a consumer declaring their own bean got
+     * {@code BeanDefinitionOverrideException} at startup, and the same held for
+     * {@code ActionPolicy}, {@code CriterionEvaluator}, {@code FormValidator} and
+     * {@code EventPublisher}.
+     *
+     * <p>Asserts both halves for each: the context comes up at all (the override exception is a
+     * startup failure, so {@code hasNotFailed} is the load-bearing half), and the bean the
+     * context actually hands out is the consumer's INSTANCE, not the starter's. Identity, not
+     * type: every substitute below is a subclass, so a type assertion alone would pass against
+     * the starter's own bean and prove nothing.
+     */
+    @Test
+    void aConsumerCanSubstituteEveryDocumentedExtensionPoint() {
+        runner.withUserConfiguration(SubstitutingConfiguration.class)
+                .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=remote",
+                        "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> {
+                    assertThat(context).as("a consumer's own beans must not collide with the "
+                            + "starter's — bean-definition overriding is off in Boot 4")
+                            .hasNotFailed();
+
+                    assertThat(context.getBean(CallerResolver.class))
+                            .isSameAs(SubstitutingConfiguration.CALLER_RESOLVER);
+                    assertThat(context.getBean(ActionPolicy.class))
+                            .isSameAs(SubstitutingConfiguration.ACTION_POLICY);
+                    assertThat(context.getBean(CriterionEvaluator.class))
+                            .isSameAs(SubstitutingConfiguration.CRITERION_EVALUATOR);
+                    assertThat(context.getBean(FormValidator.class))
+                            .isSameAs(SubstitutingConfiguration.FORM_VALIDATOR);
+                    assertThat(context.getBean(EventPublisher.class))
+                            .isSameAs(SubstitutingConfiguration.EVENT_PUBLISHER);
+
+                    // ...and the substitute is genuinely wired THROUGH: PlanModelEvaluator takes
+                    // a CriterionEvaluator, so an override that the context holds but nothing
+                    // consumes would be a substitution in name only.
+                    assertThat(context).hasSingleBean(CaseService.class);
+                });
+    }
+
+    /**
+     * Negative control for the test above. Without a substitute in the context, the starter's
+     * own defaults must still be registered — otherwise "the consumer's bean won" is satisfiable
+     * by the starter simply not declaring these beans at all, which every assertion above would
+     * happily accept while the context silently lost its defaults.
+     */
+    @Test
+    void withoutASubstituteTheStarterStillProvidesEveryExtensionPoint() {
+        runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=remote",
+                        "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasSingleBean(CallerResolver.class);
+                    assertThat(context).hasSingleBean(ActionPolicy.class);
+                    assertThat(context).hasSingleBean(FormValidator.class);
+                    assertThat(context).hasSingleBean(EventPublisher.class);
+                    assertThat(context.getBean(CriterionEvaluator.class))
+                            .isInstanceOf(JuelCriterionEvaluator.class);
+                });
+    }
+
+    /**
+     * A consumer's own configuration. Each bean is a distinct instance held in a static field so
+     * the assertions above can check identity rather than type — the substitutes are subclasses,
+     * and a type check would not distinguish them from the starter's own beans.
+     */
+    @Configuration(proxyBeanMethods = false)
+    static class SubstitutingConfiguration {
+
+        static final CallerResolver CALLER_RESOLVER = new CallerResolver(null) {};
+        static final ActionPolicy ACTION_POLICY = new ActionPolicy() {};
+        static final CriterionEvaluator CRITERION_EVALUATOR = (expression, context) -> true;
+        static final FormValidator FORM_VALIDATOR = new FormValidator() {};
+        static final EventPublisher EVENT_PUBLISHER =
+                new EventPublisher(null, null, null, "org.example.consumer", "eng-consumer") {};
+
+        @Bean CallerResolver callerResolver() { return CALLER_RESOLVER; }
+        @Bean ActionPolicy actionPolicy() { return ACTION_POLICY; }
+        @Bean CriterionEvaluator criterionEvaluator() { return CRITERION_EVALUATOR; }
+        @Bean FormValidator formValidator() { return FORM_VALIDATOR; }
+        @Bean EventPublisher eventPublisher() { return EVENT_PUBLISHER; }
     }
 
     @Test

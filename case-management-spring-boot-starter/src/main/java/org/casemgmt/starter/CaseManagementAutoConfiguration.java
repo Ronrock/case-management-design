@@ -14,6 +14,7 @@ import org.casemgmt.service.*;
 import org.casemgmt.sla.SlaService;
 import org.casemgmt.sla.SlaSweeper;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -79,6 +80,7 @@ public class CaseManagementAutoConfiguration {
     @Bean public SlaRepository slaRepository(JdbcClient c) { return new SlaRepository(c); }
 
     @Bean
+    @ConditionalOnMissingBean(EventPublisher.class)
     public EventPublisher eventPublisher(EventRepository events, AuditRepository audit,
                                          WebhookRepository webhooks, CaseManagementProperties props) {
         String prefix = props.getEvents().getTypePrefix();
@@ -90,14 +92,49 @@ public class CaseManagementAutoConfiguration {
         return new EventPublisher(events, audit, webhooks, prefix, props.getEngineId());
     }
 
-    @Bean public CriterionEvaluator criterionEvaluator() { return new JuelCriterionEvaluator(); }
+    /**
+     * <b>The five extension points, each {@code @ConditionalOnMissingBean}</b> (final
+     * whole-branch review, Important 3). This class declares ~40 beans and, before this fix,
+     * not one of them carried the annotation — while the repo already had exactly one, on
+     * {@code EmbeddedEngineAutoConfiguration}'s {@code EngineGateway}, so the convention was
+     * known and applied once. The contradiction that made it a defect rather than a style point
+     * is {@code CallerResolver}'s own Javadoc, which promises "a consumer can substitute its own
+     * identity mapping without excluding a component scan". As wired, they could not: bean
+     * definition overriding is off by default in Boot 4, so a consumer declaring their own
+     * {@code CallerResolver} got {@code BeanDefinitionOverrideException} at startup.
+     *
+     * <p>These five are the ones a consumer is actually meant to replace — identity mapping,
+     * the authorization rule table, the expression language behind entry/exit criteria, form
+     * validation, and event/audit publication. The rest (repositories, services, the applier)
+     * are internal wiring with no documented substitution contract, and are deliberately left
+     * alone rather than blanket-annotated: {@code @ConditionalOnMissingBean} on a bean nobody is
+     * invited to replace only widens the ways a context can come up subtly different.
+     *
+     * <p><b>Not fixed, and stated plainly rather than papered over:</b> the seven controllers
+     * and {@code ProblemDetailHandler} arrive via {@code @Import} above, which is not
+     * overridable at all — {@code @ConditionalOnMissingBean} has no bearing on an imported
+     * {@code @Component}. Making them substitutable means converting each to a
+     * {@code @Bean} method here, which changes how every one of them is constructed and is a
+     * restructuring, not a fix round. Recorded in FINDINGS.md.
+     */
+    @Bean
+    @ConditionalOnMissingBean(CriterionEvaluator.class)
+    public CriterionEvaluator criterionEvaluator() { return new JuelCriterionEvaluator(); }
+
     @Bean public PlanModelEvaluator planModelEvaluator(CriterionEvaluator c) { return new PlanModelEvaluator(c); }
     @Bean public PlanModelInstantiator planModelInstantiator() { return new PlanModelInstantiator(); }
     @Bean public StageCompletion stageCompletion() { return new StageCompletion(); }
-    @Bean public FormValidator formValidator() { return new FormValidator(); }
-    @Bean public ActionPolicy actionPolicy() { return new ActionPolicy(); }
 
     @Bean
+    @ConditionalOnMissingBean(FormValidator.class)
+    public FormValidator formValidator() { return new FormValidator(); }
+
+    @Bean
+    @ConditionalOnMissingBean(ActionPolicy.class)
+    public ActionPolicy actionPolicy() { return new ActionPolicy(); }
+
+    @Bean
+    @ConditionalOnMissingBean(CallerResolver.class)
     public CallerResolver callerResolver(ParticipantRepository participants) {
         return new CallerResolver(participants);
     }
