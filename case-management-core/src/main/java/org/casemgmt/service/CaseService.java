@@ -14,6 +14,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -238,8 +239,16 @@ public class CaseService {
 
         CaseInstance saved = cases.update(closed, expectedVersion);
         publisher.publish(event(saved, EventTypes.CASE_CLOSED, Map.of("outcome", outcome == null ? "" : outcome)));
+        // LinkedHashMap, not Map.of: an outcome is optional (POST /cases/{id}/close accepts no
+        // body at all — see CaseController.close), and Map.of throws NPE on a null value. Found
+        // in this task (Task 26) by actually closing a case with no outcome over real HTTP — the
+        // same class of "Map.of null intolerance" bug already fixed for CM_TASK.OUTCOME_ (Task
+        // 17) and for several REST response bodies (Task 24, deviation D3), just not here.
+        Map<String, Object> closeAuditValues = new LinkedHashMap<>();
+        closeAuditValues.put("state", "CLOSED");
+        closeAuditValues.put("outcome", outcome);
         publisher.audit(caseId, saved.tenantId(), actor.userId(), "case.close", "Case", caseId,
-                Map.of("state", current.state().name()), Map.of("state", "CLOSED", "outcome", outcome));
+                Map.of("state", current.state().name()), closeAuditValues);
         return saved;
     }
 
@@ -261,8 +270,13 @@ public class CaseService {
 
         CaseInstance saved = cases.update(cancelled, expectedVersion);
         publisher.publish(event(saved, EventTypes.CASE_CANCELLED, Map.of("reason", reason == null ? "" : reason)));
+        // Same null-intolerance fix as close() above, for the same reason: POST
+        // /cases/{id}/cancel also accepts no body (CaseController.cancel), so reason may be null.
+        Map<String, Object> cancelAuditValues = new LinkedHashMap<>();
+        cancelAuditValues.put("state", "CANCELLED");
+        cancelAuditValues.put("reason", reason);
         publisher.audit(caseId, saved.tenantId(), actor.userId(), "case.cancel", "Case", caseId,
-                Map.of("state", current.state().name()), Map.of("state", "CANCELLED", "reason", reason));
+                Map.of("state", current.state().name()), cancelAuditValues);
         return saved;
     }
 

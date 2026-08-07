@@ -109,7 +109,23 @@ public class CaseManagementAutoConfiguration {
         return new TransitionApplier(planItems, tasks, milestones, engine, publisher);
     }
 
-    @Bean
+    /**
+     * Deviation, found in this task (Task 26), not in the brief: named explicitly, rather than
+     * left to default to the method name {@code caseService}. Operaton's own Spring integration
+     * ({@code operaton-bpm-spring-boot-starter}'s {@code SpringProcessEngineServicesConfiguration})
+     * registers a bean literally named {@code caseService} for {@code
+     * org.operaton.bpm.engine.CaseService} — its CMMN engine service, an entirely different type
+     * that happens to share this bean's default Spring name. Every prior test of this starter
+     * (Task 25's {@code AutoConfigurationTest}) built its context from this module's own
+     * auto-configurations plus a bare {@code ApplicationContextRunner} fake, never alongside
+     * Operaton's real Spring wiring — so the collision was invisible until
+     * {@code case-management-poc-app} (Task 26) booted both together in one real context and hit
+     * {@code BeanDefinitionOverrideException}. Nothing in this codebase looks this bean up by name
+     * (verified by grep for {@code "caseService"} and any {@code @Qualifier} across all modules —
+     * every consumer autowires by the distinct type {@link CaseService}), so renaming the Spring
+     * bean id is behavior-preserving everywhere except the one place it was actually broken.
+     */
+    @Bean(name = "caseManagementCaseService")
     public CaseService caseService(CaseRepository cases, CaseDefinitionRepository definitions,
                                    PlanItemRepository planItems, MilestoneRepository milestones,
                                    ParticipantRepository participants, PlanModelEvaluator evaluator,

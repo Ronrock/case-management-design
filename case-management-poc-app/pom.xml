@@ -16,6 +16,26 @@
       <groupId>org.casemgmt</groupId>
       <artifactId>case-management-spring-boot-starter</artifactId>
     </dependency>
+    <!-- case-management-engine-embedded and case-management-engine-remote are declared
+         <optional>true</optional> in the starter's own pom (deliberately: a downstream
+         consumer who only wants one engine mode should not be forced to carry the other's
+         classes). Optional dependencies are NOT transitive, so this application — the one
+         module in the reactor whose whole job is to prove BOTH modes work from one runnable
+         jar (spec's definition of done) — must declare both itself. Without this,
+         EmbeddedEngineAutoConfiguration's nested @ConditionalOnClass(ProcessEngine.class)
+         configuration still activates (ProcessEngine itself comes from
+         operaton-bpm-spring-boot-starter below, which is not optional), but its bean method
+         throws NoClassDefFoundError the moment it tries `new EmbeddedEngineGateway(...)` —
+         that class simply is not on the classpath. Confirmed by trying to boot the app
+         without these two entries before adding them. -->
+    <dependency>
+      <groupId>org.casemgmt</groupId>
+      <artifactId>case-management-engine-embedded</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.casemgmt</groupId>
+      <artifactId>case-management-engine-remote</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.operaton.bpm.springboot</groupId>
       <artifactId>operaton-bpm-spring-boot-starter</artifactId>
@@ -23,6 +43,17 @@
     <dependency>
       <groupId>org.operaton.bpm.springboot</groupId>
       <artifactId>operaton-bpm-spring-boot-starter-rest</artifactId>
+    </dependency>
+    <!-- Spring Boot 4 split Liquibase's auto-configuration out of spring-boot-autoconfigure
+         into its own module (same relocation Task 25 found for DataSourceAutoConfiguration).
+         liquibase-core itself is already a compile dependency of case-management-core (it runs
+         the CM_ schema migration in every module's own tests), but that only puts the Liquibase
+         *library* on the classpath — without this, Spring Boot never wires a SpringLiquibase
+         bean from `spring.liquibase.change-log`, and the real, runnable app in application.yaml
+         would silently skip its own schema migration. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-liquibase</artifactId>
     </dependency>
     <dependency>
       <groupId>com.oracle.database.jdbc</groupId>
