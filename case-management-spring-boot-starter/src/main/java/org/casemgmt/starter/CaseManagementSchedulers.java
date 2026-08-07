@@ -10,6 +10,13 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 
 @AutoConfiguration(after = CaseManagementAutoConfiguration.class)
+// Fix round 1, Important 1: the master switch guard, matching EmbeddedEngineAutoConfiguration
+// and CaseManagementAutoConfiguration. Without it, casemgmt.enabled=false left this class active
+// (it only checked casemgmt.schedulers.enabled), demanding WebhookDispatcher and SlaSweeper as
+// hard constructor dependencies that no longer exist once CaseManagementAutoConfiguration itself
+// is switched off — turning "leaves a plain Operaton app completely untouched"
+// (CaseManagementProperties' own Javadoc for casemgmt.enabled) into a startup failure instead.
+@ConditionalOnProperty(prefix = "casemgmt", name = "enabled", havingValue = "true", matchIfMissing = true)
 @ConditionalOnProperty(prefix = "casemgmt.schedulers", name = "enabled", havingValue = "true",
         matchIfMissing = true)
 @EnableScheduling

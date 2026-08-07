@@ -13,19 +13,55 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.util.ClassUtils;
 
 @AutoConfiguration(before = CaseManagementAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "casemgmt", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class EmbeddedEngineAutoConfiguration {
 
-    @Bean
-    @ConditionalOnMissingBean(EngineGateway.class)
-    @ConditionalOnProperty(prefix = "casemgmt.engine", name = "mode", havingValue = "embedded",
-            matchIfMissing = true)
+    /**
+     * Fix round 1, Important 2: {@code embeddedEngineGateway} moved into this nested,
+     * class-level-{@code @ConditionalOnClass}-gated static configuration, out of the outer
+     * class's own body. The outer {@code EmbeddedEngineAutoConfiguration} previously carried
+     * {@code TaskService}/{@code RuntimeService}/{@code EmbeddedEngineGateway} directly in a
+     * {@code @Bean} method SIGNATURE, guarded only by a method-level
+     * {@code @ConditionalOnClass(ProcessEngine.class)} — review round 1 flagged that
+     * {@code AutowiredAnnotationBeanPostProcessor}/factory-method type resolution can reflectively
+     * introspect a configuration class's declared methods regardless of a method-level condition,
+     * which for a consumer without the Operaton engine on the classpath could throw
+     * {@code NoClassDefFoundError} several frames before this class's own fail-fast check
+     * ({@link #embeddedEngineRequirementCheck}) ever gets a chance to produce its friendly
+     * message — precisely the failure that check exists to pre-empt.
+     *
+     * <p>Actually reproducing that with a widened {@code FilteredClassLoader} (hiding
+     * {@code ProcessEngine}, {@code TaskService}, {@code RuntimeService} AND
+     * {@code EmbeddedEngineGateway} together, both through the full auto-configuration stack and
+     * in isolation with only this class registered) did NOT trigger it on this Spring Boot 4.0.7 /
+     * JDK combination — {@code AutoConfigurationTest.embeddedModeWithoutAnEngineOnTheClasspathFailsWithAClearMessage}
+     * and a temporary isolated diagnostic both still produced the friendly message / a clean
+     * context, not a {@code NoClassDefFoundError}, even with the WIDER filter and the ORIGINAL
+     * (unnested) shape. Most likely Spring's own {@code ReflectionUtils} tolerates a
+     * {@code NoClassDefFoundError} while enumerating declared methods, and/or ASM-based condition
+     * evaluation short-circuits before any bean method that fails its own condition is ever
+     * reflectively resolved. That tolerance is an internal implementation detail, not a
+     * documented contract, so this restructuring is applied anyway as the textbook-idiomatic
+     * Spring Boot shape (many auto-configurations in the wild use exactly this
+     * nested-{@code @ConditionalOnClass}-configuration pattern for optional integrations) rather
+     * than relying on an unspecified resilience behaviour to keep working — see the Task 25
+     * report's Fix round 1 section for the full mechanism-stripping trail on this one.
+     */
+    @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(ProcessEngine.class)
-    public EngineGateway embeddedEngineGateway(TaskService taskService, RuntimeService runtimeService) {
-        return new EmbeddedEngineGateway(taskService, runtimeService);
+    static class EmbeddedEngineGatewayConfiguration {
+
+        @Bean
+        @ConditionalOnMissingBean(EngineGateway.class)
+        @ConditionalOnProperty(prefix = "casemgmt.engine", name = "mode", havingValue = "embedded",
+                matchIfMissing = true)
+        EngineGateway embeddedEngineGateway(TaskService taskService, RuntimeService runtimeService) {
+            return new EmbeddedEngineGateway(taskService, runtimeService);
+        }
     }
 
     /**

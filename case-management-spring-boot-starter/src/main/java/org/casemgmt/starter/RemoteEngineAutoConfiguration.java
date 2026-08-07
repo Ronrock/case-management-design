@@ -14,6 +14,13 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.web.client.RestClient;
 
 @AutoConfiguration(before = CaseManagementAutoConfiguration.class)
+// Fix round 1, Important 1: the master switch guard. Without it, casemgmt.enabled=false with
+// casemgmt.engine.mode=remote still set (a plausible leftover config, not just a hypothetical)
+// left this class active, and its engineRestClient bean demands the CaseManagementProperties
+// bean that only CaseManagementAutoConfiguration registers — itself switched off by enabled=false
+// — so startup failed with a bean-resolution error instead of the documented "completely
+// untouched" behaviour.
+@ConditionalOnProperty(prefix = "casemgmt", name = "enabled", havingValue = "true", matchIfMissing = true)
 @ConditionalOnProperty(prefix = "casemgmt.engine", name = "mode", havingValue = "remote")
 public class RemoteEngineAutoConfiguration {
 

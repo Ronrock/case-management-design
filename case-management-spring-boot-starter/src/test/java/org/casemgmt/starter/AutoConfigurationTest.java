@@ -2,11 +2,15 @@ package org.casemgmt.starter;
 
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
+import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseService;
 import org.casemgmt.service.WebhookService;
 import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.ProcessEngine;
+import org.operaton.bpm.engine.RuntimeService;
+import org.operaton.bpm.engine.TaskService;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 // Spring Boot 4 relocated DataSourceAutoConfiguration out of spring-boot-autoconfigure's
 // org.springframework.boot.autoconfigure.jdbc package (where the brief's own import pointed,
@@ -16,6 +20,7 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
 import org.springframework.transaction.interceptor.TransactionAttribute;
 import org.springframework.util.ReflectionUtils;
@@ -28,8 +33,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class AutoConfigurationTest {
 
     /**
-     * Deviation from the brief: {@code EmbeddedEngineAutoConfiguration} is added to the
-     * registered auto-configurations. The brief's own runner omitted it, which left
+     * Deviation from the brief: {@code EmbeddedEngineAutoConfiguration} and (fix round 1,
+     * Important 1) {@code CaseManagementSchedulers} are added to the registered
+     * auto-configurations. The brief's own runner omitted both. Omitting
+     * {@code EmbeddedEngineAutoConfiguration} left
      * {@link #embeddedModeWithoutAnEngineOnTheClasspathFailsWithAClearMessage} unable to pass —
      * with only {@code CaseManagementAutoConfiguration} and {@code RemoteEngineAutoConfiguration}
      * registered, embedded mode has no {@code EngineGateway} bean-producing configuration at all,
@@ -37,28 +44,93 @@ class AutoConfigurationTest {
      * {@code EngineGateway} instead of the friendly "operaton-bpm-spring-boot-starter" message
      * {@code EmbeddedEngineAutoConfiguration.embeddedEngineRequirementCheck} produces — confirmed
      * by actually running the test with the omission restored (see the Task 25 report's
-     * mechanism-stripping evidence).
+     * mechanism-stripping evidence). Omitting {@code CaseManagementSchedulers} let
+     * {@link #disabledByDefaultPropertyLeavesTheContextClean} pass without ever exercising it,
+     * hiding a real Important-1 bug (fix round 1): {@code CaseManagementSchedulers} had no
+     * {@code casemgmt.enabled} guard of its own, so {@code casemgmt.enabled=false} left it active
+     * and demanding {@code WebhookDispatcher}/{@code SlaSweeper} beans that no longer existed —
+     * the exact opposite of {@code CaseManagementProperties}' documented "leaves a plain Operaton
+     * app completely untouched" contract for that property.
      */
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(DataSourceAutoConfiguration.class,
                     EmbeddedEngineAutoConfiguration.class, CaseManagementAutoConfiguration.class,
-                    RemoteEngineAutoConfiguration.class))
+                    RemoteEngineAutoConfiguration.class, CaseManagementSchedulers.class))
             .withPropertyValues(
                     "spring.datasource.url=jdbc:h2:mem:autoconfig;DB_CLOSE_DELAY=-1",
                     "spring.datasource.driver-class-name=org.h2.Driver");
 
+    /**
+     * Fix round 1, Important 1: strengthened beyond a bean-absence check to
+     * {@code hasNotFailed()} as well. A bean-absence assertion alone cannot distinguish "the
+     * context came up clean, minus this one bean" from "the context blew up entirely" — both
+     * leave {@code CaseService} absent. The whole point of {@code casemgmt.enabled=false} is the
+     * FIRST of those, per {@code CaseManagementProperties}' own Javadoc.
+     */
     @Test
     void disabledByDefaultPropertyLeavesTheContextClean() {
         runner.withPropertyValues("casemgmt.enabled=false")
-                .run(context -> assertThat(context).doesNotHaveBean(CaseService.class));
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(CaseService.class);
+                });
     }
 
+    /**
+     * Fix round 1, Important 1: the other half of the same gap, on {@code RemoteEngineAutoConfiguration}
+     * specifically. {@code casemgmt.engine.mode=remote} is a plausible leftover in a config file
+     * that also sets {@code casemgmt.enabled=false} (e.g. temporarily disabling the module without
+     * touching its engine-mode setting) — before the fix, that combination activated
+     * {@code RemoteEngineAutoConfiguration} anyway (it only checked {@code casemgmt.engine.mode},
+     * never {@code casemgmt.enabled}), and its {@code engineRestClient} bean demanded the
+     * {@code CaseManagementProperties} bean that only the (disabled) {@code CaseManagementAutoConfiguration}
+     * registers.
+     */
+    @Test
+    void disabledPropertyLeavesTheContextCleanEvenWithRemoteModeConfigured() {
+        runner.withPropertyValues("casemgmt.enabled=false", "casemgmt.engine.mode=remote",
+                        "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).doesNotHaveBean(CaseService.class);
+                });
+    }
+
+    /**
+     * Fix round 1, Important 2, part 2: {@code EmbeddedEngineAutoConfiguration} is gated only on
+     * {@code casemgmt.enabled}, not {@code casemgmt.engine.mode} — so it still activates in remote
+     * mode, and a correctly-configured remote-mode consumer without the Operaton engine on the
+     * classpath must not have its context blow up on that class's own introspection.
+     */
+    @Test
+    void embeddedAutoConfigurationSurvivesEngineAbsentFromClasspathInRemoteMode() {
+        new ApplicationContextRunner()
+                .withClassLoader(new FilteredClassLoader(ProcessEngine.class, TaskService.class,
+                        RuntimeService.class, EmbeddedEngineGateway.class))
+                .withConfiguration(AutoConfigurations.of(EmbeddedEngineAutoConfiguration.class))
+                .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine.mode=remote")
+                .run(context -> assertThat(context).hasNotFailed());
+    }
+
+    /**
+     * {@code casemgmt.schedulers.enabled=false} here (and on
+     * {@link #webhookServiceSubscribeOverrideStaysTransactional}, the other test where the whole
+     * bean set constructs successfully): this test asserts on bean presence, not scheduling
+     * behaviour, and a fully-constructed {@code CaseManagementSchedulers} means real
+     * {@code @Scheduled} tasks start running against this context's short-lived, auto-closed H2
+     * datasource — {@code fixedDelayString} with no explicit initial-delay fires its first
+     * execution immediately, which can race the context's close (triggered as soon as this
+     * method's lambda returns) and log a spurious "HikariDataSource has been closed" error from a
+     * background thread. Turning scheduling off keeps this test's own output clean without
+     * weakening what it actually checks.
+     */
     @Test
     void remoteModeRegistersTheOutboxGateway() {
         runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
                         "casemgmt.engine.mode=remote",
                         "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
-                        "casemgmt.events.type-prefix=org.example.cm")
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
                 .run(context -> {
                     assertThat(context).hasSingleBean(CaseService.class);
                     assertThat(context.getBean(EngineGateway.class))
@@ -81,7 +153,8 @@ class AutoConfigurationTest {
      */
     @Test
     void embeddedModeWithoutAnEngineOnTheClasspathFailsWithAClearMessage() {
-        runner.withClassLoader(new FilteredClassLoader(ProcessEngine.class))
+        runner.withClassLoader(new FilteredClassLoader(ProcessEngine.class, TaskService.class,
+                        RuntimeService.class, EmbeddedEngineGateway.class))
                 .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
                         "casemgmt.engine.mode=embedded",
                         "casemgmt.events.type-prefix=org.example.cm")
@@ -104,23 +177,44 @@ class AutoConfigurationTest {
      * secret (K3), which looked like a K3-shaped risk on inspection: Java annotations are not
      * normally inherited across an override, so re-declaring {@code @Transactional} there (which
      * the production code does) looked load-bearing. Verified with the negative control below that
-     * it is actually NOT — {@code AnnotationTransactionAttributeSource} resolves
-     * {@code @Transactional} by walking up the class hierarchy for a same-signature method, so
-     * {@code WebhookService.subscribe}'s own annotation is found either way (confirmed by
-     * stripping the override's explicit annotation and re-running: still passed — see the Task 25
-     * report). The explicit re-declaration stays in the production code as self-documenting
-     * defense in depth; this test's real job now is to guard the invariant itself — the bean
-     * Spring actually constructs must resolve {@code subscribe} as transactional — regardless of
-     * which mechanism supplies that.
+     * it is actually NOT, in the sense that the ATTRIBUTE still resolves without it —
+     * {@code AnnotationTransactionAttributeSource} resolves {@code @Transactional} by walking up
+     * the class hierarchy for a same-signature method, so {@code WebhookService.subscribe}'s own
+     * annotation is found either way (confirmed by stripping the override's explicit annotation
+     * and re-running: still passed — see the Task 25 report). The explicit re-declaration stays in
+     * the production code as self-documenting defense in depth.
+     *
+     * <p>Fix round 1, Important 3: the resolvable-attribute check above is necessary but not
+     * sufficient — K3's actual wording is "a silent no-op <b>unless the bean is behind a Spring
+     * proxy</b>", and a resolvable attribute says nothing about whether one exists. Removing
+     * {@code @Import(TransactionManagerConfig.class)} from {@code CaseManagementAutoConfiguration}
+     * left every assertion in this method green, because
+     * {@code AnnotationTransactionAttributeSource} answers a pure class-hierarchy/reflection
+     * question that needs no {@code PlatformTransactionManager} or AOP infrastructure at all —
+     * confirmed by actually removing the import and re-running (see the Task 25 report's Fix
+     * round 1 section). Added: an assertion that a {@code PlatformTransactionManager} bean
+     * actually exists, and that the bean {@code WebhookService.subscribe} is called through is
+     * actually an AOP proxy — the two preconditions K3 says must both hold before
+     * {@code @Transactional} does anything at all.
      */
     @Test
     void webhookServiceSubscribeOverrideStaysTransactional() {
         runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
                         "casemgmt.engine.mode=remote",
                         "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
-                        "casemgmt.events.type-prefix=org.example.cm")
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
                 .run(context -> {
+                    assertThat(context).as("TransactionManagerConfig must be wired in so a real "
+                                    + "PlatformTransactionManager exists")
+                            .hasSingleBean(PlatformTransactionManager.class);
+
                     WebhookService bean = context.getBean(WebhookService.class);
+                    assertThat(AopUtils.isAopProxy(bean))
+                            .as("the bean subscribe() is actually invoked through must be a Spring "
+                                    + "AOP proxy, or @Transactional on it is a documented no-op (K3)")
+                            .isTrue();
+
                     Method subscribe = ReflectionUtils.findMethod(bean.getClass(), "subscribe",
                             String.class, String.class, List.class, Actor.class);
                     // Negative control: list() carries no @Transactional anywhere in its
