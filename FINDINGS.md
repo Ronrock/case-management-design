@@ -10,7 +10,7 @@ fixed, and whether or not the code now works. Several were explicitly ruled **do
 fix** by the human partner and are marked as such. Nothing here has been softened because a later
 task made the symptom go away.
 
-**What was built:** 6 Maven modules, 32 endpoints under `/case-api/v2`, **351 tests, all green**,
+**What was built:** 6 Maven modules, 33 endpoints under `/case-api/v2`, **381 tests, all green**,
 all against real Oracle 23ai via Testcontainers (no H2 anywhere that touches the schema). Per
 module: core 225, rest 81, engine-embedded 10, engine-remote 11, starter 7, poc-app 17.
 
@@ -20,7 +20,7 @@ module: core 225, rest 81, engine-embedded 10, engine-remote 11, starter 7, poc-
 
 | Risk | Verdict | One-line reason |
 |---|---|---|
-| R1 — plan-item state machine | **Held, with changes** | The evaluator works; the spec's CMMN subset under-specified containment, cascade-on-end and criteria-vs-autocompletion, and all three gaps produced real bugs. Two defects remain open. |
+| R1 — plan-item state machine | **Held, with changes** | The evaluator works; the spec's CMMN subset under-specified containment, cascade-on-end and criteria-vs-autocompletion, and all three gaps produced real bugs. One defect ships documented (evaluator ordering); the manual-path seam found in the final review is fixed. |
 | R2 — Operaton integration | **Held** | Both gateways execute the identical shared contract, and the one silent divergence found is locked by an assertion proven to fail against the old code. |
 | R3 — model-driven contract | **Held for sufficiency, partial by design** | A consumer with zero case-type knowledge drove a case to `CLOSED`. Six contract gaps found; rendering, UX and live-update remain unproven without a UI. |
 | R4 — events and federation | **Split: atomicity held, federation did not** | The transactional outbox is proven under rollback. The pull-recovery path silently loses events under concurrency, which is the half a cross-engine index depends on. |
@@ -79,7 +79,16 @@ PoC mitigates with a repetition cap of 500 and a `WARN` at the ceiling — a bou
 production implementation needs the criteria-transition guard, or repetition must be restricted to
 item types where re-firing is meaningful.
 
-### Two R1 defects found and deliberately not fixed
+### R1 defects: one shipped documented, one fixed as a single seam
+
+**Restructured in the final whole-branch review.** This section previously read "two R1 defects
+found and deliberately not fixed" and listed the evaluator ordering defect alongside
+`ActionPolicy.listForPlanItem`'s missing blocking check, as two independent items. That was
+incomplete in a way that mattered: manual `terminate` on a stage had the *same* missing cascade and
+was not mentioned at all, neither manual path was covered by any test, and — most importantly —
+presenting the projection defect on its own invites someone to fix the projection and leave the
+enforcement corrupting cases. The second item is now stated as **one finding with three instances**,
+below, and has been fixed.
 
 **(a) A probable `PlanModelEvaluator`/`StageCompletion` ordering defect.** `singlePass` builds
 `completingStages` from the **pre-round snapshot**, and `claimedForTermination` is derived before
@@ -92,16 +101,46 @@ complaint model `required: true` masks it for the one item that would otherwise 
 rather than fixed because the fix is evaluator semantics, not a fixture change, and it arrived in
 the last task; the write-up was independently verified against the code by a reviewer.
 
-**(b) `ActionPolicy.listForPlanItem` does not consult `StageCompletion.blockingItems`.** The
-case-level `close` action does consult it; the plan-item-level `complete` action does not. So a
-stage — or a human task — can be force-completed through
-`POST /cases/{id}/plan-items/{itemId}/complete` while its required children are still open. This is
-not theoretical: the generic consumer hit it. Its first version completed any plan item that
-offered `complete`, force-completed the `assessment` stage while `assessComplaint` was still open,
-orphaned the worklist task, and then got a 409 when it later completed that task normally. The
-consumer now excludes `STAGE` and `HUMAN_TASK` **by type** to stay out of the way — which means
-*the API offered an action that corrupts the case, and the client had to know better*. That is an
-R3 problem as much as an R1 one; see below.
+**(b) The manual plan-item path bypassed `StageCompletion` entirely — one seam, three instances.**
+FIXED in Task 27.
+
+`PlanItemService.transition` checked only that the item belonged to the case and that the source
+state was legal. It never consulted `StageCompletion`, and `TransitionApplier.sideEffects` does not
+cascade. `ActionPolicy.listForPlanItem` was written the same way — a bare state-transition table,
+with no reference to `StageCompletion` at all. Neither is a separate bug: they are the same seam,
+written by two tasks that never had to agree with Task 9, seen twice.
+
+`cases.reevaluate` could not repair any of it. `PlanModelEvaluator.singlePass` derives
+`cascadeTerminatedIds` only from stages whose **exit criteria** fired and `claimedForTermination`
+only from stages **it** decided to complete, and it skips every already-ended item — so a manually
+ended stage is invisible to it.
+
+| Instance | What it produced |
+|---|---|
+| `complete` on a `STAGE` | A `COMPLETED` stage with live `ACTIVE` descendants — verbatim the orphan shape Task 9 spent three review rounds closing on the automatic path |
+| `terminate` on a `STAGE` | The identical hole, cascading nowhere, and **recorded nowhere before this review**. Every live descendant orphaned; `AVAILABLE` descendants then **permanently frozen**, because `isContained` refuses entry to a child whose parent is not `ACTIVE` and is consulted only on the `AVAILABLE`→entry edge. If any was `required`, `caseBlockers` blocked close **forever** and the case was wedged with no API path out |
+| `enable`/`start` | Neither checked containment. `PlanItemService`'s Javadoc argued `start` needed none, because an item could only reach `ENABLED` under an `ACTIVE` parent — sound for the evaluator, **false** once `enable` is manually invokable on any `AVAILABLE` item regardless of parent state |
+
+The projection half was not theoretical: the generic consumer hit it. Its first version completed
+any plan item that offered `complete`, force-completed the `assessment` stage while
+`assessComplaint` was still open, orphaned the worklist task, and then got a 409 when it later
+completed that task normally. It now excludes `STAGE` and `HUMAN_TASK` **by type** to stay out of the
+way — which means *the API offered an action that corrupts the case, and the client had to know
+better*.
+
+**Fixed on both surfaces, and enforcement first.** `PlanItemService.assertModelInvariants` requires
+`isContained` for `enable`/`start` and an empty `blockingItems` for `complete`; `cascadeTerminate`
+sweeps the whole remaining subtree on `terminate`, through `TransitionApplier.apply` so every swept
+descendant produces a real transitioned event. `ActionPolicy.listForPlanItem` mirrors the same two
+calls, so the API never advertises an action the service then refuses — but the enforcement is in
+the service, **not** in `ActionPolicy` alone, because a client that POSTs the URL directly never
+reads the projection.
+
+**Why this is also the ninth vacuous mechanism.** The orphan invariant had dedicated
+`StageCompletionTest` cases, three review rounds and prominent Javadoc — and every one of those
+tests exercised only the pure rules layer. `PlanItemServiceTest` completed and terminated only
+*leaf* items. **No test anywhere completed or terminated a `STAGE` with live children through the
+service.** See the vacuous-mechanisms section.
 
 ### R1 spec changes required
 
@@ -199,6 +238,29 @@ no-match lists over the expanded stream).
 is a contract failure, not a bug: the property's documented behaviour and its implemented behaviour
 had been in direct contradiction since the class was written, and prose was the only place the
 correct behaviour existed.
+
+**And it contradicted itself a second way, found in the final whole-branch review.**
+`CaseManagementAutoConfiguration` declared ~40 beans and **not one** carried
+`@ConditionalOnMissingBean` — while the repo already had exactly one, on
+`EmbeddedEngineAutoConfiguration`'s `EngineGateway`, so the convention was known and applied once.
+`CallerResolver`'s Javadoc promises *"a consumer can substitute its own identity mapping without
+excluding a component scan"*. As wired they could not: bean-definition overriding is off by default
+in Boot 4, so a consumer declaring their own `CallerResolver` got `BeanDefinitionOverrideException`
+at startup. Same for `ActionPolicy`, `FormValidator`, `CriterionEvaluator` and `EventPublisher` —
+every documented extension point of the library.
+
+Exactly the same shape as the `casemgmt.enabled` defect above: the *only* place the intended
+behaviour existed was prose, and the code did the opposite. Fixed for those five, and proven by a
+test that supplies its own beans and asserts the context comes up **and** that the bean handed out
+is the consumer's own instance — identity, not type, since the substitutes are subclasses and a type
+assertion would have passed against the starter's own beans.
+
+**Not fixed, and stated rather than papered over:** the seven controllers and `ProblemDetailHandler`
+arrive via `@Import`, which `@ConditionalOnMissingBean` has no bearing on — an imported
+`@Component` is not overridable at all. Making them substitutable means converting each to a
+`@Bean` method, which changes how every one of them is constructed. That is a restructuring, not a
+fix round, and it is deliberately left undone. A consumer who needs a different controller today
+must fork it.
 
 ### R2 spec changes required
 
@@ -355,6 +417,41 @@ Three real defects were found in the dispatcher and fixed:
   semantic stated in Javadoc: deactivating a subscription stops future fan-out, it does not recall
   deliveries already committed to the outbox.
 
+### Restarting the application permanently dead-letters every pre-existing subscription
+
+**Stated as one thing, because the composition IS the finding** (final whole-branch review,
+Important 6). Its three ingredients each appear elsewhere in this document, individually recorded as
+PoC-shaped or minor — the in-memory secret map in the deviations table, the pre-HTTP throw in the
+bullet list immediately above, `MAX_RETRIES_` in the bullet after it. Nowhere did any sentence say
+what they do together, and for a document whose job is findings, that omission was the defect.
+
+1. `CaseManagementAutoConfiguration` holds webhook secrets in an in-memory `ConcurrentHashMap`.
+2. After **any** restart, `secretResolver.apply(sub.id())` returns `null` for every pre-existing
+   subscription → `HmacSigner.sign` throws → caught by `drainOnce`'s generic handler, which called
+   `fail(delivery, null, ...)` with no subscription, so `maxRetries` fell back to `BACKOFF.size()`
+   instead of the subscription's own value.
+3. Every pending delivery therefore burned its retries and **dead-lettered permanently** — into a
+   queue with no endpoint to read it and no way to replay it.
+
+**Fixed as far as this codebase can reach, which is not all the way.** `drainOnce` now carries
+whatever subscription `deliver` had loaded into the catch, so the pre-HTTP failure path uses the
+subscription's configured `MAX_RETRIES_` rather than an accidental fallback — the failure is bounded
+by policy instead of by which branch happened to fire. `GET /webhooks/{id}/dead-letters` now exposes
+`WebhookService.deadLetters`, which existed and was reachable only from tests; it reports
+`lastStatusCode` and `lastError`, because a dead-letter listing that cannot say *why* a delivery
+died is not observability, and "why" is exactly the question a restart raises.
+
+**What is NOT fixed, and must be before any deployment:** the secret's durability. There is no fix
+inside this codebase — signing needs plaintext, `SECRET_HASH_` is one-way by design, and adding a
+plaintext column is explicitly the wrong answer. Production needs reversible encryption with the key
+held outside the case-management database, or per-subscription keys in an external secret store
+(Vault, KMS) that `secretResolver` calls out to. Until then, **every subscription must be re-created
+after a restart**, and the dead-letter endpoint is the only way to see that it was needed.
+
+There is no replay endpoint either: a dead-lettered delivery can now be *seen* and still not
+*resent*. That is deliberate scope, not an oversight — replay needs a decision about
+at-least-once-again semantics that nothing in the spec makes.
+
 ### Would this event stream support a cross-engine index? No — not as it stands
 
 This is the finding that matters most in this section, and it was **ruled DOCUMENT-DO-NOT-FIX by the
@@ -500,9 +597,9 @@ explicitly, before the query is built.
 
 ---
 
-## The process finding: eight vacuous mechanisms
+## The process finding: nine vacuous mechanisms
 
-This plan produced **eight** mechanisms that passed while the thing they exist to protect could be
+This plan produced **nine** mechanisms that passed while the thing they exist to protect could be
 deleted. Most were inherited from the plan's own test code. This is recorded as a first-class
 finding because it is the most portable thing the exercise learned.
 
@@ -516,6 +613,29 @@ finding because it is the most portable thing the exercise learned.
 | 6 | 24 | Two-tenant definition isolation (self-caught) | It distinguished the tenants by display `name`, but `PlanItem.name` derives from `defKey`, so both tenants produced identical plan items |
 | 7 | 25 | The `@Import(TransactionManagerConfig)` test | It asked whether `@Transactional` was *resolvable* on the class — a property of the type hierarchy that holds with or without a transaction manager. It never asserted the bean was **proxied** |
 | 8 | 26 | The `manualActivation` discovery branch in `GenericConsumerIT` | A `STAGE`/`HUMAN_TASK` type guard `continue`d before the branch was reachable for any item this case type marks discretionary. The report had quoted it as one of four decisive proofs |
+| **9** | **9 / 16 / 24** | **The plan-item orphan invariant** | **The best-defended invariant in the codebase — dedicated `StageCompletionTest` cases, three review rounds, prominent Javadoc — and every one of those tests exercised only the pure rules layer. `PlanItemServiceTest` completed and terminated only *leaf* items. No test anywhere completed or terminated a `STAGE` with live children through the service, so the entire manual path into the protected state was unguarded and untested at once** |
+
+**The ninth is a different shape from the other eight, and it is the one most likely to recur.** The
+other eight are tests that could not fail. This one is a test suite that could fail, did its job
+perfectly, and *guarded only one of the two doors into the room*. `StageCompletion` was tested
+exhaustively as a pure function; `PlanItemService`, a second writer of the exact state those tests
+protect, never went through it. Nothing about reading `StageCompletionTest` would reveal that —
+the tests are good, the Javadoc is accurate, the invariant is real. What was missing is a question
+nobody asked.
+
+**The detection method, and it is as cheap as the strip:**
+
+- **When you write a Javadoc documenting a known limitation, grep every caller of that method.**
+  This alone would have caught the `formSchema` defect (Important 1), at any point across the four
+  tasks between documenting the limitation and adding the write-path caller.
+- **When you protect an invariant with tests, grep every other writer of the state it protects.**
+  This alone would have caught all three instances of the plan-item defect (Important 2) the day
+  `PlanItemService` was written.
+
+Both are one grep. Neither requires understanding the other task's design. The strip technique
+proves *a test can fail*; these two prove *a mechanism is reached from everywhere it needs to be* —
+which is the question the strip cannot ask, because a strip only ever exercises the paths the test
+already knows about.
 
 **And the largest instance of all was not a test at all — it was a whole test category.** The root
 POM declared a `maven-failsafe-plugin` execution that **no module ever bound**. So `*IT` classes
@@ -524,7 +644,7 @@ nor any active execution: they were compiled, and then **silently skipped, with 
 no "Tests run" line at all** — not "0 tests", not a skip notice, nothing to notice. Discovered in
 Task 11 and fixed centrally by making surefire run `**/*IT.java` reactor-wide under `test` and
 deleting the dead declaration. Tasks 24, 26 and 27 are entirely `*IT`-based and would all have been
-affected; **this document's own "351 tests green" claim depends on that fix**, which is why it is
+affected; **this document's own "381 tests green" claim depends on that fix**, which is why it is
 recorded here and not only in `pom.xml`'s comment. It is the same failure as the eight above, one
 level up: a mechanism that reports success while protecting nothing, invisible because the report
 looks exactly like the report you expect. The generalisation: **a green build is evidence only about
@@ -558,6 +678,31 @@ were self-caught by implementers who ran the strip on their own drafts.
   same resource as the same caller and asserts 200 (so a 409 is not routing), pins 401 as a distinct
   answer by its own test (so it is not the filter chain), and asserts the specific problem `code`
   (so it is not a generic container refusal).
+
+### The plan-level finding: the two largest defects came from plan omissions, not implementation
+
+Worth separating from the list above, because no amount of implementation care would have prevented
+either. Both of the final review's two largest findings have the **same shape**: a task did its own
+job correctly and honestly, and nothing in the plan ever required it to agree with a neighbour.
+
+- **The plan specified `PlanItemService`'s manual actions as a bare state-transition table** —
+  enable/start/complete/terminate with their legal source states — while Task 9 was *simultaneously*
+  establishing containment and cascade as model invariants. Neither brief referenced the other. The
+  two tasks never had to agree, so they didn't, and both passed review because each was internally
+  correct. `ActionPolicy.listForPlanItem` then copied the same bare table a second time.
+- **`formSchema`'s limitation was documented honestly at definition time** (Task 5) and never
+  revisited when a write-path caller appeared four tasks later (Task 17/24). The Javadoc said
+  exactly what the method did; nothing prompted anyone to re-read it when the set of callers
+  changed.
+
+Same shape both times: **a correct local decision, invalidated by a later change elsewhere, with no
+mechanism to notice.** Review caught neither, three times over, because each task's review looked at
+that task's diff.
+
+The remedy is not more review effort per task. It is a plan-level obligation: **when two tasks
+touch the same invariant, one brief must name the other**, and a task that adds a caller to a method
+carrying a documented limitation must re-read that limitation. The two greps above are the
+implementation-level version of the same idea.
 
 **What this task did about it.** Both mechanisms added here carry their own falsifiability:
 `OpenApiConformanceIT` pairs every "conforms" assertion with a mutated body that must be
@@ -614,19 +759,52 @@ spec's own (§11); the rest were found during the build.
 
 | Deviation | Why it exists | What production needs |
 |---|---|---|
-| Webhook secrets held in an in-memory map for signing (Task 25) | No secret store in the PoC | A secret store or reversible encryption. The in-memory map is also what made the dispatcher's post-restart NPE possible |
+| Webhook secrets held in an in-memory map for signing (Task 25) | No secret store in the PoC | A secret store or reversible encryption. **This is the durability half of "restarting the application permanently dead-letters every pre-existing subscription" — see R4. Every subscription must be re-created after a restart.** |
 | `CM_ENGINE_COMMAND` and `ENGINE_SYNC_` columns (spec D3) | Remote mode cannot join the local transaction | Fine as a pattern; the columns are PoC-shaped, not target-design |
 | Direct writes in Operaton Tasklist bypass the state machine in remote mode (spec D4) | No outbound push channel from Operaton | Either an engine-side listener pushing back, or Tasklist access removed |
 | Basic auth on Operaton identity instead of OAuth2 (spec D2) | §7 — configuration, not design | Replace `PocSecurityConfig`; nothing else changes |
-| **The idempotency reclaim lease double-executes** | A 5-minute lease on an in-progress key, so a crash does not wedge it forever | An operation that legitimately runs longer than the lease **can be reclaimed by a duplicate, and both callers execute — the exact thing idempotency keys exist to prevent.** Standard lease-mutex trade-off (the Redis `SETNX`+TTL shape). Callers with long-running operations must know. Production needs a lease proportional to the operation, or a fencing token |
+| **The idempotency reclaim lease double-executes** | A 5-minute lease on an in-progress key, so a crash does not wedge it forever. (The *other* half of this trade-off — a failed operation wedging the key for the full lease, which fired on ordinary 400/404/422 responses — was found in the final review and is fixed: `IdempotencySupport` now releases the claim on a client error. Server faults deliberately still hold it, since their side effects are unknown) | An operation that legitimately runs longer than the lease **can be reclaimed by a duplicate, and both callers execute — the exact thing idempotency keys exist to prevent.** Standard lease-mutex trade-off (the Redis `SETNX`+TTL shape). Callers with long-running operations must know. Production needs a lease proportional to the operation, or a fencing token |
 | `PATCH` declares `application/merge-patch+json` but does not implement null-clearing | Behaviour change with its own test surface | Real merge-patch semantics |
 | `Page` carries no `totalItems`/`totalPages` | Needs a `COUNT` query `CaseRepository` does not have | Additive for every client when added |
-| Schedulers assume a single instance | PoC | Webhook and engine-command dispatch use claim-by-`UPDATE` with a lease and are safe; the **SLA sweeper is not** — `dueRecords` has no `ORDER BY`, so two sweepers can take different row orders and deadlock (`ORA-00060`), which surfaces as `DataAccessException`, not `OptimisticLockException`, and therefore aborts the batch the per-record catch exists to protect |
+| Schedulers assume a single instance | PoC | Webhook and engine-command dispatch use claim-by-`UPDATE` with a lease. The SLA sweeper has no claim, but is no longer deadlock-prone: Task 27 added `ORDER BY ID_` and `FETCH FIRST 200` to `dueRecords`, so two sweepers take the same rows in the same sequence (the old unordered query could deadlock with `ORA-00060`, which surfaces as `DataAccessException`, escapes the per-record `OptimisticLockException` catch, and aborts the batch) and neither holds `CM_SLA_RECORD`+`CM_CASE` row locks across an unbounded backlog. Two sweepers still duplicate work on the same rows; a claim would be the production answer |
 | `ESCALATE` breach action is inert | §2.2 defers the SLA action surface | Only `EMIT_EVENT` is honoured; `BREACH_ACTIONS_JSON_` can name `ESCALATE` and nothing happens |
 | `PAUSED_STATES_JSON_` reinterpreted | `db-design.sql:294` documents it as a list of **states**; it is wired as a whitelist of pause **reasons** | Pick one and make the schema comment agree |
 | Identity groups are unioned with participant roles into one privilege check | `CallerResolver` | An identity group literally named `owner` or `handler` grants claim/complete on **every** task in **every** case, with no participant row. The Javadoc defers this to "namespace your groups in production" — a deployment convention standing in for a code invariant |
-| `GET /case-definitions/{key}/forms/{formKey}` is not tenant-scoped | `formSchema(key, formKey)` has no tenant parameter | Accepted residual: it exposes a JSON-schema field list, not case data, and `GET /case-definitions` *is* scoped so keys are not enumerable. Closing it is a signature change |
+| `GET /case-definitions/{key}/forms/{formKey}` is not tenant-scoped | `formSchema(key, formKey)` has no tenant parameter | Accepted residual **for this endpoint only**: it exposes a JSON-schema field list, not case data, and `GET /case-definitions` *is* scoped so keys are not enumerable. Closing it is a signature change. **See the correction immediately below — the earlier version of this row was wrong about the method.** |
 | `application-remote.yaml` is never exercised | The remote IT supplies properties directly | The one deliverable representing "remote mode configuration" has no test behind it, and its `base-url` points at nothing |
+| Six schema tables are created and never written to | `db-design.sql` is the full target schema; the PoC implements a subset of it | `CM_ATTACHMENT`, `CM_CASE_LINK`, `CM_CASE_TYPE_ROLE`, `CM_QUEUE`, `CM_SLA_CALENDAR_EXCEPTION`, `CM_TASK_DELEGATION_HISTORY` have DDL and no code path. **Deliberate scope, not oversight** — recorded here only so a reader does not mistake unused DDL for a missing implementation |
+
+### Correction: the `formSchema` row above was materially wrong (final whole-branch review, Important 1)
+
+This is the one place this document was not merely incomplete but **incorrect**, and it is worth
+stating separately rather than editing the row silently, because the shape of the error is the
+lesson.
+
+"Accepted residual: it exposes a JSON-schema field list, not case data" is true of the **endpoint**.
+It was false of the **method**. `CaseDefinitionRepository.formSchema(key, formKey)` had a second
+caller the row never considered: `CaseTaskService.complete`, the server-side validator for task
+completion — a **write path**, deciding whether a mutation is legal. Both of the ambiguities the
+method's own Javadoc honestly documented were real defects there:
+
+- **Version drift.** The method picks the highest `VERSION_NO_` at the moment of the call. Deploy v2
+  with a new `required` field and every already-running v1 case's task completion was validated
+  against v2 — the exact failure versioned definitions exist to prevent. Every *other* definition
+  lookup in the codebase already resolves the pinned row (`CaseService.snapshot` uses
+  `definitions.require(instance.caseDefId())`), and `CM_CASE.CASE_DEF_ID_` exists precisely to pin it.
+- **Cross-tenant.** The query carried no tenant predicate at all. Tenant `t1` at v3 and tenant `t2`
+  at v1 meant `t2`'s tasks were validated against `t1`'s schema.
+
+Fixed in Task 27: `formSchemaOfDefinition(caseDefId, formKey)` resolves one exact `CM_CASE_DEF` row
+by primary key — simultaneously version-pinned and tenant-scoped, since the id is minted per
+(tenant, key, version). Deliberately a distinct name rather than an overload, because both take two
+`String`s and an overload would be indistinguishable at the call site, which is how the defect
+happened in the first place.
+
+**The generalisable part.** The limitation was documented honestly at definition time (Task 5) and
+never revisited when a write-path caller appeared four tasks later. Nothing was hidden; the Javadoc
+said exactly what the method did. What was missing was the second step: **when you write a Javadoc
+documenting a known limitation, grep every caller of that method.** One grep, at any point in four
+tasks, would have found it. See the plan-level finding below.
 
 ---
 
@@ -795,3 +973,55 @@ Roughly 45 minor items were logged as `minor (deferred)` in
 repeated here. They are individually small (a misnamed test, an N+1 at PoC volumes, a Javadoc whose
 reasoning is right for the wrong reason) and the ledger is their record. The ones with real teeth
 have been promoted into the sections above.
+
+---
+
+## The final whole-branch review
+
+A last review over the completed branch found eight Important findings and four contract-level
+Minors that **only a whole-system view could see** — every one of the 27 tasks had already passed
+its own review, with fix rounds. That is the single most useful data point about the process in this
+document: *per-task review, done thoroughly 27 times, does not find cross-task defects*, because
+each review looks at one diff. See "the plan-level finding" above.
+
+All eight Importants were fixed. Their individual write-ups are in the sections they belong to; what
+follows is the index, plus the three items that changed this document rather than the code.
+
+| # | Finding | Where it is written up |
+|---|---|---|
+| 1 | `formSchema` resolved unscoped by tenant and unpinned by version on the **write** path | Deviations → "Correction: the `formSchema` row above was materially wrong" |
+| 2 | The manual plan-item path bypassed `StageCompletion` (three instances, one seam) | R1 → "R1 defects", item (b) |
+| 3 | The starter's extension points were not overridable, contradicting their own Javadoc | R2 → "The starter's own contract contradicted itself" |
+| 4 | A failed operation wedged its idempotency key for the full lease | Deviations → idempotency reclaim lease row |
+| 5 | Spec §6.4's 48h `CM_IDEMPOTENCY_KEY` retention had no caller; the table grew forever | Fixed in `CaseManagementSchedulers.purgeIdempotencyKeys`, with interval and retention as properties |
+| 6 | Restarting the application permanently dead-letters every pre-existing subscription | R4 → its own section |
+| 7 | Three Javadocs asserted core has no transaction manager, false since Task 5 — and one of them was load-bearing | Fixed: `CaseDefinitionRepository.insert` now uses `DataSourceUtils` |
+| 8 | `SlaSweeper.sweep()` was `@Transactional` over an unbounded, unordered batch | Deviations → schedulers row |
+
+**Three of the twelve changed the document, not the code:**
+
+- **The `formSchema` row was materially wrong** — the one place this document was incorrect rather
+  than incomplete. Corrected in full above.
+- **The R1 section presented one seam as two independent defects** and omitted the worst of its three
+  instances. Rewritten above.
+- **The webhook restart failure existed only as three separate ingredients.** The sentence that
+  matters — "restarting the application permanently dead-letters every pre-existing subscription,
+  unobservably" — appeared nowhere. Added above. For a document whose job is findings, the
+  composition *was* the finding.
+
+**And one of the twelve was not a defect at all.** The review recorded as a Minor that
+`ProblemDetail.title` is never set and therefore omitted from every problem body. On Spring Framework
+7 that is false: `ProblemDetail.getTitle()` falls back to the status reason phrase when the field is
+null — confirmed by disassembling `spring-web-7.0.8.jar`, and confirmed on the wire by writing the
+proposed `setTitle(...)`, watching the new test pass, stripping it, and watching the test pass again
+with identical values. The setter was **dropped rather than kept as belt and braces**: it wrote
+exactly what the getter derives and could never change an outcome, which is precisely the ninth
+mechanism's shape. The test was kept, because "the body a client receives carries a title" is a real
+assertion whoever supplies the value. *Adjudicated against the artifact, not against the reviewer* —
+the same method that settled Task 25's `NoClassDefFoundError` dispute.
+
+**One addition is not covered by `openapi-specs.md`.** `GET /webhooks/{id}/dead-letters` was added
+to close the observability half of finding 6, and the published document does not describe it.
+`OpenApiConformanceIT` validates responses against the document for the endpoints it exercises; it
+does not detect an endpoint the document omits, so this passed silently. Documenting the new
+endpoint is a spec change, listed here rather than made unilaterally.
