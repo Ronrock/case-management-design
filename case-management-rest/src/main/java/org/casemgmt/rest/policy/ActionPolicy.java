@@ -51,6 +51,21 @@ public class ActionPolicy {
         return actions;
     }
 
+    /**
+     * <p><b>Consults {@link StageCompletion} — final whole-branch review, Important 2.</b> This
+     * method used to be a bare state-transition table, written without reference to
+     * {@code StageCompletion} at all, while {@code PlanItemService} enforced the same bare
+     * table. So the API advertised {@code complete} on a stage with live required children (the
+     * generic consumer hit exactly that: it force-completed a stage, orphaned the worklist task
+     * beneath it, and had to start excluding {@code STAGE} by TYPE to stay out of the way), and
+     * advertised {@code enable} on a child of a stage that had never started.
+     *
+     * <p>The enforcement now lives in {@code PlanItemService.assertModelInvariants} — a client
+     * POSTing the URL directly never reads this projection, so a fix here alone would fix
+     * nothing. This mirror is what keeps the promise the class Javadoc above makes: one set of
+     * rules behind both surfaces, so the API never offers an action the server then refuses.
+     * The two conditions are literally the same two calls the service makes.
+     */
     public List<AvailableAction> listForPlanItem(CaseSnapshot snapshot, PlanItem item,
                                                   Set<String> callerRoles) {
         List<AvailableAction> actions = new ArrayList<>();
@@ -58,17 +73,24 @@ public class ActionPolicy {
             return actions;
         }
         String base = "/cases/" + item.caseId() + "/plan-items/" + item.id();
+        boolean contained = stageCompletion.isContained(snapshot, item);
         switch (item.state()) {
             case AVAILABLE -> {
-                actions.add(AvailableAction.post("enable", base + "/enable"));
+                if (contained) {
+                    actions.add(AvailableAction.post("enable", base + "/enable"));
+                }
                 actions.add(AvailableAction.post("terminate", base + "/terminate"));
             }
             case ENABLED -> {
-                actions.add(AvailableAction.post("start", base + "/start"));
+                if (contained) {
+                    actions.add(AvailableAction.post("start", base + "/start"));
+                }
                 actions.add(AvailableAction.post("terminate", base + "/terminate"));
             }
             case ACTIVE -> {
-                actions.add(AvailableAction.post("complete", base + "/complete"));
+                if (stageCompletion.blockingItems(snapshot, item).isEmpty()) {
+                    actions.add(AvailableAction.post("complete", base + "/complete"));
+                }
                 actions.add(AvailableAction.post("terminate", base + "/terminate"));
             }
             default -> { }

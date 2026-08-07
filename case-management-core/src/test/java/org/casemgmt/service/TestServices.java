@@ -44,7 +44,7 @@ public final class TestServices {
         var applier = new TransitionApplier(new PlanItemRepository(jdbc), new CaseTaskRepository(jdbc),
                 new MilestoneRepository(jdbc), gateway, publisher);
         return new PlanItemService(new PlanItemRepository(jdbc), caseService(dataSource, gateway),
-                applier, publisher);
+                applier, publisher, new StageCompletion());
     }
 
     public static CaseTaskService taskService(DataSource dataSource, EngineGateway gateway) {

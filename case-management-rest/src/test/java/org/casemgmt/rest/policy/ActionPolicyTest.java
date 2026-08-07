@@ -209,6 +209,78 @@ class ActionPolicyTest {
                 .containsExactlyInAnyOrder("complete", "terminate");
     }
 
+    /**
+     * Final whole-branch review, Important 2 (projection half). {@code listForPlanItem} was
+     * written as a bare state-transition table with no reference to {@code StageCompletion} at
+     * all, so it advertised {@code complete} on a stage whose required child was still open —
+     * the generic consumer hit exactly this, force-completed a stage, orphaned the worklist task
+     * beneath it, and had to start excluding {@code STAGE} by TYPE to stay out of the way.
+     *
+     * <p>{@code terminate} must stay offered in both halves: it is the escape hatch, and
+     * {@code PlanItemService} now cascades it down the subtree rather than refusing it.
+     */
+    @Test
+    void aStageWithABlockingChildOffersTerminateButNotComplete() {
+        CaseDefinition def = definition(
+                def("stage", PlanItemType.STAGE, null, false, false, false, List.of(), List.of(), 10),
+                def("child", PlanItemType.HUMAN_TASK, "stage", false, true, false,
+                        List.of(), List.of(), 20));
+        PlanItem stage = item("pi-stage", "stage", PlanItemType.STAGE, PlanItemState.ACTIVE);
+        PlanItem blocked = item("pi-child", "child", PlanItemType.HUMAN_TASK,
+                PlanItemState.ACTIVE, "pi-stage");
+
+        CaseSnapshot blocking = snapshot(def, List.of(stage, blocked), Map.of());
+        assertThat(policy.listForPlanItem(blocking, stage, Set.of("handler")))
+                .extracting(AvailableAction::action)
+                .containsExactly("terminate");
+        assertThatThrownBy(() ->
+                policy.assertAllowedOnPlanItem(blocking, stage, Set.of("handler"), "complete"))
+                .isInstanceOf(CaseConflictException.class);
+
+        // Negative control: with that same child ended, the identical stage DOES offer complete
+        // — so the assertion above is discriminating on the blocking rule, not on "stages never
+        // offer complete".
+        CaseSnapshot clear = snapshot(def, List.of(stage,
+                item("pi-child", "child", PlanItemType.HUMAN_TASK, PlanItemState.COMPLETED,
+                        "pi-stage")), Map.of());
+        assertThat(policy.listForPlanItem(clear, stage, Set.of("handler")))
+                .extracting(AvailableAction::action)
+                .containsExactlyInAnyOrder("complete", "terminate");
+    }
+
+    /**
+     * The containment half of the same finding: {@code enable}/{@code start} were advertised on
+     * a child of a stage that had never started, which {@code PlanItemService} now refuses.
+     */
+    @Test
+    void aChildOfANonActiveStageOffersTerminateButNotEnableOrStart() {
+        CaseDefinition def = definition(
+                def("stage", PlanItemType.STAGE, null, true, false, false, List.of(), List.of(), 10),
+                def("child", PlanItemType.HUMAN_TASK, "stage", true, false, false,
+                        List.of(), List.of(), 20));
+        PlanItem availableChild = item("pi-child", "child", PlanItemType.HUMAN_TASK,
+                PlanItemState.AVAILABLE, "pi-stage");
+        PlanItem enabledChild = item("pi-child", "child", PlanItemType.HUMAN_TASK,
+                PlanItemState.ENABLED, "pi-stage");
+
+        PlanItem sleepingStage = item("pi-stage", "stage", PlanItemType.STAGE, PlanItemState.ENABLED);
+        assertThat(policy.listForPlanItem(snapshot(def, List.of(sleepingStage, availableChild),
+                        Map.of()), availableChild, Set.of("handler")))
+                .extracting(AvailableAction::action).containsExactly("terminate");
+        assertThat(policy.listForPlanItem(snapshot(def, List.of(sleepingStage, enabledChild),
+                        Map.of()), enabledChild, Set.of("handler")))
+                .extracting(AvailableAction::action).containsExactly("terminate");
+
+        // Negative control: once the parent stage is ACTIVE, both actions reappear.
+        PlanItem runningStage = item("pi-stage", "stage", PlanItemType.STAGE, PlanItemState.ACTIVE);
+        assertThat(policy.listForPlanItem(snapshot(def, List.of(runningStage, availableChild),
+                        Map.of()), availableChild, Set.of("handler")))
+                .extracting(AvailableAction::action).containsExactlyInAnyOrder("enable", "terminate");
+        assertThat(policy.listForPlanItem(snapshot(def, List.of(runningStage, enabledChild),
+                        Map.of()), enabledChild, Set.of("handler")))
+                .extracting(AvailableAction::action).containsExactlyInAnyOrder("start", "terminate");
+    }
+
     @Test
     void unsyncedTasksDoNotOfferClaim() {
         CaseTask pending = new CaseTask("t-1", "eng-a:1", "pi-1", null, "T", null,

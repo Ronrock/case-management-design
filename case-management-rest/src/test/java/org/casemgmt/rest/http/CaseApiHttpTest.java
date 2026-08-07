@@ -221,10 +221,26 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         assertThat(items).allSatisfy(i ->
                 assertThat(i).containsKeys("id", "caseId", "type", "state", "version", "availableActions"));
 
-        Map<String, Object> active = items.stream()
-                .filter(i -> "ACTIVE".equals(i.get("state"))).findFirst().orElseThrow();
-        assertThat((List<Map<String, Object>>) active.get("availableActions"))
+        // An ACTIVE LEAF item offers complete and terminate.
+        Map<String, Object> activeLeaf = items.stream()
+                .filter(i -> "ACTIVE".equals(i.get("state")) && !"STAGE".equals(i.get("type")))
+                .findFirst().orElseThrow();
+        assertThat((List<Map<String, Object>>) activeLeaf.get("availableActions"))
                 .extracting(a -> a.get("action")).contains("complete", "terminate");
+
+        // ...and the ACTIVE STAGE that leaf is required by does NOT offer complete (final
+        // whole-branch review, Important 2). This assertion used to read "the first ACTIVE item
+        // offers complete", which the stage satisfied — that is precisely the defect: the API
+        // advertised force-completing a stage over its own live required child, and the generic
+        // consumer had to exclude STAGE by TYPE to work around it. terminate stays offered; it
+        // is the escape hatch, and the service cascades it down the subtree.
+        Map<String, Object> activeStage = items.stream()
+                .filter(i -> "ACTIVE".equals(i.get("state")) && "STAGE".equals(i.get("type")))
+                .findFirst().orElseThrow();
+        assertThat(activeLeaf.get("parentStageId")).isEqualTo(activeStage.get("id"));
+        assertThat((List<Map<String, Object>>) activeStage.get("availableActions"))
+                .extracting(a -> a.get("action"))
+                .containsExactly("terminate");
     }
 
     @Test

@@ -143,8 +143,9 @@ public class CaseManagementAutoConfiguration {
 
     @Bean
     public PlanItemService planItemService(PlanItemRepository planItems, CaseService cases,
-                                           TransitionApplier applier, EventPublisher publisher) {
-        return new PlanItemService(planItems, cases, applier, publisher);
+                                           TransitionApplier applier, EventPublisher publisher,
+                                           StageCompletion stageCompletion) {
+        return new PlanItemService(planItems, cases, applier, publisher, stageCompletion);
     }
 
     @Bean
