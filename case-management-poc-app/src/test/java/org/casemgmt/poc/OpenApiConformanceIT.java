@@ -4,13 +4,21 @@ import com.atlassian.oai.validator.OpenApiInteractionValidator;
 import com.atlassian.oai.validator.model.Request;
 import com.atlassian.oai.validator.model.SimpleResponse;
 import com.atlassian.oai.validator.report.ValidationReport;
+import org.casemgmt.domain.CaseIds;
+import org.casemgmt.event.CaseEvent;
+import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.poc.support.PocAppEmbeddedTestBase;
+import org.casemgmt.repo.EventRepository;
+import org.casemgmt.repo.WebhookRepository;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.simple.JdbcClient;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
 
@@ -37,7 +45,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SuppressWarnings({"rawtypes", "unchecked"})
 class OpenApiConformanceIT extends PocAppEmbeddedTestBase {
 
+    /**
+     * The seeded caller holding the {@code admin} identity group — the only one that can reach
+     * {@code POST /webhooks} or {@code GET /webhooks/{id}/dead-letters}. Added to
+     * {@code PocBootstrap} in Task 27's corrective round; before that no seeded user held it, so
+     * three of this API's endpoints were unreachable in the application that demonstrates it.
+     */
+    private static final String ADMIN = "olivia";
+
     private static final OpenApiInteractionValidator VALIDATOR = validator();
+
+    @Autowired private EventRepository events;
+    @Autowired private WebhookRepository webhooks;
+    @Autowired private WebhookDispatcher dispatcher;
+    @Autowired private JdbcClient jdbc;
 
     private static OpenApiInteractionValidator validator() {
         try {
@@ -105,6 +126,77 @@ class OpenApiConformanceIT extends PocAppEmbeddedTestBase {
         assertConforms("/cases", Request.Method.GET, 200, listing.getBody());
         assertRejected("/cases", Request.Method.GET, 200,
                 listing.getBody().replaceFirst("\"page\":\\d+", "\"page\":\"first\""), "page");
+    }
+
+    /**
+     * {@code GET /webhooks/{webhookId}/dead-letters} — added in Task 27's corrective round for a
+     * specific reason: the endpoint was implemented in the fix wave and its response was shaped
+     * from {@code CM_WEBHOOK_DELIVERY}'s columns rather than from this document, so it shipped
+     * with two documented fields missing ({@code event}, {@code failedAt}) and four undocumented
+     * ones present. Nothing caught it, because no conformance case exercised this path — the
+     * validator only checks the operations it is handed. That is the same shape as the report's
+     * own "a green build is evidence only about the tests that ran".
+     *
+     * <p>Exercises the EMPTY-queue case deliberately: a `[]` is a valid instance of the array
+     * schema, so on its own it would prove nothing at all — which is exactly why the negative
+     * control below is not optional here. It sends a populated body of the shape the controller
+     * actually builds and then breaks one documented field's TYPE, so the assertion is pinned to
+     * this operation's own schema having really been resolved and applied.
+     */
+    @Test
+    void theDeadLetterQueueResponseConformsToTheSpec() {
+        String webhookId = (String) ((Map) client(ADMIN).post().uri("/case-api/v2/webhooks")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("url", "http://127.0.0.1:1/hook", "eventTypes", java.util.List.of("*")))
+                .retrieve().toEntity(Map.class).getBody()).get("id");
+        assertThat(webhookId).as("the subscription must actually be created").isNotNull();
+
+        // A REAL dead letter, produced by the application's own dispatcher against its own
+        // schema — not a hand-written body. The empty queue is a valid instance of the array
+        // schema and would prove nothing on its own, so the row has to exist before the GET.
+        // The subscriber URL above resolves to nothing, so drainOnce fails the delivery for
+        // real; maxRetries is 1, so the second pass dead-letters it.
+        long seq = events.append(new CaseEvent(CaseIds.newId(), "/engines/eng-a/cases",
+                "org.example.cm.case.created", "eng-a:spec-dlq", "t1",
+                OffsetDateTime.now(), Map.of("probe", true)));
+        webhooks.enqueueDelivery(CaseIds.newId(), webhookId, seq);
+        deadLetterEverythingFor(webhookId);
+
+        ResponseEntity<String> deadLetters = client(ADMIN).get()
+                .uri("/case-api/v2/webhooks/{id}/dead-letters", webhookId)
+                .retrieve().toEntity(String.class);
+        assertThat(deadLetters.getStatusCode().value()).isEqualTo(200);
+        assertThat(deadLetters.getBody())
+                .as("the conformance assertion below is vacuous against an empty array")
+                .contains("\"attempts\"").contains("\"event\"").contains("\"failedAt\"");
+
+        assertConforms("/webhooks/{webhookId}/dead-letters", Request.Method.GET, 200,
+                deadLetters.getBody());
+
+        // Negative control: `attempts` is declared an integer, so a string must be rejected. If
+        // this passes, the operation was never resolved and the assertion above proves nothing.
+        assertRejected("/webhooks/{webhookId}/dead-letters", Request.Method.GET, 200,
+                deadLetters.getBody().replaceFirst("\"attempts\":\\d+", "\"attempts\":\"lots\""),
+                "attempts");
+
+        // Second negative control, on the EMBEDDED CloudEvent specifically: it declares
+        // required [id, source, type, specversion], so dropping one must be caught. Without this,
+        // `event` could be any object at all and the conforming assertion would not notice —
+        // which is exactly how the original implementation shipped without `event` at all.
+        assertRejected("/webhooks/{webhookId}/dead-letters", Request.Method.GET, 200,
+                deadLetters.getBody().replaceFirst("\"specversion\":\"1.0\",", ""), "specversion");
+    }
+
+    /** Drains until this subscription's deliveries are all DEAD, so the GET has real rows. */
+    private void deadLetterEverythingFor(String webhookId) {
+        for (int pass = 0; pass < 10 && webhooks.deadLetters(webhookId).isEmpty(); pass++) {
+            dispatcher.drainOnce();
+            jdbc.sql("UPDATE CM_WEBHOOK_DELIVERY SET NEXT_ATTEMPT_AT_ = SYSTIMESTAMP - "
+                    + "INTERVAL '1' HOUR WHERE WEBHOOK_ID_ = :w").param("w", webhookId).update();
+        }
+        assertThat(webhooks.deadLetters(webhookId))
+                .as("the dispatcher must actually have dead-lettered the probe delivery")
+                .isNotEmpty();
     }
 
     // ---- plumbing ----

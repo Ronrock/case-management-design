@@ -111,6 +111,34 @@ public class EventRepository {
             .query(EventRepository::map).list();
     }
 
+    /**
+     * Events by exact sequence number, for callers holding a set of {@code EVENT_SEQ_} references
+     * rather than a cursor — today {@code GET /webhooks/{id}/dead-letters}, which the published
+     * contract requires to embed each undeliverable event's full CloudEvent
+     * ({@code openapi-specs.md:1245}).
+     *
+     * <p>One query with an {@code IN} list, not a lookup per row: the natural alternative is the
+     * {@code after(seq - 1, 1)} trick {@code WebhookDispatcher.deliver} uses for its single row,
+     * and repeating that per dead letter would be a plain N+1 on a listing endpoint. Same
+     * {@code List.copyOf} + {@code IN (:seqs)} shape {@code PlanItemRepository.findByCases} uses.
+     * Returns whatever exists; a caller asking for a seq that is not there (an event purged, or
+     * the "event not found" dead-letter reason the dispatcher itself records) simply gets fewer
+     * rows back, which the caller must handle rather than assume a 1:1 result.
+     *
+     * <p>Unaffected by {@link #after}'s cursor-gap limitation — this addresses rows by primary
+     * key rather than walking a cursor, so there is no "did I skip one" question to answer.
+     */
+    public List<StoredEvent> bySeqs(java.util.Collection<Long> seqs) {
+        if (seqs.isEmpty()) {
+            return List.of();
+        }
+        return jdbc.sql("""
+                SELECT SEQ_, ID_, SOURCE_, TYPE_, SUBJECT_, TENANT_ID_, TIME_, DATA_JSON_
+                FROM CM_EVENT WHERE SEQ_ IN (:seqs) ORDER BY SEQ_""")
+            .param("seqs", List.copyOf(seqs))
+            .query(EventRepository::map).list();
+    }
+
     private static StoredEvent map(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
         return new StoredEvent(rs.getLong("SEQ_"), new CaseEvent(
                 rs.getString("ID_"), rs.getString("SOURCE_"), rs.getString("TYPE_"),

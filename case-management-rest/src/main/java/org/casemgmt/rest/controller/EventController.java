@@ -24,6 +24,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * The event log and webhook subscriptions — the federation surface (spec §6.2).
@@ -157,23 +158,52 @@ public class EventController {
                 .findFirst()
                 .orElseThrow(() -> new NotFoundException("WebhookSubscription", webhookId));
 
-        return webhooks.deadLetters(webhookId).stream()
-                .map(EventController::deadLetterBody)
-                .toList();
+        List<WebhookRepository.DeadLetter> dead = webhooks.deadLetters(webhookId);
+        // The contract embeds each undeliverable event's full CloudEvent, so the events are
+        // resolved here rather than in WebhookService: which REPRESENTATION of an event to embed
+        // is a response-shaping decision, and this class already owns the EventRepository for the
+        // two feeds above. One batched lookup, not one per row.
+        Map<Long, EventRepository.StoredEvent> bySeq =
+                events.bySeqs(dead.stream().map(WebhookRepository.DeadLetter::eventSeq).toList())
+                        .stream()
+                        .collect(Collectors.toMap(EventRepository.StoredEvent::seq, e -> e));
+
+        return dead.stream().map(d -> deadLetterBody(d, bySeq.get(d.eventSeq()))).toList();
     }
 
-    private static Map<String, Object> deadLetterBody(WebhookRepository.DeadLetter d) {
-        // LinkedHashMap, not Map.of: lastStatusCode is genuinely null for a transport-level
-        // failure (and for the signing failure a restart produces), and Map.of throws NPE on a
-        // null value — the same trap already fixed for CM_TASK.OUTCOME_ and several other
-        // response bodies in this codebase.
+    /**
+     * Shaped to {@code openapi-specs.md:1245} — {@code {event, attempts, lastError, failedAt}} —
+     * plus exactly two additions that document themselves in the spec (corrective round; the
+     * first cut of this method was designed from the table's columns rather than from the
+     * contract, and diverged from it in six fields at once):
+     * <ul>
+     *   <li>{@code id} — the delivery row's own identity. The contract's redelivery operation is
+     *       whole-queue ({@code POST .../dead-letters/redeliver}), so it does not need one, but a
+     *       listing whose entries cannot be named is awkward for any operator tooling.</li>
+     *   <li>{@code lastStatusCode} — nullable, and the single most diagnostic field here: null
+     *       means no HTTP status was ever produced, i.e. the delivery died before the request
+     *       went out. That is the exact signature of the restart failure this endpoint exists to
+     *       make visible (see {@code WebhookDispatcher}'s Javadoc), and it is indistinguishable
+     *       from a 5xx once flattened into {@code lastError} prose.</li>
+     * </ul>
+     *
+     * <p>{@code event} may legitimately be absent: a delivery can be dead-lettered precisely
+     * BECAUSE its event could not be found ({@code WebhookDispatcher.deliver} records exactly
+     * that reason), so a null here is real information rather than a lookup bug, and
+     * {@code lastError} says which.
+     */
+    private static Map<String, Object> deadLetterBody(WebhookRepository.DeadLetter d,
+                                                      EventRepository.StoredEvent stored) {
+        // LinkedHashMap, not Map.of: lastStatusCode and event are both genuinely nullable, and
+        // Map.of throws NPE on a null value — the same trap already fixed for CM_TASK.OUTCOME_
+        // and several other response bodies in this codebase.
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", d.id());
-        body.put("webhookId", d.webhookId());
-        body.put("eventSeq", d.eventSeq());
+        body.put("event", stored == null ? null : stored.event().toCloudEvent());
         body.put("attempts", d.attempts());
         body.put("lastStatusCode", d.lastStatusCode());
         body.put("lastError", d.lastError());
+        body.put("failedAt", d.failedAt() == null ? null : d.failedAt().toString());
         return body;
     }
 

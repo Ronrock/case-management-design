@@ -262,6 +262,7 @@ public class WebhookRepository {
         return jdbc.sql("""
                 UPDATE CM_WEBHOOK_DELIVERY SET STATUS_ = 'DEAD', ATTEMPTS_ = ATTEMPTS_ + 1,
                     LAST_STATUS_CODE_ = :code, LAST_ERROR_ = :error,
+                    FAILED_AT_ = SYSTIMESTAMP,
                     CLAIM_TOKEN_ = NULL, CLAIMED_AT_ = NULL
                 WHERE ID_ = :id AND CLAIM_TOKEN_ = :claimToken""")
             .param("code", statusCode, Types.INTEGER).param("error", truncate(error))
@@ -278,18 +279,26 @@ public class WebhookRepository {
      * only what the dispatcher's claim/mark cycle needs, and {@code claimToken} — its one field
      * beyond those below — is always {@code null} here anyway, because {@code mark*} clears it
      * as it finalises the row. A separate record keeps the dispatcher's hot path unchanged.
+     *
+     * <p><b>Field set derived from the published contract</b> (corrective round). The first cut
+     * of this record was designed from what the table happened to have, not from
+     * {@code openapi-specs.md:1245}, which documents {@code {event, attempts, lastError,
+     * failedAt}} — so it shipped two documented fields missing and four undocumented ones
+     * present. {@code eventSeq} stays here (the controller needs it to resolve the CloudEvent the
+     * contract embeds) but is not itself part of the response; {@code webhookId} is gone, being
+     * redundant with the path parameter that selected these rows.
      */
-    public record DeadLetter(String id, String webhookId, long eventSeq, int attempts,
-                             Integer lastStatusCode, String lastError) {}
+    public record DeadLetter(String id, long eventSeq, int attempts,
+                             Integer lastStatusCode, String lastError, OffsetDateTime failedAt) {}
 
     public List<DeadLetter> deadLetters(String webhookId) {
         return jdbc.sql("""
-                SELECT ID_, WEBHOOK_ID_, EVENT_SEQ_, ATTEMPTS_, LAST_STATUS_CODE_, LAST_ERROR_
+                SELECT ID_, EVENT_SEQ_, ATTEMPTS_, LAST_STATUS_CODE_, LAST_ERROR_, FAILED_AT_
                 FROM CM_WEBHOOK_DELIVERY
                 WHERE WEBHOOK_ID_ = :id AND STATUS_ = 'DEAD' ORDER BY EVENT_SEQ_""")
             .param("id", webhookId)
             .query((rs, n) -> new DeadLetter(
-                    rs.getString("ID_"), rs.getString("WEBHOOK_ID_"),
+                    rs.getString("ID_"),
                     rs.getLong("EVENT_SEQ_"), rs.getInt("ATTEMPTS_"),
                     // getObject(Integer.class), NOT getInt: a transport-level failure (connect
                     // refused, timeout, or a signing error raised before the request went out)
@@ -302,7 +311,8 @@ public class WebhookRepository {
                     // WebhookDispatcherTest.aDeadLetterReportsWhyItDiedIncludingAnAbsentHttpStatus,
                     // which asserts null and got 0. getObject has no ordering hazard at all.
                     rs.getObject("LAST_STATUS_CODE_", Integer.class),
-                    rs.getString("LAST_ERROR_")))
+                    rs.getString("LAST_ERROR_"),
+                    rs.getObject("FAILED_AT_", OffsetDateTime.class)))
             .list();
     }
 

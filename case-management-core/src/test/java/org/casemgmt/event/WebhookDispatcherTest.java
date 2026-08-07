@@ -244,13 +244,16 @@ class WebhookDispatcherTest extends OracleTestBase {
         List<WebhookRepository.DeadLetter> dead = webhooks.deadLetters("w-1");
 
         assertThat(dead).hasSize(1);
-        assertThat(dead.get(0).webhookId()).isEqualTo("w-1");
         assertThat(dead.get(0).attempts()).isEqualTo(2);
         assertThat(dead.get(0).lastError()).contains("Could not sign webhook payload");
         assertThat(dead.get(0).lastStatusCode())
                 .as("a failure raised before the request went out has no HTTP status at all — "
                         + "it must be null, never 0")
                 .isNull();
+        // failedAt exists because openapi-specs.md:1245 requires it and no column carried it
+        // (corrective round). It is the field an operator needs to answer "did these all die when
+        // we restarted?", so it must actually be stamped, not left null by markDead.
+        assertThat(dead.get(0).failedAt()).isNotNull();
 
         // Negative control: a real HTTP failure DOES carry its status through the same field,
         // so the null above is discriminating on the absent-status case, not on the column

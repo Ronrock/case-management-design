@@ -50,9 +50,21 @@ public class PocBootstrap {
         // Deviation D1: the brief's own seeding created no tenant group at all. Added so every
         // seeded caller can pass CallerResolver.tenantId — see TENANT_ID's Javadoc.
         createGroup(identity, "tenant:" + TENANT_ID);
+        // Task 27 corrective round: the identity group ActionPolicy.ADMIN_GROUPS gates the three
+        // deployment-wide endpoints on — POST /case-definitions, POST /webhooks and
+        // GET /webhooks/{id}/dead-letters. Until this was added, NO seeded caller held it, so a
+        // third of the API's administration surface was unreachable in the one application whose
+        // job is to be the runnable demonstration of that API, and OpenApiConformanceIT could not
+        // validate those responses against openapi-specs.md at all. Purely additive: no existing
+        // user gains or loses anything, and every authorization expectation those users already
+        // carry is unchanged.
+        createGroup(identity, "admin");
         createUser(identity, "alice", "alice", List.of("intake", "handlers", "tenant:" + TENANT_ID));
         createUser(identity, "bob", "bob", List.of("handlers", "reviewers", "tenant:" + TENANT_ID));
         createUser(identity, "carol", "carol", List.of("reviewers", "tenant:" + TENANT_ID));
+        // Deliberately NOT named "admin": application.yaml seeds Operaton's own admin-user with
+        // exactly that id, and reusing it would collide with the engine's own account.
+        createUser(identity, "olivia", "olivia", List.of("admin", "tenant:" + TENANT_ID));
     }
 
     private void createGroup(IdentityService identity, String id) {

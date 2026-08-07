@@ -1257,10 +1257,27 @@ paths:
                 items:
                   type: object
                   properties:
+                    # `event` is nullable on purpose: a delivery can be dead-lettered precisely
+                    # BECAUSE its event could not be resolved, and `lastError` says so. (Task 27)
                     event: {$ref: '#/components/schemas/CloudEvent'}
                     attempts: {type: integer}
                     lastError: {type: string}
                     failedAt: {type: string, format: date-time}
+                    # Two fields ADDED to this response in Task 27, when the endpoint was first
+                    # implemented. Both are additive, so a client written against the original
+                    # four fields is unaffected.
+                    #
+                    # id: the delivery row's own identity. The redelivery operation below is
+                    # whole-queue and needs no per-row id, but a listing whose entries cannot be
+                    # named is awkward for operator tooling.
+                    #
+                    # lastStatusCode: NULLABLE, and the most diagnostic field here. Null means no
+                    # HTTP status was ever produced — the delivery died before the request went
+                    # out (connect failure, response timeout, or a signing failure). That is the
+                    # exact signature of the post-restart failure documented in FINDINGS.md, and
+                    # it is indistinguishable from a 5xx once flattened into `lastError` prose.
+                    id: {type: string}
+                    lastStatusCode: {type: integer, nullable: true}
 
   /webhooks/{webhookId}/dead-letters/redeliver:
     post:
@@ -1890,6 +1907,25 @@ components:
         subject: {type: string, example: 'eng-a:3f2c...'}
         time: {type: string, format: date-time}
         datacontenttype: {type: string, example: application/json}
+        # The two CloudEvents EXTENSION ATTRIBUTES this system emits, added in Task 27's
+        # corrective round. Both were emitted from the very first implementation and neither was
+        # declared here, which made every CloudEvent this API returns non-conformant against its
+        # own published schema — undetected because no conformance case had ever validated a
+        # CloudEvent until GET /webhooks/{webhookId}/dead-letters embedded one. (Undeclared
+        # properties are an error to swagger-request-validator by default; see the note on the
+        # Page schema.) CloudEvents 1.0 permits extension attributes, so the envelope was always
+        # legal CloudEvents — it just was not what this document said.
+        #
+        # tenantid: emitted by CaseEvent.toCloudEvent whenever the event carries a tenant, and it
+        # is how a federated consumer routes. Lower-case and unpunctuated because CloudEvents
+        # restricts extension attribute names to [a-z0-9].
+        #
+        # cursor: added by GET /events and GET /cases/{caseId}/events only — the row's SEQ_, which
+        # a consumer feeds back as ?after= to resume. Deliberately NOT present on the CloudEvent
+        # embedded in a dead-letter entry, which is a record of a delivery rather than a position
+        # in the feed.
+        tenantid: {type: string}
+        cursor: {type: integer, format: int64}
         data:
           type: object
           additionalProperties: true
