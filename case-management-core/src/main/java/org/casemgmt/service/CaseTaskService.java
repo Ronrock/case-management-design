@@ -145,11 +145,28 @@ public class CaseTaskService {
             // therefore ships as an opaque 500. See InvalidCaseDefinitionException's Javadoc
             // for why a definition-authoring typo is 400-shaped rather than a server fault.
             // The condition detected, and the message, are unchanged.
-            Map<String, Object> schema = definitions.formSchema(c.caseDefKey(), task.formKey())
+            //
+            // Final whole-branch review (Important 1): resolved through the case's own PINNED
+            // definition id, not through CaseDefinitionRepository.formSchema(caseDefKey, ...).
+            // That method is documented tenant-agnostic and picks, across ALL tenants, the row
+            // with the highest VERSION_NO_ — acceptable for the form-rendering GET endpoint it
+            // was written for, and two real defects here, on the server-side write path:
+            //   * version drift — deploying v2 with a new `required` field re-validated every
+            //     in-flight v1 case's task completion against v2, the exact failure versioned
+            //     definitions exist to prevent (every other definition lookup in this codebase
+            //     already resolves the pinned row: CaseService.snapshot uses
+            //     definitions.require(instance.caseDefId()));
+            //   * cross-tenant — tenant t1 at v3 and tenant t2 at v1 meant t2's tasks were
+            //     validated against t1's schema.
+            // CM_CASE.CASE_DEF_ID_ exists precisely to pin the definition; c.caseDefKey() is
+            // kept only for the error message, which names the key a human recognises.
+            Map<String, Object> schema =
+                    definitions.formSchemaOfDefinition(c.caseDefId(), task.formKey())
                     .orElseThrow(() -> new InvalidCaseDefinitionException(c.caseDefKey(),
                             "Task " + taskId + " declares formKey '"
                             + task.formKey() + "' but case definition '" + c.caseDefKey()
-                            + "' has no matching form schema"));
+                            + "' (version " + c.caseDefVersion()
+                            + ") has no matching form schema"));
             formValidator.validate(schema, variables);
         }
 

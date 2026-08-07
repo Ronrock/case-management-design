@@ -147,4 +147,126 @@ class CaseTaskServiceTest extends OracleTestBase {
         assertThat(completed.outcome()).isNull();
         assertThat(tasks.require(completed.id()).outcome()).isNull();
     }
+
+    /**
+     * Final whole-branch review, Important 1, half one: <b>version drift</b>.
+     *
+     * <p>{@code complete} used to resolve the form schema through
+     * {@code CaseDefinitionRepository.formSchema(caseDefKey, formKey)}, which picks the highest
+     * {@code VERSION_NO_} row for the key at the moment of the call. So deploying v2 with a new
+     * {@code required} field silently re-validated every ALREADY-RUNNING v1 case's task
+     * completion against v2 — the exact failure versioned case definitions exist to prevent.
+     * The case row pins its definition in {@code CASE_DEF_ID_}; the fix resolves through it.
+     *
+     * <p>Attribution, not just outcome: the v2 schema requires a field name that appears
+     * NOWHERE in the payload or in v1, so the only way this completion can fail on the form
+     * schema is by having consulted v2. And the assertion is not merely "no exception" — it
+     * pins the task to COMPLETED and the outcome value that only a successful write produces.
+     */
+    @Test
+    void completeValidatesAgainstTheCaseSPinnedDefinitionVersionNotTheLatest() {
+        deploy("""
+                {"key":"drift","name":"Drift","tenantId":"t1",
+                 "forms":{"f":{"type":"object","required":["alpha"],
+                               "properties":{"alpha":{"type":"string"}}}},
+                 "planItems":[
+                   {"defKey":"t","type":"HUMAN_TASK","name":"T","formKey":"f","sortOrder":10}]}""");
+        String v1CaseId = cases.create("drift", "t1", null, "T",
+                CasePriority.MEDIUM, Map.of(), alice).id();
+
+        // v2 lands AFTER the case above is already in flight, and demands a different field.
+        deploy("""
+                {"key":"drift","name":"Drift","tenantId":"t1",
+                 "forms":{"f":{"type":"object","required":["beta"],
+                               "properties":{"beta":{"type":"string"}}}},
+                 "planItems":[
+                   {"defKey":"t","type":"HUMAN_TASK","name":"T","formKey":"f","sortOrder":10}]}""");
+
+        CaseTask t = tasks.findByCase(v1CaseId).get(0);
+        CaseTask claimed = taskService.claim(t.id(), t.version(), alice);
+
+        CaseTask completed = taskService.complete(claimed.id(), claimed.version(),
+                Map.of("alpha", "value", "outcome", "ok"), alice);
+
+        assertThat(completed.state()).isEqualTo(TaskState.COMPLETED);
+        assertThat(completed.outcome()).isEqualTo("ok");
+        assertThat(tasks.require(completed.id()).state()).isEqualTo(TaskState.COMPLETED);
+    }
+
+    /**
+     * Final whole-branch review, Important 1, half two: <b>cross-tenant</b>.
+     *
+     * <p>The old lookup carried no tenant predicate at all, so with tenant t1 at v2 and tenant
+     * t2 at v1 for the same key, a t2 case's task was validated against t1's schema. t1's v2
+     * here requires a field t2's schema does not even declare, so consulting the wrong tenant
+     * is the only way this completion can fail — and t1 is deliberately at the HIGHER version,
+     * which is what made it win the old {@code ORDER BY VERSION_NO_ DESC}.
+     */
+    @Test
+    void completeValidatesAgainstTheCaseSOwnTenantsSchemaNotAnotherTenantsHigherVersion() {
+        // t2: version 1, requires "t2field".
+        deployFor("t2", """
+                {"key":"shared","name":"Shared",
+                 "forms":{"f":{"type":"object","required":["t2field"],
+                               "properties":{"t2field":{"type":"string"}}}},
+                 "planItems":[
+                   {"defKey":"t","type":"HUMAN_TASK","name":"T","formKey":"f","sortOrder":10}]}""");
+        // t1: versions 1 and 2 of the SAME key, requiring a field t2's schema never declares.
+        for (int i = 0; i < 2; i++) {
+            deployFor("t1", """
+                    {"key":"shared","name":"Shared",
+                     "forms":{"f":{"type":"object","required":["t1field"],
+                                   "properties":{"t1field":{"type":"string"}}}},
+                     "planItems":[
+                       {"defKey":"t","type":"HUMAN_TASK","name":"T","formKey":"f","sortOrder":10}]}""");
+        }
+
+        String t2CaseId = cases.create("shared", "t2", null, "T",
+                CasePriority.MEDIUM, Map.of(), alice).id();
+        CaseTask t = tasks.findByCase(t2CaseId).get(0);
+        CaseTask claimed = taskService.claim(t.id(), t.version(), alice);
+
+        CaseTask completed = taskService.complete(claimed.id(), claimed.version(),
+                Map.of("t2field", "value", "outcome", "ok"), alice);
+
+        assertThat(completed.state()).isEqualTo(TaskState.COMPLETED);
+        assertThat(tasks.require(completed.id()).state()).isEqualTo(TaskState.COMPLETED);
+    }
+
+    /**
+     * The negative control for the two tests above: the pinned lookup must still REJECT a
+     * payload that genuinely violates the case's own schema. Without this, both tests above are
+     * satisfied by a "resolve nothing, validate nothing" regression — {@code
+     * formSchemaOfDefinition} returning empty would make them pass and disable validation
+     * entirely (it throws {@code InvalidCaseDefinitionException} rather than silently skipping,
+     * but only for a formKey the definition does not declare, which is not what those two
+     * exercise).
+     */
+    @Test
+    void thePinnedLookupStillRejectsAPayloadThatViolatesTheCaseSOwnSchema() {
+        deploy("""
+                {"key":"drift","name":"Drift","tenantId":"t1",
+                 "forms":{"f":{"type":"object","required":["alpha"],
+                               "properties":{"alpha":{"type":"string"}}}},
+                 "planItems":[
+                   {"defKey":"t","type":"HUMAN_TASK","name":"T","formKey":"f","sortOrder":10}]}""");
+        String driftCaseId = cases.create("drift", "t1", null, "T",
+                CasePriority.MEDIUM, Map.of(), alice).id();
+        CaseTask t = tasks.findByCase(driftCaseId).get(0);
+        CaseTask claimed = taskService.claim(t.id(), t.version(), alice);
+
+        assertThatThrownBy(() -> taskService.complete(claimed.id(), claimed.version(),
+                Map.of("outcome", "ok"), alice))
+                .isInstanceOf(FormValidationException.class);
+        assertThat(tasks.require(claimed.id()).state()).isEqualTo(TaskState.CLAIMED);
+    }
+
+    private void deploy(String json) {
+        deployFor("t1", json);
+    }
+
+    private void deployFor(String tenantId, String json) {
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource()))
+                .deploy(json, "system", tenantId);
+    }
 }

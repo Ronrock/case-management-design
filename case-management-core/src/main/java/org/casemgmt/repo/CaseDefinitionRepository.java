@@ -203,6 +203,18 @@ public class CaseDefinitionRepository {
      * available answer given the interface has no tenant to disambiguate with. Multi-tenant
      * deployments that reuse the same key across tenants remain genuinely ambiguous under this
      * signature — that is a gap in the interface, not something this method can paper over.
+     *
+     * <p><b>READ PATH ONLY — never a write path</b> (final whole-branch review, Important 1).
+     * The one legitimate caller is the form-rendering endpoint
+     * {@code GET /case-definitions/{key}/forms/{formKey}}, which serves a client a field list
+     * for a form it is about to draw. {@code CaseTaskService.complete} used to call this too,
+     * as the server-side validator for task completion, and both of the ambiguities documented
+     * above became real defects there: an in-flight case pinned to v1 had its payload validated
+     * against a v2 schema deployed after it started (the exact failure versioned definitions
+     * exist to prevent), and a case in tenant t2 had its payload validated against tenant t1's
+     * schema. Any caller that is deciding whether a WRITE is legal must resolve the case's own
+     * pinned definition instead — {@code CM_CASE.CASE_DEF_ID_} exists precisely to pin it — via
+     * {@link #formSchemaOfDefinition(String, String)}. Do not "reuse" this method there again.
      */
     @SuppressWarnings("unchecked")
     public Optional<Map<String, Object>> formSchema(String key, String formKey) {
@@ -212,6 +224,31 @@ public class CaseDefinitionRepository {
                 ORDER BY VERSION_NO_ DESC, DEPLOYED_AT_ DESC
                 FETCH FIRST 1 ROWS ONLY""")
                 .param("key", key)
+                .query(String.class).optional()
+                .map(JsonCodec::toMap)
+                .map(forms -> forms.get(formKey))
+                .filter(Map.class::isInstance)
+                .map(o -> (Map<String, Object>) o);
+    }
+
+    /**
+     * The same lookup against ONE exact case-definition row, identified by its primary key —
+     * the form-schema resolver every write path must use (final whole-branch review,
+     * Important 1). {@code CM_CASE_DEF.ID_} is minted per (tenant, key, version) by
+     * {@code CaseDefinitionService.definitionId}, so resolving through it is simultaneously
+     * version-pinned and tenant-scoped: no {@code ORDER BY VERSION_NO_} to drift under a later
+     * deploy, and no cross-tenant row to pick by accident. Callers already hold the id —
+     * {@code CM_CASE.CASE_DEF_ID_} is stamped at case creation and is what
+     * {@code CaseService.snapshot} resolves the whole plan model through.
+     *
+     * <p>Deliberately a separate name rather than an overload of {@link #formSchema}: both take
+     * two {@code String}s, so an overload would be indistinguishable at the call site — exactly
+     * the confusion that produced the defect.
+     */
+    @SuppressWarnings("unchecked")
+    public Optional<Map<String, Object>> formSchemaOfDefinition(String caseDefId, String formKey) {
+        return jdbc.sql("SELECT FORMS_JSON_ FROM CM_CASE_DEF WHERE ID_ = :id")
+                .param("id", caseDefId)
                 .query(String.class).optional()
                 .map(JsonCodec::toMap)
                 .map(forms -> forms.get(formKey))
