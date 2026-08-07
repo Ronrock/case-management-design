@@ -22,7 +22,7 @@ module: core 225, rest 81, engine-embedded 10, engine-remote 11, starter 7, poc-
 |---|---|---|
 | R1 — plan-item state machine | **Held, with changes** | The evaluator works; the spec's CMMN subset under-specified containment, cascade-on-end and criteria-vs-autocompletion, and all three gaps produced real bugs. Two defects remain open. |
 | R2 — Operaton integration | **Held** | Both gateways execute the identical shared contract, and the one silent divergence found is locked by an assertion proven to fail against the old code. |
-| R3 — model-driven contract | **Held for sufficiency, partial by design** | A consumer with zero case-type knowledge drove a case to `CLOSED`. Three contract gaps found; rendering, UX and live-update remain unproven without a UI. |
+| R3 — model-driven contract | **Held for sufficiency, partial by design** | A consumer with zero case-type knowledge drove a case to `CLOSED`. Six contract gaps found; rendering, UX and live-update remain unproven without a UI. |
 | R4 — events and federation | **Split: atomicity held, federation did not** | The transactional outbox is proven under rollback. The pull-recovery path silently loses events under concurrency, which is the half a cross-engine index depends on. |
 
 ---
@@ -177,6 +177,29 @@ command payload — because `planItemId` is structurally unusable for an ad hoc 
 legitimately null. Without that, remote-mode linked processes kept a placeholder UUID while the
 engine held the real id, and `CM_LINKED_PROCESS` stayed `ACTIVE` forever.
 
+### The starter's own contract contradicted itself
+
+`CaseManagementProperties`' Javadoc documents that `casemgmt.enabled=false` *"leaves a plain
+Operaton app completely untouched"*. It did the opposite: **it failed the application at startup.**
+`CaseManagementSchedulers` was conditional only on `casemgmt.schedulers.enabled`, unlike its two
+sibling configurations which both carry the master switch, and its constructor demanded
+`WebhookDispatcher` and `SlaSweeper` as hard, non-`ObjectProvider` dependencies — so with the module
+disabled those beans do not exist and the context dies with `NoSuchBeanDefinitionException`.
+`RemoteEngineAutoConfiguration` had the same gap, reachable by the ordinary combination of
+`casemgmt.enabled=false` left beside a stale `casemgmt.engine.mode=remote`.
+
+This would have fired in **any real consumer application on the default embedded mode** — the one
+setting whose entire purpose is "turn this off safely". The existing auto-configuration test could
+not see it, because its runner never registered `CaseManagementSchedulers` at all. Fixed by stacking
+the master switch onto both classes (verified a genuine AND, not a silent no-op, by checking that
+`@ConditionalOnProperty` is `@Repeatable` and that `OnPropertyCondition` builds separate match and
+no-match lists over the expanded stream).
+
+**Recorded although it was fixed**, because a library whose off switch breaks the host application
+is a contract failure, not a bug: the property's documented behaviour and its implemented behaviour
+had been in direct contradiction since the class was written, and prose was the only place the
+correct behaviour existed.
+
 ### R2 spec changes required
 
 - §3.4 must state that the gateway contract is the equivalence proof and that every declared field
@@ -241,10 +264,14 @@ holds.
 5. **A form key with no matching schema silently skipped validation entirely.** A case-definition
    authoring typo produced no signal at all — arguably the exact silent form-contract failure R3
    exists to catch. Now fails loudly.
-6. **Two enforced action families are never projected.** `listForCollaboration` and
-   `listForAdministration` gate comment / start-process / deploy-definition / subscribe-webhook, but
-   no `GET` body advertises them. A permitted caller can only discover them by being refused
-   something else — the "permitted but never offered" half of the projection/enforcement seam.
+6. **Two enforced action families are never projected — and the enforcement itself arrived late.**
+   `listForCollaboration` and `listForAdministration` gate comment / start-process /
+   deploy-definition / subscribe-webhook, but no `GET` body advertises them, so a permitted caller
+   can only discover them by being refused something else — the "permitted but never offered" half
+   of the projection/enforcement seam. Read that sentence as written and it implies the enforcement
+   was always there. **It was not:** all four of those action families, plus SLA pause/resume, had
+   *no authorization gate at all* when the controllers first shipped. See "Authorization and
+   tenancy" below.
 
 ### A contract test that agrees with itself is not a correctness test
 
@@ -371,8 +398,9 @@ wrong.** R4's federation half is therefore not retired; it is diagnosed.
   and `POST /webhooks` took `tenantId` **verbatim from the request body** — meaning any
   authenticated user could register `https://attacker/` against another tenant and receive that
   tenant's case events continuously. Both closed under a human ruling (tenant derives from the
-  principal, never the body). This is the sharpest security finding in the build and it was not
-  flagged by the implementer.
+  principal, never the body). It was not flagged by the implementer, and it is the sharpest finding
+  on the event and webhook surface — though not the sharpest in the build; see "Authorization and
+  tenancy" immediately below, which is where its companion holes are recorded.
 - **Delivery-row consistency is guaranteed only by the database foreign key**, not by application
   code.
 - **Terminations from the close/cancel sweep used to bypass the event stream entirely** — a plain
@@ -382,6 +410,93 @@ wrong.** R4's federation half is therefore not retired; it is diagnosed.
 - **The sweep still never touches `CM_TASK` rows or the engine.** An optional `ACTIVE` human-task
   item at close or cancel leaves its `CM_TASK` row and the live Operaton task open forever — dead
   work in someone's worklist.
+
+---
+
+## Authorization and tenancy
+
+Grouped together because they share one shape and one cause: **every one of them is a control that
+was assumed to exist, was described in prose as existing, and did not exist in code.** All were
+found by review rather than by a failing test, because a missing gate produces no error — the
+request succeeds. All are fixed; they are recorded because "it works now" is not the finding.
+
+### `/engine-rest` shipped completely unauthenticated
+
+`PocSecurityConfig`'s filter chain ended in `.anyRequest().permitAll()` — the brief's own
+configuration, verbatim — while matching only `/case-api/v2/**` as authenticated. **Operaton's
+entire REST API was therefore reachable on the running application with no credentials at all.**
+Anyone who could reach the port could complete tasks, deploy process definitions and read history
+through `/engine-rest`, bypassing every role check, tenant check and `If-Match` precondition the
+case API enforces — on an application that also seeds a real `admin` user. The case API's whole
+authorization model was, in effect, optional.
+
+It had a second consequence for the PoC's own claims: because the engine required no credentials,
+**the remote gateway's basic-auth path was never actually verified.** The `admin/admin` that
+`RemoteEngineAutoConfiguration.engineRestClient` sends was accepted because everything was accepted.
+A remote-mode test could pass with the credentials wrong, or absent.
+
+**Human ruling: require authentication on `/engine-rest`**, chosen over documenting the hole,
+because it closes it *and* converts an untested code path into a tested one — the remote-mode IT
+then genuinely proves the credentials work, which is part of what "runs in remote mode" ought to
+mean. Both matchers are now `.authenticated()`, and `RemoteModeComplaintIT` gained a wrong-password
+test proving the credentials are load-bearing rather than merely present.
+
+**What guards it now, and why that needed its own work.** The wrong-password test proves credentials
+are *checked*; it does not guard the matcher, because `BasicAuthenticationFilter` rejects a
+malformed-credential `Authorization` header with 401 *before* any authorization rule is consulted.
+Revert the matcher to `permitAll` and that test still passes. `CaseApiIT.engineRestRefusesUnauthenticatedRequests`
+closes it: an unauthenticated `GET /engine-rest/task` must answer 401, which under `permitAll`
+answers 200 instead (verified by reverting the matcher and observing exactly that).
+
+**Fix direction for production:** the deployment should not expose `/engine-rest` at all. Requiring
+authentication makes it as strong as the weakest identity in the engine's own user table; it does
+not restore the case API's role, tenant and precondition checks, which `/engine-rest` still bypasses
+for anyone who *is* authenticated.
+
+### Six mutating endpoints had no authorization gate at all
+
+When the controllers first shipped, `POST /cases/{id}/comments`, milestone achieve, process start,
+SLA pause, SLA resume, `POST /webhooks` and `POST /case-definitions` performed **no authorization
+check whatsoever**. The demonstration is exact, because the test fixture already contained the right
+caller: `carol`, proven by a sibling test to be unable to patch a case's *title*, could comment on
+that case, achieve its milestones, start a BPMN process against it, pause and resume its SLA clocks,
+and — the sharpest two — **register a webhook and deploy a new version of any case definition in the
+system.** A case-definition deploy is not a per-request effect: every future case of that key in that
+tenant instantiates whatever was published.
+
+The webhook and case-definition writes were the two nobody flagged; the implementer had raised the
+first four. Deploying also crossed tenants — the fixture's `dave`, described as a **tenant t2**
+administrator, could publish into t1, because `deploy` read `tenantId` from the request document.
+
+**Human ruling:** extend `ActionPolicy` properly with real rules following the existing shape, with
+agreement tests that exercise **non-privileged roles** — the method that had caught `ActionPolicy`'s
+own earlier Critical. Plus: scope `GET /cases` to the caller's tenant, extended by controller
+decision to `POST /webhooks`, `GET /events` and `GET /webhooks` on the same principle (**derive the
+tenant from the principal, never from the body**). `deploy`'s tenant is now a parameter and the
+document's value is ignored.
+
+This is the companion to the cross-tenant exfiltration recorded under R4 above: same root cause,
+same ruling, different surface.
+
+### The least-privileged user got the broadest worklist
+
+`CaseTaskRepository.worklist(null, List.of(), limit)` dropped the group clause **entirely** and
+returned every `OPEN`/`CLAIMED`/`SYNCED` task in the system — **across tenants**. That is not a
+pathological call: it is precisely what `CaseTaskService.worklist` issues, since the assignee
+argument is always null there and `actor.groups()` is legitimately empty for a user who belongs to
+no group. **So the fewer groups you were in, the more you could see, and a user in none saw
+everything.**
+
+It survived because the shipped tests never exercised the assignee-only, both-present or
+neither-present branches — the defect lived entirely in the untested combinations of a four-way
+branch. Fixed to short-circuit to an empty list before any SQL is built, with assignee and groups
+`OR`ed (they had been `AND`ed, contradicting the `OR` semantics `ActionPolicy` applies to the same
+"mine or pickable" question) and full branch coverage added.
+
+**The transferable shape:** *a filter assembled by appending optional predicates degrades to "no
+filter" when every predicate is absent, and "no filter" on a security-relevant query means "return
+everything".* The safe default for an authorization-shaped filter is deny, and it has to be written
+explicitly, before the query is built.
 
 ---
 
@@ -401,6 +516,19 @@ finding because it is the most portable thing the exercise learned.
 | 6 | 24 | Two-tenant definition isolation (self-caught) | It distinguished the tenants by display `name`, but `PlanItem.name` derives from `defKey`, so both tenants produced identical plan items |
 | 7 | 25 | The `@Import(TransactionManagerConfig)` test | It asked whether `@Transactional` was *resolvable* on the class — a property of the type hierarchy that holds with or without a transaction manager. It never asserted the bean was **proxied** |
 | 8 | 26 | The `manualActivation` discovery branch in `GenericConsumerIT` | A `STAGE`/`HUMAN_TASK` type guard `continue`d before the branch was reachable for any item this case type marks discretionary. The report had quoted it as one of four decisive proofs |
+
+**And the largest instance of all was not a test at all — it was a whole test category.** The root
+POM declared a `maven-failsafe-plugin` execution that **no module ever bound**. So `*IT` classes
+matched neither surefire's default includes (`**/*Test.java`, `**/*Tests.java`, `**/*TestCase.java`)
+nor any active execution: they were compiled, and then **silently skipped, with `BUILD SUCCESS` and
+no "Tests run" line at all** — not "0 tests", not a skip notice, nothing to notice. Discovered in
+Task 11 and fixed centrally by making surefire run `**/*IT.java` reactor-wide under `test` and
+deleting the dead declaration. Tasks 24, 26 and 27 are entirely `*IT`-based and would all have been
+affected; **this document's own "351 tests green" claim depends on that fix**, which is why it is
+recorded here and not only in `pom.xml`'s comment. It is the same failure as the eight above, one
+level up: a mechanism that reports success while protecting nothing, invisible because the report
+looks exactly like the report you expect. The generalisation: **a green build is evidence only about
+the tests that ran, and the count is the only thing that says which those were.**
 
 **The root cause is one thing.** These tests were written **by inspection** — reasoning about what
 *should* be true — without simulating the path that actually produces the assertion. That method
@@ -517,7 +645,7 @@ published document. The first run reported seven distinct mismatches across thre
 | `Task.state`, `Task.engineSync`, `Task.version` | All three emitted, all undeclared. `engineSync` is a PoC-only addition (D3) and is what tells a client why `availableActions[]` is empty | Added, with `engineSync` marked as the deviation it is |
 | `Case.businessKey/assignee/queueId/initiator`, `Task.formKey`, `AvailableAction.formKey` | Declared `type: string`; the API emits explicit `null` | `nullable: true` added |
 | `Case.updatedAt` | Declared; `CaseResponse` carries `createdAt` and `closedAt` but no `updatedAt`, though `CM_CASE.UPDATED_AT_` exists and is maintained | Left declared, marked NOT IMPLEMENTED. A client cannot tell when a case last changed |
-| The `Page` envelope, all 7 usages | `allOf: [Page, {properties: {items}}]` **has no satisfiable instance** under any validator that treats undeclared properties as errors: subschema 0 rejects `items`, subschema 1 rejects `page`/`pageSize`. `allOf` and implicit `additionalProperties: false` are mutually hostile in OpenAPI 3.0 | `additionalProperties: true` on `Page` and on each inline subschema. Noted in the spec that a production document should declare concrete per-collection page components, which keeps strictness *and* typing |
+| The `Page` envelope, all 7 usages | `allOf: [Page, {properties: {items}}]` **has no satisfiable instance under any validator that treats undeclared properties as errors** — subschema 0 rejects `items`, subschema 1 rejects `page`/`pageSize`. It *is* satisfiable under bare JSON Schema, where `additionalProperties` defaults to true, so this is a validator-strictness-dependent defect and not an unconditional one. It matters because strictness is what makes the rest of this table's findings detectable at all: relax it and the undeclared `outcome`, `version`, `state` and `engineSync` fields above go unnoticed. `allOf` and implicit `additionalProperties: false` are mutually hostile in OpenAPI 3.0 | `additionalProperties: true` on `Page` and on each inline subschema. Noted in the spec that a production document should declare concrete per-collection page components, which keeps strictness *and* typing |
 
 Two contract deviations were also resolved **towards** the spec during Task 24, on a controller
 decision the human partner was given the reasoning for: the `Page` envelope was adopted over a bare

@@ -43,9 +43,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * JDBC connection to the same container, from an {@code @AfterEach} that runs whether the test
  * passed, failed, or threw. Using the seeding path as the cleanup path would have made cleanup
  * fail in precisely the scenario cleanup exists for — a broken repair mechanism — so the restore
- * shares no code with the thing under test. Both statements are idempotent (guarded by
- * {@code WHERE NOT EXISTS} / a row-existence check), so a successful run, where {@code PocBootstrap}
- * has already repaired everything, restores nothing and duplicates nothing.
+ * shares no code with the thing under test. Both statements are made idempotent <b>in SQL</b>
+ * ({@code WHERE NOT EXISTS}) rather than skipped in Java, so both genuinely execute on every run —
+ * affecting zero rows on the happy path, where {@code PocBootstrap} has already repaired everything
+ * — and the restore then asserts its own postcondition. A Java-side skip would have meant the
+ * restore's only proof of correctness was a one-off strip transcript.
  */
 class PocBootstrapRepairIT {
 
@@ -113,8 +115,13 @@ class PocBootstrapRepairIT {
 
     /**
      * Puts back exactly what this class deleted, over raw JDBC, whatever happened above. Runs
-     * even when the test failed — that is the whole point — and is a no-op on the happy path,
-     * where {@code PocBootstrap} has already restored both rows.
+     * even when the test failed — that is the whole point — and affects no rows on the happy path,
+     * where {@code PocBootstrap} has already restored both.
+     *
+     * <p>Both statements are issued unconditionally and made idempotent in SQL rather than skipped
+     * in Java, so they are genuinely executed on every run and a malformed one fails immediately
+     * instead of only on the failure path. It then {@linkplain #assertRestored asserts its own
+     * postcondition}.
      */
     @AfterEach
     void restoreDamage() throws Exception {
@@ -138,17 +145,59 @@ class PocBootstrapRepairIT {
                 }
             }
 
-            if (deletedSlaTarget != null && !rowExists(connection, SLA_TARGET_ID)) {
+            if (deletedSlaTarget != null) {
+                // Idempotence is expressed in SQL (WHERE NOT EXISTS), not in Java, ON PURPOSE.
+                // A Java-side "skip if the row is already back" check would mean this statement
+                // never executes on a passing run — PocBootstrap has repaired the row by then — so
+                // a wrong column name, a wrong table or a bad bind would only ever surface on the
+                // failure path this restore exists for, which is the worst possible place to
+                // discover it. Issued unconditionally, it is parsed and executed by Oracle on every
+                // run and affects zero rows on the happy path. NOT a DELETE-then-INSERT: CM_SLA_RECORD
+                // has a foreign key onto this table (db-design.sql:324).
                 List<String> columns = new ArrayList<>(deletedSlaTarget.keySet());
-                String sql = "INSERT INTO CM_SLA_TARGET (" + String.join(", ", columns) + ") VALUES ("
-                        + String.join(", ", columns.stream().map(c -> "?").toList()) + ")";
+                String placeholders = String.join(", ", columns.stream().map(c -> "?").toList());
+                String sql = "INSERT INTO CM_SLA_TARGET (" + String.join(", ", columns) + ")"
+                        + " SELECT " + placeholders + " FROM DUAL"
+                        + " WHERE NOT EXISTS (SELECT 1 FROM CM_SLA_TARGET WHERE ID_ = ?)";
                 try (PreparedStatement statement = connection.prepareStatement(sql)) {
                     for (int i = 0; i < columns.size(); i++) {
                         statement.setObject(i + 1, deletedSlaTarget.get(columns.get(i)));
                     }
+                    statement.setString(columns.size() + 1, SLA_TARGET_ID);
                     statement.executeUpdate();
                 }
             }
+
+            assertRestored(connection);
+        }
+    }
+
+    /**
+     * The restore verifies its own postcondition rather than trusting that it ran. Without this,
+     * a restore that silently did nothing would leave the schema damaged and the only signal would
+     * be unrelated classes failing later with 403s for {@code alice} — a failure that points
+     * nowhere near this class. Stated as an {@code AssertionError} naming exactly what is still
+     * missing.
+     */
+    private void assertRestored(Connection connection) throws Exception {
+        if (membershipDeleted) {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM ACT_ID_MEMBERSHIP WHERE USER_ID_ = ? AND GROUP_ID_ = ?")) {
+                statement.setString(1, ALICE);
+                statement.setString(2, TENANT_GROUP);
+                try (ResultSet rs = statement.executeQuery()) {
+                    rs.next();
+                    if (rs.getInt(1) != 1) {
+                        throw new AssertionError("Restore left the shared schema damaged: " + ALICE
+                                + " is still missing group " + TENANT_GROUP
+                                + ", so every later class in this JVM will see 403 for that user");
+                    }
+                }
+            }
+        }
+        if (deletedSlaTarget != null && !rowExists(connection, SLA_TARGET_ID)) {
+            throw new AssertionError("Restore left the shared schema damaged: CM_SLA_TARGET row '"
+                    + SLA_TARGET_ID + "' is still missing");
         }
     }
 
