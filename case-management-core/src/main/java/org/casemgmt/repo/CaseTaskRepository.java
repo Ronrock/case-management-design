@@ -104,7 +104,7 @@ public class CaseTaskRepository {
      * relevant, from the same caller).</li>
      * </ul>
      */
-    public List<CaseTask> worklist(String assignee, List<String> groups, int limit) {
+    public List<CaseTask> worklist(String tenantId, String assignee, List<String> groups, int limit) {
         boolean hasAssignee = assignee != null;
         boolean hasGroups = groups != null && !groups.isEmpty();
 
@@ -118,7 +118,18 @@ public class CaseTaskRepository {
                     WHERE jt.g IN (:groups))""";
 
         StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_TASK t\n"
-                + "WHERE STATE_ IN ('OPEN','CLAIMED') AND ENGINE_SYNC_ = 'SYNCED'\n  AND ");
+                + "WHERE STATE_ IN ('OPEN','CLAIMED') AND ENGINE_SYNC_ = 'SYNCED'\n");
+        // Tenant predicate (Task 24 fix round 1, review finding Critical: no tenant scoping
+        // anywhere). CM_TASK carries no TENANT_ID_ of its own, so the tenant has to come from
+        // the owning case. Without this, identity groups are global: a user of tenant B who
+        // happens to be in a group named "reviewers" saw — and could claim — tenant A's tasks.
+        // A null tenantId means "do not filter", which is what the repository-level tests and
+        // any cross-tenant tooling pass; nothing reachable from HTTP may pass null.
+        if (tenantId != null) {
+            sql.append("  AND EXISTS (SELECT 1 FROM CM_CASE c"
+                    + " WHERE c.ID_ = t.CASE_ID_ AND c.TENANT_ID_ = :tenantId)\n");
+        }
+        sql.append("  AND ");
         if (hasAssignee && hasGroups) {
             sql.append("(ASSIGNEE_ = :assignee OR ").append(groupPredicate).append(")\n");
         } else if (hasAssignee) {
@@ -129,6 +140,7 @@ public class CaseTaskRepository {
         sql.append("ORDER BY CREATED_AT_ FETCH FIRST :limit ROWS ONLY");
 
         StatementSpec spec = jdbc.sql(sql.toString());
+        if (tenantId != null) spec = spec.param("tenantId", tenantId);
         if (hasAssignee) spec = spec.param("assignee", assignee);
         if (hasGroups) spec = spec.param("groups", groups);
         return spec.param("limit", limit).query(CaseTaskRepository::map).list();

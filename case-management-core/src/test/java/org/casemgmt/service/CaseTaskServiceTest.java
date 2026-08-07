@@ -45,7 +45,7 @@ class CaseTaskServiceTest extends OracleTestBase {
 
     @Test
     void worklistReturnsCandidateGroupTasks() {
-        assertThat(taskService.worklist(alice, 20)).extracting(CaseTask::name).contains("Review");
+        assertThat(taskService.worklist(null, alice, 20)).extracting(CaseTask::name).contains("Review");
     }
 
     @Test

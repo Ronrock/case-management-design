@@ -77,6 +77,30 @@ public class EventRepository {
             .query(EventRepository::map).list();
     }
 
+    /**
+     * {@link #after}, restricted to one tenant.
+     *
+     * <p>Added by Task 24 fix round 1 (review finding, Critical): {@code GET /case-api/v2/events}
+     * used {@link #after} and therefore streamed every CloudEvent in the deployment to any
+     * authenticated caller, across every tenant. The filter belongs in the query, not in the
+     * controller — filtering after the fetch would still read other tenants' rows and would
+     * silently under-fill each page.
+     *
+     * <p>Same cursor-gap limitation as {@link #after}: see its Javadoc. A null {@code tenantId}
+     * is not "all tenants" here — it matches only the untenanted rows, the same way every other
+     * tenant predicate in this schema treats NULL.
+     */
+    public List<StoredEvent> afterForTenant(String tenantId, long cursor, int limit) {
+        return jdbc.sql("""
+                SELECT SEQ_, ID_, SOURCE_, TYPE_, SUBJECT_, TENANT_ID_, TIME_, DATA_JSON_
+                FROM CM_EVENT
+                WHERE SEQ_ > :cursor
+                  AND (TENANT_ID_ = :tenant OR (:tenant IS NULL AND TENANT_ID_ IS NULL))
+                ORDER BY SEQ_ FETCH FIRST :limit ROWS ONLY""")
+            .param("tenant", tenantId).param("cursor", cursor).param("limit", limit)
+            .query(EventRepository::map).list();
+    }
+
     /** Same cursor-gap limitation as {@link #after} — see its Javadoc. */
     public List<StoredEvent> forCase(String caseId, long cursor, int limit) {
         return jdbc.sql("""

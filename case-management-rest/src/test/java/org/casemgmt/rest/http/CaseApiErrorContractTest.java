@@ -29,7 +29,7 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
         Map<String, Object> created = deployAndCreateCase();
 
         ResponseEntity<Map> response = alice().patch().uri("/cases/{id}", created.get("id"))
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "New title"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "New title"))
                 .retrieve().toEntity(Map.class);
 
         assertThat(response.getStatusCode().value()).isEqualTo(428);
@@ -46,12 +46,12 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
         String id = (String) created.get("id");
 
         ResponseEntity<Map> first = alice().patch().uri("/cases/{id}", id).header("If-Match", "\"0\"")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "One"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "One"))
                 .retrieve().toEntity(Map.class);
         assertThat(first.getStatusCode().value()).isEqualTo(200);
 
         ResponseEntity<Map> stale = alice().patch().uri("/cases/{id}", id).header("If-Match", "\"0\"")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "Two"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "Two"))
                 .retrieve().toEntity(Map.class);
 
         assertThat(stale.getStatusCode().value()).isEqualTo(412);
@@ -65,7 +65,7 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
 
         ResponseEntity<Map> response = alice().patch().uri("/cases/{id}", created.get("id"))
                 .header("If-Match", "\"not-a-version\"")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "X"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "X"))
                 .retrieve().toEntity(Map.class);
 
         assertThat(response.getStatusCode().value()).isEqualTo(400);
@@ -85,11 +85,11 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
 
         // Move the version away from 0 so "*" cannot be passing by coincidence.
         alice().patch().uri("/cases/{id}", id).header("If-Match", "\"0\"")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "One"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "One"))
                 .retrieve().toEntity(Map.class);
 
         ResponseEntity<Map> wildcard = alice().patch().uri("/cases/{id}", id).header("If-Match", "*")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "Two"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "Two"))
                 .retrieve().toEntity(Map.class);
 
         assertThat(wildcard.getStatusCode().value()).isEqualTo(200);
@@ -110,7 +110,7 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
 
         ResponseEntity<Map> response = alice().patch().uri("/cases/{id}", "eng-test:does-not-exist")
                 .header("If-Match", "*")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "X"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "X"))
                 .retrieve().toEntity(Map.class);
 
         assertThat(response.getStatusCode().value()).isEqualTo(412);
@@ -121,7 +121,7 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
         // above is genuinely the wildcard rule and not "missing case always answers 412".
         ResponseEntity<Map> concrete = alice().patch().uri("/cases/{id}", "eng-test:does-not-exist")
                 .header("If-Match", "\"0\"")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "X"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "X"))
                 .retrieve().toEntity(Map.class);
         assertThat(concrete.getStatusCode().value()).isEqualTo(404);
         assertThat(concrete.getBody()).containsEntry("code", "not-found");
@@ -229,6 +229,98 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
                 .containsEntry("code", "case-definition-invalid")
                 .containsEntry("caseDefinitionKey", "dangling-form");
         assertThat((String) completed.getBody().get("detail")).contains("noSuchForm");
+    }
+
+    /**
+     * Fix round 1, review finding I5. {@code CasePriority.valueOf(...)} was called directly, so
+     * a bad enum raised a bare {@code IllegalArgumentException} — which the handler deliberately
+     * does not map — and shipped as a 500. That is the same defect shape as carried finding C2,
+     * reintroduced one layer up in the controller.
+     */
+    @Test
+    void anUnknownEnumValueIsAClientErrorNamingTheLegalOnes() {
+        deployDefinition();
+
+        ResponseEntity<Map> badPriority = alice().post().uri("/cases")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("caseDefinitionKey", DEFINITION_KEY, "tenantId", TENANT,
+                        "title", "T", "priority", "URGENT"))
+                .retrieve().toEntity(Map.class);
+
+        assertThat(badPriority.getStatusCode().value())
+                .as("a bad enum must not surface as a 500").isEqualTo(400);
+        assertThat(badPriority.getHeaders().getContentType())
+                .isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(badPriority.getBody()).containsEntry("code", "invalid-request");
+        assertThat((String) badPriority.getBody().get("detail"))
+                .contains("URGENT").contains("priority").contains("MEDIUM");
+
+        // The same shape on the query side, which the controller now parses itself rather than
+        // leaving to Spring's binder (whose 400 would prove nothing about this controller).
+        ResponseEntity<Map> badState = alice().get().uri("/cases?state=BOGUS")
+                .retrieve().toEntity(Map.class);
+        assertThat(badState.getStatusCode().value()).isEqualTo(400);
+        assertThat(badState.getBody()).containsEntry("code", "invalid-request");
+        assertThat((String) badState.getBody().get("detail")).contains("BOGUS").contains("ACTIVE");
+
+        // A legal value on the same parameter still works, so the 400 is the value and not the
+        // parameter being rejected outright.
+        assertThat(alice().get().uri("/cases?state=ACTIVE").retrieve().toEntity(Map.class)
+                .getStatusCode().value()).isEqualTo(200);
+    }
+
+    /**
+     * {@code PATCH /cases/{id}} declares {@code consumes = application/merge-patch+json} per the
+     * spec (fix round 1, I6). Asserted so the media type in the controller and the one every
+     * other test sends cannot silently drift apart.
+     */
+    @Test
+    void patchDeclaresTheMergePatchMediaTypeAndRejectsPlainJson() {
+        Map<String, Object> created = deployAndCreateCase();
+        String id = (String) created.get("id");
+
+        ResponseEntity<String> wrongType = alice().patch().uri("/cases/{id}", id)
+                .header("If-Match", "\"0\"")
+                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "One"))
+                .retrieve().toEntity(String.class);
+        assertThat(wrongType.getStatusCode().value()).isEqualTo(415);
+
+        ResponseEntity<Map> rightType = alice().patch().uri("/cases/{id}", id)
+                .header("If-Match", "\"0\"")
+                .contentType(MERGE_PATCH).body(Map.of("title", "One"))
+                .retrieve().toEntity(Map.class);
+        assertThat(rightType.getStatusCode().value()).isEqualTo(200);
+    }
+
+    /**
+     * The spec declares {@code If-Match} on milestone achieve and process start (fix round 1,
+     * I6). Neither sub-resource carries a version of its own, so it is enforced against the
+     * case's — a real precondition, not a header read and discarded.
+     */
+    @Test
+    void milestoneAchieveAndProcessStartRequireAndEnforceIfMatch() {
+        Map<String, Object> created = deployAndCreateCase();
+        String caseId = (String) created.get("id");
+
+        ResponseEntity<Map> noHeader = alice().post().uri("/cases/{id}/processes", caseId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("processDefinitionKey", "some-process"))
+                .retrieve().toEntity(Map.class);
+        assertThat(noHeader.getStatusCode().value()).isEqualTo(428);
+        assertThat(noHeader.getBody()).containsEntry("code", "if-match-required");
+
+        ResponseEntity<Map> staleHeader = alice().post().uri("/cases/{id}/processes", caseId)
+                .header("If-Match", "\"7\"")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("processDefinitionKey", "some-process"))
+                .retrieve().toEntity(Map.class);
+        assertThat(staleHeader.getStatusCode().value()).isEqualTo(412);
+        assertThat(staleHeader.getBody()).containsEntry("code", "version-conflict");
+
+        assertThat(alice().post().uri("/cases/{id}/processes", caseId).header("If-Match", "\"0\"")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("processDefinitionKey", "some-process"))
+                .retrieve().toEntity(Map.class).getStatusCode().value()).isEqualTo(201);
     }
 
     private Map<String, Object> openTask(String caseId) {

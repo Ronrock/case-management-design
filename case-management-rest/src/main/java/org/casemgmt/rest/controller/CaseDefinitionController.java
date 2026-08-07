@@ -4,6 +4,8 @@ import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.rest.CallerResolver;
+import org.casemgmt.rest.policy.ActionPolicy;
+import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseDefinitionService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -37,17 +39,26 @@ public class CaseDefinitionController {
 
     private final CaseDefinitionService service;
     private final CaseDefinitionRepository repo;
+    private final ActionPolicy policy;
     private final CallerResolver callers;
 
     public CaseDefinitionController(CaseDefinitionService service, CaseDefinitionRepository repo,
-                                    CallerResolver callers) {
+                                    ActionPolicy policy, CallerResolver callers) {
         this.service = service;
         this.repo = repo;
+        this.policy = policy;
         this.callers = callers;
     }
 
     /**
-     * Takes the raw request body as a {@code String} — {@code CaseDefinitionService.deploy}
+     * Deploying rewrites how every future case of a type behaves, so it is gated on
+     * {@code ActionPolicy}'s administration rule (fix round 1, Critical 1 — this endpoint was
+     * previously reachable by any authenticated caller, who could therefore publish a new version
+     * of ANY case definition in the deployment). It is not case-scoped, so there is no
+     * participant row to consult: the gate is an identity group, which is the only vocabulary
+     * that exists above a single case.
+     *
+     * <p>Takes the raw request body as a {@code String} — {@code CaseDefinitionService.deploy}
      * parses it itself with core's Jackson 2 {@code JsonCodec}, and handing it a string keeps
      * the two Jackson generations on the classpath from meeting: nothing here binds the
      * definition document through Spring's Jackson 3 converters and back.
@@ -55,7 +66,9 @@ public class CaseDefinitionController {
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> deploy(@RequestBody String definitionJson,
                                                       Authentication authentication) {
-        CaseDefinition deployed = service.deploy(definitionJson, callers.actor(authentication).userId());
+        Actor actor = callers.actor(authentication);
+        policy.assertMayAdminister(callers.groups(actor), "deploy-case-definition");
+        CaseDefinition deployed = service.deploy(definitionJson, actor.userId());
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", deployed.id());
         body.put("key", deployed.key());
@@ -72,8 +85,10 @@ public class CaseDefinitionController {
      * without case-type constants anywhere in this module).
      */
     @GetMapping
-    public List<Map<String, Object>> list(@RequestParam(required = false) String tenantId) {
-        return repo.listLatest(tenantId).stream().map(def -> {
+    public List<Map<String, Object>> list(@RequestParam(required = false) String tenantId,
+                                          Authentication authentication) {
+        String tenant = callers.requireTenant(callers.actor(authentication), tenantId);
+        return repo.listLatest(tenant).stream().map(def -> {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("id", def.id());
             row.put("key", def.key());
@@ -86,8 +101,10 @@ public class CaseDefinitionController {
 
     @GetMapping("/{key}")
     public Map<String, Object> get(@PathVariable String key,
-                                   @RequestParam(required = false) String tenantId) {
-        CaseDefinition def = repo.findLatest(key, tenantId)
+                                   @RequestParam(required = false) String tenantId,
+                                   Authentication authentication) {
+        String tenant = callers.requireTenant(callers.actor(authentication), tenantId);
+        CaseDefinition def = repo.findLatest(key, tenant)
                 .orElseThrow(() -> new NotFoundException("CaseDefinition", key));
 
         Map<String, Object> body = new LinkedHashMap<>();
@@ -114,6 +131,15 @@ public class CaseDefinitionController {
         return body;
     }
 
+    /**
+     * Known tenant-scoping gap, declared rather than papered over: {@code formSchema(key,
+     * formKey)} is deliberately tenant-agnostic in the repository (see its Javadoc — the
+     * interface has no tenant to disambiguate with, and picking the highest version across all
+     * tenants is the best available answer). A form schema is a rendering contract, not case
+     * data, so the exposure is a definition author's field list rather than anyone's records —
+     * but closing it properly means changing that repository signature, which is Task 5's shape
+     * of work, not a filter improvised here.
+     */
     @GetMapping("/{key}/forms/{formKey}")
     public Map<String, Object> form(@PathVariable String key, @PathVariable String formKey) {
         return repo.formSchema(key, formKey)

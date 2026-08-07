@@ -1,12 +1,18 @@
 package org.casemgmt.rest.http;
 
+import org.casemgmt.repo.MilestoneRepository;
+import org.casemgmt.repo.SlaRepository;
+import org.casemgmt.service.Actor;
+import org.casemgmt.sla.SlaService;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.RestClient;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -31,6 +37,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SuppressWarnings({"rawtypes", "unchecked"})
 class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
 
+    @Autowired SlaRepository slaRepo;
+    @Autowired SlaService slaService;
+    @Autowired MilestoneRepository milestoneRepo;
+
     @Test
     void aNonParticipantCanReadACaseButIsOfferedNoActionsAndRefusedThemAll() {
         Map<String, Object> created = deployAndCreateCase();
@@ -48,7 +58,7 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
 
         ResponseEntity<Map> patch = client("carol").patch().uri("/cases/{id}", id)
                 .header("If-Match", "\"0\"")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "Hijacked"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "Hijacked"))
                 .retrieve().toEntity(Map.class);
         assertThat(patch.getStatusCode().value()).isEqualTo(409);
         assertThat(patch.getBody()).containsEntry("code", "action-not-available");
@@ -71,7 +81,7 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         // about the request being malformed or the case being unpatchable.
         ResponseEntity<Map> ownersPatch = alice().patch().uri("/cases/{id}", id)
                 .header("If-Match", "\"0\"")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "Hijacked"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "Hijacked"))
                 .retrieve().toEntity(Map.class);
         assertThat(ownersPatch.getStatusCode().value()).isEqualTo(200);
     }
@@ -202,6 +212,224 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         // answer from every ActionPolicy refusal above — which is what makes those refusals
         // attributable to the policy.
         assertThat(response.getStatusCode().value()).isEqualTo(401);
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Fix round 1, Critical 1: six mutating endpoints had no ActionPolicy gate at all.
+    // carol is authenticated, in the right tenant, and holds nothing else; alice's identical
+    // request on the same URL with the same body must succeed, so a refusal can never be a
+    // routing artefact or a filter-chain 403.
+    // ---------------------------------------------------------------------------------
+
+    @Test
+    void aNonParticipantCannotCommentOnACase() {
+        Map<String, Object> created = deployAndCreateCase();
+        String caseId = (String) created.get("id");
+        Map<String, Object> body = Map.of("text", "Injected", "visibility", "internal");
+
+        ResponseEntity<Map> refused = client("carol").post().uri("/cases/{id}/comments", caseId)
+                .contentType(MediaType.APPLICATION_JSON).body(body)
+                .retrieve().toEntity(Map.class);
+        assertThat(refused.getStatusCode().value()).isEqualTo(409);
+        assertThat(refused.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(refused.getBody()).containsEntry("code", "action-not-available");
+
+        // Nothing was written.
+        assertThat((List<?>) alice().get().uri("/cases/{id}/comments", caseId)
+                .retrieve().toEntity(List.class).getBody()).isEmpty();
+
+        ResponseEntity<Map> allowed = alice().post().uri("/cases/{id}/comments", caseId)
+                .contentType(MediaType.APPLICATION_JSON).body(body)
+                .retrieve().toEntity(Map.class);
+        assertThat(allowed.getStatusCode().value()).isEqualTo(201);
+    }
+
+    @Test
+    void aNonParticipantCannotAchieveAMilestone() {
+        Map<String, Object> created = deployAndCreateCase();
+        String caseId = (String) created.get("id");
+        String planItemId = (String) planItems(caseId).stream()
+                .filter(i -> "MILESTONE".equals(i.get("type"))).findFirst().orElseThrow().get("id");
+        String milestoneId = "ms-" + UUID.randomUUID();
+        milestoneRepo.insert(milestoneId, caseId, planItemId, "Checkpoint");
+
+        ResponseEntity<Map> refused = client("carol").post()
+                .uri("/cases/{c}/milestones/{m}/achieve", caseId, milestoneId)
+                .header("If-Match", "\"0\"").retrieve().toEntity(Map.class);
+        assertThat(refused.getStatusCode().value()).isEqualTo(409);
+        assertThat(refused.getBody()).containsEntry("code", "action-not-available");
+
+        assertThat(milestone(caseId, milestoneId)).containsEntry("achieved", false);
+
+        ResponseEntity<Map> allowed = alice().post()
+                .uri("/cases/{c}/milestones/{m}/achieve", caseId, milestoneId)
+                .header("If-Match", "\"0\"").retrieve().toEntity(Map.class);
+        assertThat(allowed.getStatusCode().value()).isEqualTo(200);
+        assertThat(allowed.getBody()).containsEntry("achieved", true);
+    }
+
+    @Test
+    void aNonParticipantCannotStartABpmnProcessAgainstACase() {
+        Map<String, Object> created = deployAndCreateCase();
+        String caseId = (String) created.get("id");
+        Map<String, Object> body = Map.of("processDefinitionKey", "some-process");
+
+        ResponseEntity<Map> refused = client("carol").post().uri("/cases/{id}/processes", caseId)
+                .header("If-Match", "\"0\"")
+                .contentType(MediaType.APPLICATION_JSON).body(body)
+                .retrieve().toEntity(Map.class);
+        assertThat(refused.getStatusCode().value()).isEqualTo(409);
+        assertThat(refused.getBody()).containsEntry("code", "action-not-available");
+
+        assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseId)
+                .retrieve().toEntity(List.class).getBody()).isEmpty();
+
+        ResponseEntity<Map> allowed = alice().post().uri("/cases/{id}/processes", caseId)
+                .header("If-Match", "\"0\"")
+                .contentType(MediaType.APPLICATION_JSON).body(body)
+                .retrieve().toEntity(Map.class);
+        assertThat(allowed.getStatusCode().value()).isEqualTo(201);
+    }
+
+    @Test
+    void aNonParticipantCannotPauseOrResumeAnSlaClock() {
+        Map<String, Object> created = deployAndCreateCase();
+        String caseId = (String) created.get("id");
+        givenARunningSlaClock(caseId);
+        Map<String, Object> record = slaRecords(caseId).get(0);
+        String slaId = (String) record.get("id");
+        String etag = "\"" + ((Number) record.get("version")).longValue() + "\"";
+
+        ResponseEntity<Map> refused = client("carol").post()
+                .uri("/cases/{c}/slas/{s}/pause", caseId, slaId).header("If-Match", etag)
+                .contentType(MediaType.APPLICATION_JSON).body(Map.of("reason", "no"))
+                .retrieve().toEntity(Map.class);
+        assertThat(refused.getStatusCode().value()).isEqualTo(409);
+        assertThat(refused.getBody()).containsEntry("code", "action-not-available");
+        assertThat(slaRecords(caseId).get(0)).containsEntry("status", "RUNNING");
+
+        ResponseEntity<Map> paused = alice().post()
+                .uri("/cases/{c}/slas/{s}/pause", caseId, slaId).header("If-Match", etag)
+                .contentType(MediaType.APPLICATION_JSON).body(Map.of("reason", "waiting"))
+                .retrieve().toEntity(Map.class);
+        assertThat(paused.getStatusCode().value()).isEqualTo(200);
+
+        ResponseEntity<Map> refusedResume = client("carol").post()
+                .uri("/cases/{c}/slas/{s}/resume", caseId, slaId)
+                .header("If-Match", paused.getHeaders().getETag())
+                .retrieve().toEntity(Map.class);
+        assertThat(refusedResume.getStatusCode().value()).isEqualTo(409);
+        assertThat(slaRecords(caseId).get(0)).containsEntry("status", "PAUSED");
+
+        assertThat(alice().post().uri("/cases/{c}/slas/{s}/resume", caseId, slaId)
+                .header("If-Match", paused.getHeaders().getETag())
+                .retrieve().toEntity(Map.class).getStatusCode().value()).isEqualTo(200);
+    }
+
+    /**
+     * The two administration endpoints — the sharper half of Critical 1. Neither is scoped to a
+     * case, so no participant rule could ever have covered them: deploying rewrites how every
+     * future case of a type behaves, and subscribing opens a continuous outbound stream of case
+     * events. carol is a perfectly ordinary user of the right tenant; alice is {@code admin}.
+     */
+    @Test
+    void anOrdinaryUserCannotDeployACaseDefinitionOrSubscribeAWebhook() {
+        deployDefinition();
+
+        ResponseEntity<Map> deploy = client("carol").post().uri("/case-definitions")
+                .contentType(MediaType.APPLICATION_JSON).body(definitionJson())
+                .retrieve().toEntity(Map.class);
+        assertThat(deploy.getStatusCode().value()).isEqualTo(409);
+        assertThat(deploy.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(deploy.getBody()).containsEntry("code", "action-not-available");
+
+        // Still at version 1: carol's deploy did not publish a second version.
+        ResponseEntity<Map> definition = alice().get()
+                .uri("/case-definitions/{k}?tenantId={t}", DEFINITION_KEY, TENANT)
+                .retrieve().toEntity(Map.class);
+        assertThat(definition.getBody()).containsEntry("version", 1);
+
+        ResponseEntity<Map> subscribe = client("carol").post().uri("/webhooks")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("url", "https://carol.test/hook", "eventTypes", List.of("case.created")))
+                .retrieve().toEntity(Map.class);
+        assertThat(subscribe.getStatusCode().value()).isEqualTo(409);
+        assertThat(subscribe.getBody()).containsEntry("code", "action-not-available");
+        assertThat((List<?>) alice().get().uri("/webhooks").retrieve().toEntity(List.class).getBody())
+                .isEmpty();
+
+        // alice, who is admin, does both on the same URLs with the same bodies.
+        assertThat(alice().post().uri("/case-definitions")
+                .contentType(MediaType.APPLICATION_JSON).body(definitionJson())
+                .retrieve().toEntity(Map.class).getStatusCode().value()).isEqualTo(201);
+        assertThat(alice().post().uri("/webhooks").contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("url", "https://alice.test/hook", "eventTypes", List.of("case.created")))
+                .retrieve().toEntity(Map.class).getStatusCode().value()).isEqualTo(201);
+    }
+
+    /**
+     * Fix round 1, review finding I3, over the wire. mallory's IDENTITY groups are named
+     * {@code owner} and {@code handler} — participant-role names. Under the merged role set the
+     * first cut used, that gave her claim and complete on every task in every case with no
+     * participant row anywhere.
+     */
+    @Test
+    void identityGroupsNamedLikeMutatingRolesConferNothing() {
+        Map<String, Object> created = deployAndCreateCase();
+        String caseId = (String) created.get("id");
+        Map<String, Object> task = openTask(caseId);
+        String etag = "\"" + ((Number) task.get("version")).longValue() + "\"";
+
+        ResponseEntity<List> mallorysView = client("mallory").get().uri("/cases/{id}/tasks", caseId)
+                .retrieve().toEntity(List.class);
+        assertThat(mallorysView.getStatusCode().value()).as("the route works for mallory").isEqualTo(200);
+        assertThat((List<Map<String, Object>>) mallorysView.getBody()).singleElement()
+                .satisfies(t -> assertThat((List<?>) t.get("availableActions")).isEmpty());
+
+        ResponseEntity<Map> refused = client("mallory").post().uri("/tasks/{id}/claim", task.get("id"))
+                .header("If-Match", etag).retrieve().toEntity(Map.class);
+        assertThat(refused.getStatusCode().value()).isEqualTo(409);
+        assertThat(refused.getBody()).containsEntry("code", "action-not-available");
+
+        // She cannot patch the case either, for the same reason.
+        ResponseEntity<Map> patch = client("mallory").patch().uri("/cases/{id}", caseId)
+                .header("If-Match", "\"0\"")
+                .contentType(MERGE_PATCH).body(Map.of("title", "Escalated"))
+                .retrieve().toEntity(Map.class);
+        assertThat(patch.getStatusCode().value()).isEqualTo(409);
+
+        // bob, whose group genuinely IS the task's candidate group, claims it.
+        assertThat(client("bob").post().uri("/tasks/{id}/claim", task.get("id"))
+                .header("If-Match", etag).retrieve().toEntity(Map.class)
+                .getStatusCode().value()).isEqualTo(200);
+    }
+
+    private void givenARunningSlaClock(String caseId) {
+        List<Map<String, Object>> allDay = List.of(Map.of("from", "00:00", "to", "23:59"));
+        slaRepo.insertCalendar("cal-auth", Map.of("timezone", "Europe/Amsterdam",
+                "workingHours", Map.of("MONDAY", allDay, "TUESDAY", allDay, "WEDNESDAY", allDay,
+                        "THURSDAY", allDay, "FRIDAY", allDay, "SATURDAY", allDay, "SUNDAY", allDay),
+                "holidays", List.of()));
+        slaRepo.insertPolicy("pol-auth", "Standard", null, "cal-auth");
+        slaRepo.insertTarget("tgt-auth", "pol-auth", "firstResponse", "First response",
+                "PT4H", "PT3H", List.of(), List.of("EMIT_EVENT"));
+        slaService.startClocks(caseId, "pol-auth", new Actor("alice", List.of()));
+    }
+
+    private List<Map<String, Object>> slaRecords(String caseId) {
+        return (List<Map<String, Object>>) alice().get().uri("/cases/{id}/slas", caseId)
+                .retrieve().toEntity(List.class).getBody();
+    }
+
+    private List<Map<String, Object>> planItems(String caseId) {
+        return (List<Map<String, Object>>) alice().get().uri("/cases/{id}/plan-items", caseId)
+                .retrieve().toEntity(List.class).getBody();
+    }
+
+    private Map<String, Object> milestone(String caseId, String milestoneId) {
+        return ((List<Map<String, Object>>) alice().get().uri("/cases/{id}/milestones", caseId)
+                .retrieve().toEntity(List.class).getBody()).stream()
+                .filter(m -> milestoneId.equals(m.get("id"))).findFirst().orElseThrow();
     }
 
     private RestClient anonymous() {

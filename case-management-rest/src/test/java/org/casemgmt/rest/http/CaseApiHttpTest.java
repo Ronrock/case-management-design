@@ -79,8 +79,8 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         assertThat(second.getHeaders().getLocation()).isEqualTo(first.getHeaders().getLocation());
 
         // Exactly one case exists, not two.
-        ResponseEntity<List> all = alice().get().uri("/cases").retrieve().toEntity(List.class);
-        assertThat(all.getBody()).hasSize(1);
+        ResponseEntity<Map> all = alice().get().uri("/cases").retrieve().toEntity(Map.class);
+        assertThat(items(all)).hasSize(1);
     }
 
     @Test
@@ -90,7 +90,7 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
 
         ResponseEntity<Map> patched = alice().patch().uri("/cases/{id}", id)
                 .header("If-Match", "\"0\"")
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "One"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "One"))
                 .retrieve().toEntity(Map.class);
 
         assertThat(patched.getStatusCode().value()).isEqualTo(200);
@@ -104,7 +104,7 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
 
         ResponseEntity<Map> again = alice().patch().uri("/cases/{id}", id)
                 .header("If-Match", patched.getHeaders().getETag())
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("title", "Two"))
+                .contentType(MERGE_PATCH).body(Map.of("title", "Two"))
                 .retrieve().toEntity(Map.class);
         assertThat(again.getStatusCode().value()).isEqualTo(200);
         assertThat(again.getHeaders().getETag()).isEqualTo("\"2\"");
@@ -349,6 +349,7 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
 
         ResponseEntity<Map> achieved = alice().post()
                 .uri("/cases/{c}/milestones/{m}/achieve", caseId, milestoneId)
+                .header("If-Match", "\"0\"")
                 .retrieve().toEntity(Map.class);
         assertThat(achieved.getStatusCode().value()).isEqualTo(200);
         assertThat(achieved.getBody()).containsEntry("achieved", true);
@@ -371,12 +372,21 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");
 
+        // planItemId is threaded through to LinkedProcessService (fix round 1, I6): pick the
+        // case's own ACTIVE plan item so the linked-process row correlates to something real.
+        ResponseEntity<List> planItems = alice().get().uri("/cases/{id}/plan-items", caseId)
+                .retrieve().toEntity(List.class);
+        String planItemId = (String) ((List<Map<String, Object>>) planItems.getBody()).stream()
+                .filter(i -> "ACTIVE".equals(i.get("state"))).findFirst().orElseThrow().get("id");
+
         ResponseEntity<Map> started = alice().post().uri("/cases/{id}/processes", caseId)
+                .header("If-Match", "\"0\"")
                 .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("processDefinitionKey", "some-process",
+                .body(Map.of("processDefinitionKey", "some-process", "planItemId", planItemId,
                         "variables", Map.of("k", "v")))
                 .retrieve().toEntity(Map.class);
         assertThat(started.getStatusCode().value()).isEqualTo(201);
+        assertThat(started.getBody()).containsEntry("planItemId", planItemId);
 
         ResponseEntity<List> listed = alice().get().uri("/cases/{id}/processes", caseId)
                 .retrieve().toEntity(List.class);
@@ -384,6 +394,7 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
                 .satisfies(p -> {
                     assertThat(p).containsEntry("id", started.getBody().get("id"));
                     assertThat(p).containsEntry("processDefinitionKey", "some-process");
+                    assertThat(p).containsEntry("planItemId", planItemId);
                     assertThat(p).containsEntry("engineSync", "SYNCED");
                     assertThat(p).containsEntry("state", "ACTIVE");
                 });
@@ -402,6 +413,8 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         List<Map<String, Object>> records = listed.getBody();
         assertThat(records).hasSize(1);
         assertThat(records.get(0)).containsEntry("status", "RUNNING");
+        assertThat((List<Map<String, Object>>) records.get(0).get("availableActions"))
+                .extracting(a -> a.get("action")).containsExactly("pause");
         // warnAt is a real ISO instant, not "null" and not a stringified object.
         assertThat((String) records.get(0).get("warnAt")).contains("T");
         String slaId = (String) records.get(0).get("id");
@@ -414,6 +427,8 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         assertThat(paused.getStatusCode().value()).isEqualTo(200);
         assertThat(paused.getBody()).containsEntry("status", "PAUSED")
                 .containsEntry("pausedReason", "waiting");
+        assertThat((List<Map<String, Object>>) paused.getBody().get("availableActions"))
+                .extracting(a -> a.get("action")).containsExactly("resume");
         assertThat(paused.getHeaders().getETag()).isEqualTo("\"" + (version + 1) + "\"");
 
         ResponseEntity<Map> resumed = alice().post().uri("/cases/{c}/slas/{s}/resume", caseId, slaId)
@@ -421,6 +436,8 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
                 .retrieve().toEntity(Map.class);
         assertThat(resumed.getStatusCode().value()).isEqualTo(200);
         assertThat(resumed.getBody()).containsEntry("status", "RUNNING");
+        assertThat((List<Map<String, Object>>) resumed.getBody().get("availableActions"))
+                .extracting(a -> a.get("action")).containsExactly("pause");
     }
 
     @Test
@@ -433,6 +450,7 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
 
         assertThat(created.getStatusCode().value()).isEqualTo(201);
         assertThat((String) created.getBody().get("secret")).isNotBlank();
+        assertThat(created.getBody()).containsEntry("tenantId", TENANT);
 
         ResponseEntity<List> listed = alice().get().uri("/webhooks").retrieve().toEntity(List.class);
         assertThat((List<Map<String, Object>>) listed.getBody()).singleElement()
@@ -481,6 +499,57 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         assertThat(conflict.getStatusCode().value()).isEqualTo(409);
         assertThat(conflict.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
         assertThat(conflict.getBody()).containsEntry("code", "idempotency-conflict");
+    }
+
+    /**
+     * The spec's {@code Page} envelope and repeatable {@code state} (fix round 1, I6), plus the
+     * {@code pageSize} ceiling that stops a client asking the server for unbounded work (I8).
+     */
+    @Test
+    void theCaseListingIsAPageEnvelopeWithARepeatableStateFilterAndABoundedPageSize() {
+        deployDefinition();
+        String openId = (String) createCase("still open").getBody().get("id");
+        String cancelledId = (String) createCase("to cancel").getBody().get("id");
+        alice().post().uri("/cases/{id}/cancel", cancelledId).header("If-Match", "\"0\"")
+                .contentType(MediaType.APPLICATION_JSON).body(Map.of("reason", "duplicate"))
+                .retrieve().toEntity(Map.class);
+
+        ResponseEntity<Map> all = alice().get().uri("/cases?page=0&pageSize=10")
+                .retrieve().toEntity(Map.class);
+        assertThat(all.getStatusCode().value()).isEqualTo(200);
+        assertThat(all.getBody()).containsEntry("page", 0).containsEntry("pageSize", 10);
+        assertThat(items(all)).hasSize(2);
+
+        // One request, two states — the whole point of the repeatable parameter.
+        ResponseEntity<Map> both = alice().get().uri("/cases?state=ACTIVE,CANCELLED")
+                .retrieve().toEntity(Map.class);
+        assertThat(items(both)).extracting(c -> c.get("id"))
+                .containsExactlyInAnyOrder(openId, cancelledId);
+
+        // Repeated parameters mean the same thing as the comma-separated form.
+        ResponseEntity<Map> repeated = alice().get().uri("/cases?state=ACTIVE&state=CANCELLED")
+                .retrieve().toEntity(Map.class);
+        assertThat(items(repeated)).hasSize(2);
+
+        // ...and a single state still narrows.
+        assertThat(items(alice().get().uri("/cases?state=CANCELLED").retrieve().toEntity(Map.class)))
+                .singleElement().satisfies(c -> assertThat(c).containsEntry("id", cancelledId));
+
+        // Paging walks the envelope.
+        ResponseEntity<Map> firstPage = alice().get().uri("/cases?page=0&pageSize=1")
+                .retrieve().toEntity(Map.class);
+        ResponseEntity<Map> secondPage = alice().get().uri("/cases?page=1&pageSize=1")
+                .retrieve().toEntity(Map.class);
+        assertThat(items(firstPage)).hasSize(1);
+        assertThat(items(secondPage)).hasSize(1);
+        assertThat(items(firstPage).get(0).get("id")).isNotEqualTo(items(secondPage).get(0).get("id"));
+
+        // A client-chosen page size is clamped to the spec's maximum, and the envelope reports
+        // the size actually used rather than the one asked for.
+        ResponseEntity<Map> huge = alice().get().uri("/cases?pageSize=100000")
+                .retrieve().toEntity(Map.class);
+        assertThat(huge.getStatusCode().value()).isEqualTo(200);
+        assertThat(huge.getBody()).containsEntry("pageSize", 200);
     }
 
     private void givenAnSlaPolicy() {

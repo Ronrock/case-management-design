@@ -21,6 +21,17 @@ import java.util.Map;
  */
 public final class Dtos {
 
+    /**
+     * The spec's {@code Page} envelope (fix round 1, review finding I6). A bare array has nowhere
+     * to put a total or a next cursor and adding one later is a breaking change; event pagination
+     * already carries a known cursor-gap flaw that will eventually need exactly that space.
+     *
+     * <p>{@code totalItems}/{@code totalPages} are declared by the spec but not emitted yet —
+     * they need a COUNT query {@code CaseRepository} does not have. Adding them to this record
+     * later is additive for every client.
+     */
+    public record Page<T>(List<T> items, int page, int pageSize) {}
+
     public record CreateCaseRequest(String caseDefinitionKey, String tenantId, String businessKey,
                                     String title, String priority, Map<String, Object> variables) {}
 
@@ -36,7 +47,15 @@ public final class Dtos {
 
     public record CommentRequest(String text, String visibility) {}
 
-    public record StartProcessRequest(String processDefinitionKey, Map<String, Object> variables) {}
+    /**
+     * {@code planItemId} is the spec's "optional plan item this process fulfils" (fix round 1,
+     * review finding I6). It is not decoration: {@code LinkedProcessService.start} already takes
+     * it, and Task 18 spent a whole fix round threading a {@code correlationId} through the
+     * command outbox precisely so a plan-item-backed process could be reconciled — hardcoding
+     * {@code null} here made that path unreachable over HTTP.
+     */
+    public record StartProcessRequest(String processDefinitionKey, String planItemId,
+                                      Map<String, Object> variables) {}
 
     public record PauseSlaRequest(String reason) {}
 

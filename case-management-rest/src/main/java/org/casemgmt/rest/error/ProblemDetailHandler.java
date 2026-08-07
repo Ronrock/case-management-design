@@ -70,6 +70,26 @@ public class ProblemDetailHandler {
     }
 
     /**
+     * Tenant isolation (fix round 1, Critical 2). See {@link ForbiddenException} for why this is
+     * a different answer from {@code ActionPolicy}'s 409 {@code action-not-available}.
+     */
+    @ExceptionHandler(ForbiddenException.class)
+    public ProblemDetail onForbidden(ForbiddenException e) {
+        return problem(HttpStatus.FORBIDDEN, "forbidden", e.getMessage(), Map.of());
+    }
+
+    /**
+     * Request values this layer parses itself — today, enums (fix round 1, I5). Scoped to our own
+     * type for exactly the reason {@link #onMalformedETag} is: a blanket
+     * {@code IllegalArgumentException} handler would misclassify core's several non-client-shaped
+     * uses of that type as 400.
+     */
+    @ExceptionHandler(InvalidRequestException.class)
+    public ProblemDetail onInvalidRequest(InvalidRequestException e) {
+        return problem(HttpStatus.BAD_REQUEST, "invalid-request", e.getMessage(), Map.of());
+    }
+
+    /**
      * Carried finding C4. Same 412 as {@link #onOptimisticLock}, deliberately a different
      * {@code code}: "no current representation to match" is not "matched the wrong version".
      */

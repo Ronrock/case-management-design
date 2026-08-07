@@ -1,9 +1,13 @@
 package org.casemgmt.rest.controller;
 
+import org.casemgmt.domain.CaseInstance;
+import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.dto.Dtos.WebhookRequest;
+import org.casemgmt.rest.policy.ActionPolicy;
+import org.casemgmt.service.Actor;
 import org.casemgmt.service.WebhookService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -23,6 +27,16 @@ import java.util.Map;
 /**
  * The event log and webhook subscriptions — the federation surface (spec §6.2).
  *
+ * <p><b>This class carried the sharpest finding of fix round 1 (Critical 2).</b>
+ * {@code POST /webhooks} took {@code tenantId} verbatim from the request body, so any
+ * authenticated user could register {@code https://attacker/} against another tenant and receive
+ * that tenant's case events continuously — an exfiltration primitive, not merely a missing
+ * filter. The tenant now comes from the principal and only from the principal; a body that names
+ * a different one is refused rather than silently rewritten. The same round scoped
+ * {@code GET /events} (which streamed every CloudEvent in the deployment) and
+ * {@code GET /webhooks} (which listed every tenant's endpoints), and put an administration gate
+ * in front of subscribing (Critical 1).
+ *
  * <p>Events are returned as CloudEvents 1.0 envelopes exactly as {@code CaseEvent.toCloudEvent}
  * builds them, with one extension property added: {@code cursor}, the row's {@code SEQ_}, which
  * is what a consumer feeds back as {@code ?after=} to resume. Note the limitation
@@ -34,20 +48,34 @@ import java.util.Map;
 @RequestMapping("/case-api/v2")
 public class EventController {
 
+    /**
+     * Page ceiling for both event feeds (fix round 1, review finding I8): {@code limit} was
+     * entirely client-controlled, so one request could ask the database for every event ever
+     * recorded. Matches {@code CaseController.MAX_PAGE_SIZE}.
+     */
+    static final int MAX_LIMIT = CaseController.MAX_PAGE_SIZE;
+
     private final EventRepository events;
     private final WebhookService webhooks;
+    private final CaseRepository caseRepo;
+    private final ActionPolicy policy;
     private final CallerResolver callers;
 
-    public EventController(EventRepository events, WebhookService webhooks, CallerResolver callers) {
+    public EventController(EventRepository events, WebhookService webhooks, CaseRepository caseRepo,
+                           ActionPolicy policy, CallerResolver callers) {
         this.events = events;
         this.webhooks = webhooks;
+        this.caseRepo = caseRepo;
+        this.policy = policy;
         this.callers = callers;
     }
 
     @GetMapping("/events")
     public List<Map<String, Object>> allEvents(@RequestParam(defaultValue = "0") long after,
-                                               @RequestParam(defaultValue = "100") int limit) {
-        return events.after(after, limit).stream()
+                                               @RequestParam(defaultValue = "100") int limit,
+                                               Authentication authentication) {
+        String tenantId = callers.tenantId(callers.actor(authentication));
+        return events.afterForTenant(tenantId, after, clamp(limit)).stream()
                 .map(e -> withCursor(e.event().toCloudEvent(), e.seq()))
                 .toList();
     }
@@ -55,30 +83,51 @@ public class EventController {
     @GetMapping("/cases/{caseId}/events")
     public List<Map<String, Object>> caseEvents(@PathVariable String caseId,
                                                 @RequestParam(defaultValue = "0") long after,
-                                                @RequestParam(defaultValue = "100") int limit) {
-        return events.forCase(caseId, after, limit).stream()
+                                                @RequestParam(defaultValue = "100") int limit,
+                                                Authentication authentication) {
+        Actor actor = callers.actor(authentication);
+        CaseInstance c = caseRepo.require(caseId);
+        callers.requireVisible("Case", caseId, c.tenantId(), actor);
+
+        return events.forCase(caseId, after, clamp(limit)).stream()
                 .map(e -> withCursor(e.event().toCloudEvent(), e.seq()))
                 .toList();
     }
 
     @GetMapping("/webhooks")
-    public List<Map<String, Object>> listWebhooks() {
-        return webhooks.list().stream().map(EventController::subscriptionBody).toList();
+    public List<Map<String, Object>> listWebhooks(Authentication authentication) {
+        String tenantId = callers.tenantId(callers.actor(authentication));
+        return webhooks.list(tenantId).stream().map(EventController::subscriptionBody).toList();
     }
 
+    /**
+     * Subscribing is an administration action ({@code ActionPolicy.listForAdministration}) and
+     * always binds to the caller's own tenant. A {@code tenantId} in the body is accepted only
+     * when it names that same tenant — anything else is refused outright rather than quietly
+     * rewritten, so a client can never believe it subscribed to a stream it did not.
+     */
     @PostMapping("/webhooks")
     public ResponseEntity<Map<String, Object>> subscribe(@RequestBody WebhookRequest request,
                                                          Authentication authentication) {
-        WebhookService.CreatedSubscription created = webhooks.subscribe(request.tenantId(),
-                request.url(), request.eventTypes(), callers.actor(authentication));
+        Actor actor = callers.actor(authentication);
+        policy.assertMayAdminister(callers.groups(actor), "subscribe-webhook");
+        String tenantId = callers.requireTenant(actor, request.tenantId());
+
+        WebhookService.CreatedSubscription created = webhooks.subscribe(tenantId,
+                request.url(), request.eventTypes(), actor);
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", created.id());
+        body.put("tenantId", tenantId);
         body.put("url", created.url());
         body.put("eventTypes", created.eventTypes());
         // The plaintext secret is returned once and never again — only its HMAC key is stored.
         body.put("secret", created.secret());
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
+    }
+
+    private static int clamp(int limit) {
+        return Math.clamp(limit, 1, MAX_LIMIT);
     }
 
     private static Map<String, Object> subscriptionBody(WebhookRepository.Subscription s) {

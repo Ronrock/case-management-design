@@ -69,7 +69,7 @@ class RuntimeRepositoriesTest extends OracleTestBase {
                 CaseTask.EngineSync.SYNCED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null));
 
         assertThat(tasks.findByEngineTaskId("engine-task-9")).isPresent();
-        assertThat(tasks.worklist(null, List.of("reviewers"), 20))
+        assertThat(tasks.worklist(null, null, List.of("reviewers"), 20))
                 .extracting(CaseTask::id).containsExactly("t-1");
     }
 
@@ -80,11 +80,11 @@ class RuntimeRepositoriesTest extends OracleTestBase {
                 TaskState.OPEN, null, null, List.of("reviewers"), null, 50, null, null,
                 CaseTask.EngineSync.PENDING, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null));
 
-        assertThat(tasks.worklist(null, List.of("reviewers"), 20)).isEmpty();
+        assertThat(tasks.worklist(null, null, List.of("reviewers"), 20)).isEmpty();
 
         tasks.markSync("t-2", CaseTask.EngineSync.SYNCED, "engine-task-10");
 
-        assertThat(tasks.worklist(null, List.of("reviewers"), 20))
+        assertThat(tasks.worklist(null, null, List.of("reviewers"), 20))
                 .extracting(CaseTask::id).containsExactly("t-2");
     }
 
@@ -97,7 +97,7 @@ class RuntimeRepositoriesTest extends OracleTestBase {
         tasks.insert(openTask("t-none-1", "alice", List.of("reviewers")));
         tasks.insert(openTask("t-none-2", null, List.of("reviewers")));
 
-        assertThat(tasks.worklist(null, List.of(), 20)).isEmpty();
+        assertThat(tasks.worklist(null, null, List.of(), 20)).isEmpty();
     }
 
     @Test
@@ -105,7 +105,7 @@ class RuntimeRepositoriesTest extends OracleTestBase {
         tasks.insert(openTask("t-ao-1", "alice", List.of()));
         tasks.insert(openTask("t-ao-2", "bob", List.of()));
 
-        assertThat(tasks.worklist("alice", List.of(), 20))
+        assertThat(tasks.worklist(null, "alice", List.of(), 20))
                 .extracting(CaseTask::id).containsExactly("t-ao-1");
     }
 
@@ -114,7 +114,7 @@ class RuntimeRepositoriesTest extends OracleTestBase {
         tasks.insert(openTask("t-go-1", null, List.of("reviewers")));
         tasks.insert(openTask("t-go-2", null, List.of("editors")));
 
-        assertThat(tasks.worklist(null, List.of("reviewers"), 20))
+        assertThat(tasks.worklist(null, null, List.of("reviewers"), 20))
                 .extracting(CaseTask::id).containsExactly("t-go-1");
     }
 
@@ -128,7 +128,7 @@ class RuntimeRepositoriesTest extends OracleTestBase {
         tasks.insert(openTask("t-or-group", null, List.of("reviewers")));       // matches via group only
         tasks.insert(openTask("t-or-neither", "bob", List.of("finance")));      // matches neither
 
-        assertThat(tasks.worklist("alice", List.of("reviewers"), 20))
+        assertThat(tasks.worklist(null, "alice", List.of("reviewers"), 20))
                 .extracting(CaseTask::id)
                 .containsExactlyInAnyOrder("t-or-mine", "t-or-group");
     }
@@ -137,14 +137,14 @@ class RuntimeRepositoriesTest extends OracleTestBase {
     void worklistIgnoresTaskWithEmptyCandidateGroupsArray() {
         tasks.insert(openTask("t-empty-cg", null, List.of()));
 
-        assertThat(tasks.worklist(null, List.of("reviewers"), 20)).isEmpty();
+        assertThat(tasks.worklist(null, null, List.of("reviewers"), 20)).isEmpty();
     }
 
     @Test
     void worklistMatchesWhenAnyOfSeveralCandidateGroupsOverlaps() {
         tasks.insert(openTask("t-multi", null, List.of("a", "b", "c")));
 
-        assertThat(tasks.worklist(null, List.of("x", "b", "y"), 20))
+        assertThat(tasks.worklist(null, null, List.of("x", "b", "y"), 20))
                 .extracting(CaseTask::id).containsExactly("t-multi");
     }
 
@@ -155,7 +155,7 @@ class RuntimeRepositoriesTest extends OracleTestBase {
                 TaskState.OPEN, "alice", null, List.of("reviewers"), null, 50, null, null,
                 CaseTask.EngineSync.FAILED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null));
 
-        assertThat(tasks.worklist("alice", List.of("reviewers"), 20)).isEmpty();
+        assertThat(tasks.worklist(null, "alice", List.of("reviewers"), 20)).isEmpty();
     }
 
     @Test
@@ -164,7 +164,7 @@ class RuntimeRepositoriesTest extends OracleTestBase {
         tasks.insert(openTask("t-lim-2", null, List.of("reviewers")));
         tasks.insert(openTask("t-lim-3", null, List.of("reviewers")));
 
-        assertThat(tasks.worklist(null, List.of("reviewers"), 2)).hasSize(2);
+        assertThat(tasks.worklist(null, null, List.of("reviewers"), 2)).hasSize(2);
     }
 
     @Test

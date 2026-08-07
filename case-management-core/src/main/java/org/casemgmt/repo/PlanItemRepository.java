@@ -6,7 +6,11 @@ import org.casemgmt.error.OptimisticLockException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 public class PlanItemRepository {
@@ -51,6 +55,31 @@ public class PlanItemRepository {
     public List<PlanItem> findByCase(String caseId) {
         return jdbc.sql("SELECT " + COLUMNS + " FROM CM_PLAN_ITEM WHERE CASE_ID_ = :caseId ORDER BY CREATED_AT_")
                 .param("caseId", caseId).query(PlanItemRepository::map).list();
+    }
+
+    /**
+     * {@link #findByCase} for many cases at once — one statement instead of one per case.
+     *
+     * <p>Added by Task 24 fix round 1 (review finding I8): a case-listing page derives
+     * {@code availableActions[]} per row, which needs each case's plan items, so the single-case
+     * method turned a 50-row page into 50 queries. Ordering within each case is unchanged
+     * ({@code CREATED_AT_}), which matters because {@code CaseSnapshot.latest(defKey)} depends
+     * on it. Every requested id gets an entry, empty where the case has no plan items.
+     */
+    public Map<String, List<PlanItem>> findByCases(Collection<String> caseIds) {
+        Map<String, List<PlanItem>> byCase = new LinkedHashMap<>();
+        for (String caseId : caseIds) {
+            byCase.put(caseId, new ArrayList<>());
+        }
+        if (byCase.isEmpty()) {
+            return byCase;
+        }
+        jdbc.sql("SELECT " + COLUMNS + " FROM CM_PLAN_ITEM WHERE CASE_ID_ IN (:caseIds)"
+                        + " ORDER BY CASE_ID_, CREATED_AT_")
+            .param("caseIds", List.copyOf(byCase.keySet()))
+            .query(PlanItemRepository::map).list()
+            .forEach(item -> byCase.get(item.caseId()).add(item));
+        return byCase;
     }
 
     /**

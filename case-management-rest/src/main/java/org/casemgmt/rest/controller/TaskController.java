@@ -1,6 +1,8 @@
 package org.casemgmt.rest.controller;
 
+import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CaseTask;
+import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.dto.Dtos.CompleteTaskRequest;
@@ -34,10 +36,16 @@ import java.util.OptionalLong;
  * {@link ActionPolicy#assertAllowedOnTask} is the only thing that stops either, and it is
  * called immediately before both service calls, with no branch around it.
  *
- * <p>The role set fed to the policy is {@link CallerResolver#taskRoles} — participant roles plus
- * the caller's identity groups — because {@code ActionPolicy}'s task rule intersects against the
- * task's {@code candidateGroups}, which are group names. See that method for why the brief's
- * participant-roles-only version would have made the candidate-group half of the rule dead code.
+ * <p>{@code ActionPolicy} is given the caller's participant roles and identity groups as two
+ * SEPARATE arguments (fix round 1, review finding I3). An earlier cut passed their union, because
+ * {@code candidateGroups} holds group names while {@code mayMutate} tests role names; that union
+ * meant an identity group literally named {@code owner} or {@code handler} granted claim and
+ * complete on every task in every case. Keeping them apart puts the invariant in the code instead
+ * of in a convention about how groups are named.
+ *
+ * <p>Every method also resolves the owning case and refuses another tenant's (Critical 2):
+ * identity groups are global, so without that a user of tenant B who happens to be in a group
+ * named {@code reviewers} could see and claim tenant A's work.
  */
 @RestController
 @RequestMapping("/case-api/v2")
@@ -45,13 +53,15 @@ public class TaskController {
 
     private final CaseTaskService tasks;
     private final CaseTaskRepository taskRepo;
+    private final CaseRepository caseRepo;
     private final ActionPolicy policy;
     private final CallerResolver callers;
 
-    public TaskController(CaseTaskService tasks, CaseTaskRepository taskRepo, ActionPolicy policy,
-                          CallerResolver callers) {
+    public TaskController(CaseTaskService tasks, CaseTaskRepository taskRepo, CaseRepository caseRepo,
+                          ActionPolicy policy, CallerResolver callers) {
         this.tasks = tasks;
         this.taskRepo = taskRepo;
+        this.caseRepo = caseRepo;
         this.policy = policy;
         this.callers = callers;
     }
@@ -60,12 +70,15 @@ public class TaskController {
     public List<TaskResponse> worklist(@RequestParam(defaultValue = "50") int limit,
                                        Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        return tasks.worklist(actor, limit).stream().map(t -> respond(t, actor)).toList();
+        return tasks.worklist(callers.tenantId(actor), actor,
+                        Math.clamp(limit, 1, CaseController.MAX_PAGE_SIZE)).stream()
+                .map(t -> respond(t, actor)).toList();
     }
 
     @GetMapping("/cases/{caseId}/tasks")
     public List<TaskResponse> forCase(@PathVariable String caseId, Authentication authentication) {
         Actor actor = callers.actor(authentication);
+        visibleCaseOf(caseId, actor);
         return tasks.forCase(caseId).stream().map(t -> respond(t, actor)).toList();
     }
 
@@ -77,8 +90,9 @@ public class TaskController {
         long version = expectedVersion(ifMatch, taskId);
 
         CaseTask current = taskRepo.require(taskId);
+        visibleCaseOf(current.caseId(), actor);
         policy.assertAllowedOnTask(current, actor.userId(),
-                callers.taskRoles(current.caseId(), actor), "claim");
+                callers.roles(current.caseId(), actor), callers.groups(actor), "claim");
 
         CaseTask claimed = tasks.claim(taskId, version, actor);
         return ResponseEntity.ok().eTag(ETagSupport.format(claimed.version()))
@@ -94,8 +108,9 @@ public class TaskController {
         long version = expectedVersion(ifMatch, taskId);
 
         CaseTask current = taskRepo.require(taskId);
+        visibleCaseOf(current.caseId(), actor);
         policy.assertAllowedOnTask(current, actor.userId(),
-                callers.taskRoles(current.caseId(), actor), "complete");
+                callers.roles(current.caseId(), actor), callers.groups(actor), "complete");
 
         CaseTask completed = tasks.complete(taskId, version,
                 request == null || request.variables() == null ? Map.of() : request.variables(), actor);
@@ -110,8 +125,15 @@ public class TaskController {
                         .orElseGet(OptionalLong::empty));
     }
 
+    /** A task belongs to a case; a case belongs to a tenant. This is where that is enforced. */
+    private CaseInstance visibleCaseOf(String caseId, Actor actor) {
+        CaseInstance c = caseRepo.require(caseId);
+        callers.requireVisible("Case", caseId, c.tenantId(), actor);
+        return c;
+    }
+
     private TaskResponse respond(CaseTask task, Actor actor) {
-        return TaskResponse.of(task,
-                policy.listForTask(task, actor.userId(), callers.taskRoles(task.caseId(), actor)));
+        return TaskResponse.of(task, policy.listForTask(task, actor.userId(),
+                callers.roles(task.caseId(), actor), callers.groups(actor)));
     }
 }

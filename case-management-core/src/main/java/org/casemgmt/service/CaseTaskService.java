@@ -80,9 +80,14 @@ public class CaseTaskService {
      * caller's own user id as {@code assignee} (not {@code null}) so a task already claimed by
      * this caller stays visible even if it no longer matches any of the caller's current
      * candidate groups.
+     *
+     * <p>{@code tenantId} is required by the caller, not derived here: identity groups are
+     * global, so without it a user of one tenant sees another tenant's tasks purely by being in
+     * a similarly-named group (Task 24 fix round 1). The REST layer derives it from the
+     * authenticated principal, never from the request.
      */
-    public List<CaseTask> worklist(Actor actor, int limit) {
-        return tasks.worklist(actor.userId(), actor.groups(), limit);
+    public List<CaseTask> worklist(String tenantId, Actor actor, int limit) {
+        return tasks.worklist(tenantId, actor.userId(), actor.groups(), limit);
     }
 
     public List<CaseTask> forCase(String caseId) {

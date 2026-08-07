@@ -199,26 +199,44 @@ public class CaseApiTestConfig {
     }
 
     /**
-     * Three users with deliberately different standing, so an authorization test cannot pass by
+     * Five users with deliberately different standing, so no authorization test can pass by
      * accident (Task 23's Critical was found precisely because every test there used a
-     * privileged role):
+     * privileged role). Every user carries a {@code tenant:<id>} group — that prefix is how
+     * {@code CallerResolver} derives the tenant, and it is the only place a tenant comes from.
      * <ul>
-     *   <li>{@code alice} — creates the cases in these tests, so {@code CaseService.create}
-     *       makes her their {@code owner} participant: the privileged path.</li>
-     *   <li>{@code bob} — never a participant, but a member of the identity group
-     *       {@code reviewers}, which is the {@code candidateGroups} entry on the fixture's human
-     *       task: the candidate-group half of {@code ActionPolicy.mayActOnTask}.</li>
-     *   <li>{@code carol} — a legitimate, authenticated user who is neither: no participant row,
-     *       no matching group. Every request she makes reaches the controller and is refused by
-     *       {@code ActionPolicy}, not by the security filter chain.</li>
+     *   <li>{@code alice} — tenant t1, group {@code admin}. Creates the cases in these tests, so
+     *       {@code CaseService.create} makes her their {@code owner} participant, and deploys the
+     *       fixture definition, which {@code ActionPolicy.listForAdministration} now requires
+     *       {@code admin} for: the fully privileged path.</li>
+     *   <li>{@code bob} — tenant t1, group {@code reviewers}. Never a participant, but a member
+     *       of the {@code candidateGroups} entry on the fixture's human task: the candidate-group
+     *       half of {@code ActionPolicy.mayActOnTask}, and nothing else.</li>
+     *   <li>{@code carol} — tenant t1, and nothing else. A legitimate, authenticated user who is
+     *       neither a participant nor in any candidate group nor an administrator. Every request
+     *       she makes reaches the controller and is refused by {@code ActionPolicy}, not by the
+     *       security filter chain.</li>
+     *   <li>{@code dave} — <b>tenant t2</b>, and otherwise as privileged as it is possible to be:
+     *       {@code admin} AND {@code reviewers}. He exists so a tenant test cannot pass because
+     *       the caller happened to lack a role — every refusal dave gets is about the tenant
+     *       boundary and nothing else.</li>
+     *   <li>{@code mallory} — tenant t1, with identity groups named {@code owner} and
+     *       {@code handler}. Those are participant-ROLE names; as identity groups they must
+     *       confer nothing (fix round 1, review finding I3).</li>
      * </ul>
      */
     @Bean
     public UserDetailsService users() {
         return new InMemoryUserDetailsManager(
-                User.withUsername("alice").password("{noop}alice").authorities("users").build(),
-                User.withUsername("bob").password("{noop}bob").authorities("users", "reviewers").build(),
-                User.withUsername("carol").password("{noop}carol").authorities("users").build());
+                User.withUsername("alice").password("{noop}alice")
+                        .authorities("users", "tenant:t1", "admin").build(),
+                User.withUsername("bob").password("{noop}bob")
+                        .authorities("users", "tenant:t1", "reviewers").build(),
+                User.withUsername("carol").password("{noop}carol")
+                        .authorities("users", "tenant:t1").build(),
+                User.withUsername("dave").password("{noop}dave")
+                        .authorities("users", "tenant:t2", "admin", "reviewers").build(),
+                User.withUsername("mallory").password("{noop}mallory")
+                        .authorities("users", "tenant:t1", "owner", "handler").build());
     }
 
     /**

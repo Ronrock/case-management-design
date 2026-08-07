@@ -1,6 +1,7 @@
 package org.casemgmt.rest.controller;
 
 import org.casemgmt.domain.PlanItem;
+import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.dto.Dtos.PlanItemResponse;
@@ -58,7 +59,7 @@ public class PlanItemController {
     @GetMapping
     public List<PlanItemResponse> list(@PathVariable String caseId, Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        CaseSnapshot snapshot = cases.snapshot(caseId);
+        CaseSnapshot snapshot = visibleSnapshot(caseId, actor);
         Set<String> roles = callers.roles(caseId, actor);
         return snapshot.planItems().stream()
                 .map(i -> PlanItemResponse.of(i, policy.listForPlanItem(snapshot, i, roles)))
@@ -106,18 +107,37 @@ public class PlanItemController {
      * this into a 409 or a 412 — never a mutation the policy would have refused, because the
      * policy's decision only ever widens with a state the caller could not have caused.
      */
+    /**
+     * Loads the case's snapshot, or reports the case absent when it belongs to another tenant
+     * (fix round 1, Critical 2).
+     */
+    private CaseSnapshot visibleSnapshot(String caseId, Actor actor) {
+        var instance = cases.get(caseId);
+        callers.requireVisible("Case", caseId, instance.tenantId(), actor);
+        return cases.snapshot(instance);
+    }
+
     private ResponseEntity<PlanItemResponse> act(String caseId, String itemId, String ifMatch,
                                                  String action, Authentication authentication,
                                                  Function<Long, PlanItem> operation) {
         Actor actor = callers.actor(authentication);
+        CaseSnapshot snapshot = visibleSnapshot(caseId, actor);
         long version = ETagSupport.expectedVersion(ifMatch, "plan item " + itemId,
                 () -> repo.findById(itemId)
                         .map(i -> OptionalLong.of(i.version()))
                         .orElseGet(OptionalLong::empty));
 
         PlanItem current = repo.require(itemId);
-        policy.assertAllowedOnPlanItem(cases.snapshot(caseId), current,
-                callers.roles(caseId, actor), action);
+        // Ownership BEFORE authorization (fix round 1, review finding 9). PlanItemService
+        // rejects a mismatch with `wrong-case` so no write ever escaped, but evaluating the
+        // policy first meant the decision was taken against a case the item may not belong to —
+        // the caller's roles on the URL's case standing in for their roles on the item's. No
+        // gate should ever be asked a question about the wrong subject.
+        if (!current.caseId().equals(caseId)) {
+            throw new CaseConflictException("wrong-case",
+                    "Plan item " + itemId + " does not belong to case " + caseId, List.of());
+        }
+        policy.assertAllowedOnPlanItem(snapshot, current, callers.roles(caseId, actor), action);
 
         PlanItem updated = operation.apply(version);
         List<AvailableAction> actions = policy.listForPlanItem(

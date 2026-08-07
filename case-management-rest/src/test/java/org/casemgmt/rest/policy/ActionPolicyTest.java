@@ -16,6 +16,13 @@ import static org.casemgmt.rules.PlanModelFixtures.*;
 
 class ActionPolicyTest {
 
+    /**
+     * The caller holds no identity groups. Named rather than written inline so it is obvious at
+     * every call site which of the two role vocabularies is being supplied — participant roles
+     * and identity groups are separate arguments on purpose (see ActionPolicy.mayActOnTask).
+     */
+    private static final Set<String> NO_GROUPS = Set.of();
+
     private final ActionPolicy policy = new ActionPolicy();
 
     private CaseSnapshot activeCaseWithOpenRequiredItem() {
@@ -125,16 +132,16 @@ class ActionPolicyTest {
                 CaseTask.EngineSync.SYNCED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null);
         Set<String> roles = Set.of("handler");
 
-        for (AvailableAction action : policy.listForTask(claimed, "alice", roles)) {
+        for (AvailableAction action : policy.listForTask(claimed, "alice", roles, NO_GROUPS)) {
             assertThatNoException().isThrownBy(() ->
-                    policy.assertAllowedOnTask(claimed, "alice", roles, action.action()));
+                    policy.assertAllowedOnTask(claimed, "alice", roles, NO_GROUPS, action.action()));
         }
 
         // Negative half: "complete" is listed for alice (the assignee) but must NOT be
         // enforceable by bob -- this exercises the caller-specific gating, not just task
         // state, which is exactly where a hand-rolled enforcement check could drift from
         // listForTask's caller-aware rule.
-        assertThatThrownBy(() -> policy.assertAllowedOnTask(claimed, "bob", roles, "complete"))
+        assertThatThrownBy(() -> policy.assertAllowedOnTask(claimed, "bob", roles, NO_GROUPS, "complete"))
                 .isInstanceOf(CaseConflictException.class)
                 .hasMessageContaining("complete");
 
@@ -143,8 +150,8 @@ class ActionPolicyTest {
         // require a mutating role or candidate-group membership, not caller identity
         // alone. A watcher-roled alice must get nothing and must not be enforceable.
         Set<String> watcher = Set.of("watcher");
-        assertThat(policy.listForTask(claimed, "alice", watcher)).isEmpty();
-        assertThatThrownBy(() -> policy.assertAllowedOnTask(claimed, "alice", watcher, "complete"))
+        assertThat(policy.listForTask(claimed, "alice", watcher, NO_GROUPS)).isEmpty();
+        assertThatThrownBy(() -> policy.assertAllowedOnTask(claimed, "alice", watcher, NO_GROUPS, "complete"))
                 .isInstanceOf(CaseConflictException.class);
     }
 
@@ -156,16 +163,40 @@ class ActionPolicyTest {
 
         // A read-only watcher gets nothing: the review's proof case was a watcher (or no
         // roles at all) claiming any open synced task, gated on task state only.
-        assertThat(policy.listForTask(open, "alice", Set.of("watcher")))
+        assertThat(policy.listForTask(open, "alice", Set.of("watcher"), NO_GROUPS))
                 .extracting(AvailableAction::action).doesNotContain("claim");
         // No roles whatsoever -- the other half of the same proof case.
-        assertThat(policy.listForTask(open, "alice", Set.of()))
+        assertThat(policy.listForTask(open, "alice", Set.of(), NO_GROUPS))
                 .extracting(AvailableAction::action).doesNotContain("claim");
 
         // Candidate-group membership is how work reaches someone who is not yet a
         // participant, so it is sufficient on its own -- no owner/handler role required.
-        assertThat(policy.listForTask(open, "alice", Set.of("reviewers")))
+        assertThat(policy.listForTask(open, "alice", Set.of(), Set.of("reviewers")))
                 .extracting(AvailableAction::action).contains("claim");
+    }
+
+    /**
+     * The escalation that merging the two role vocabularies into one set allowed (fix round 1,
+     * review finding I3): an identity group is caller-controlled input as far as this rule is
+     * concerned, and a group named "owner" or "handler" must never satisfy mayMutate. It can only
+     * ever be matched against the task's own candidateGroups.
+     */
+    @Test
+    void anIdentityGroupNamedLikeAMutatingRoleGrantsNothing() {
+        CaseTask open = new CaseTask("t-1", "eng-a:1", "pi-1", "engine-1", "T", null,
+                TaskState.OPEN, null, null, List.of("reviewers"), null, 50, null, null,
+                CaseTask.EngineSync.SYNCED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null);
+
+        // No participant roles at all; groups named exactly like the mutating roles.
+        assertThat(policy.listForTask(open, "mallory", Set.of(), Set.of("owner", "handler")))
+                .isEmpty();
+        assertThatThrownBy(() -> policy.assertAllowedOnTask(
+                open, "mallory", Set.of(), Set.of("owner", "handler"), "claim"))
+                .isInstanceOf(CaseConflictException.class);
+
+        // ...and the mirror image: a PARTICIPANT role that happens to be named like the task's
+        // candidate group does not stand in for membership of that group either.
+        assertThat(policy.listForTask(open, "mallory", Set.of("reviewers"), NO_GROUPS)).isEmpty();
     }
 
     @Test
@@ -184,7 +215,7 @@ class ActionPolicyTest {
                 TaskState.OPEN, null, null, List.of("g"), null, 50, null, null,
                 CaseTask.EngineSync.PENDING, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null);
 
-        assertThat(policy.listForTask(pending, "alice", Set.of("handler")))
+        assertThat(policy.listForTask(pending, "alice", Set.of("handler"), NO_GROUPS))
                 .extracting(AvailableAction::action).doesNotContain("claim");
     }
 
@@ -194,9 +225,9 @@ class ActionPolicyTest {
                 TaskState.CLAIMED, "alice", null, List.of("g"), "reviewForm", 50, null, null,
                 CaseTask.EngineSync.SYNCED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null);
 
-        assertThat(policy.listForTask(claimed, "alice", Set.of("handler")))
+        assertThat(policy.listForTask(claimed, "alice", Set.of("handler"), NO_GROUPS))
                 .extracting(AvailableAction::action).contains("complete");
-        assertThat(policy.listForTask(claimed, "bob", Set.of("handler")))
+        assertThat(policy.listForTask(claimed, "bob", Set.of("handler"), NO_GROUPS))
                 .extracting(AvailableAction::action).doesNotContain("complete");
     }
 
@@ -206,7 +237,7 @@ class ActionPolicyTest {
                 TaskState.CLAIMED, "alice", null, List.of("g"), "reviewForm", 50, null, null,
                 CaseTask.EngineSync.SYNCED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null);
 
-        assertThat(policy.listForTask(claimed, "alice", Set.of("handler")))
+        assertThat(policy.listForTask(claimed, "alice", Set.of("handler"), NO_GROUPS))
                 .filteredOn(a -> a.action().equals("complete"))
                 .singleElement()
                 .extracting(AvailableAction::formKey).isEqualTo("reviewForm");

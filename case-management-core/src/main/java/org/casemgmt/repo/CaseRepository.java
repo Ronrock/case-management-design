@@ -177,7 +177,9 @@ public class CaseRepository {
         StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_CASE WHERE 1 = 1");
         List<Object[]> params = new ArrayList<>();
         if (q.tenantId() != null)    { sql.append(" AND TENANT_ID_ = :tenantId");     params.add(new Object[]{"tenantId", q.tenantId()}); }
-        if (q.state() != null)       { sql.append(" AND STATE_ = :state");            params.add(new Object[]{"state", q.state().name()}); }
+        if (!q.states().isEmpty())   { sql.append(" AND STATE_ IN (:states)");
+                                       params.add(new Object[]{"states",
+                                               q.states().stream().map(CaseState::name).toList()}); }
         if (q.assignee() != null)    { sql.append(" AND ASSIGNEE_ = :assignee");      params.add(new Object[]{"assignee", q.assignee()}); }
         if (q.caseDefKey() != null)  { sql.append(" AND CASE_DEF_KEY_ = :defKey");    params.add(new Object[]{"defKey", q.caseDefKey()}); }
         if (q.businessKey() != null) { sql.append(" AND BUSINESS_KEY_ = :bk");        params.add(new Object[]{"bk", q.businessKey()}); }

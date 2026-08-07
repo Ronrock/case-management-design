@@ -52,6 +52,15 @@ public class WebhookService {
         return webhooks.all();
     }
 
+    /**
+     * The tenant-scoped listing the API exposes. {@link #list()} stays for callers that
+     * genuinely operate across tenants (the dispatcher's own tooling); nothing reachable from
+     * HTTP may use it — see {@code WebhookRepository.allForTenant}.
+     */
+    public List<WebhookRepository.Subscription> list(String tenantId) {
+        return webhooks.allForTenant(tenantId);
+    }
+
     public List<WebhookRepository.Delivery> deadLetters(String webhookId) {
         return webhooks.deadLetters(webhookId);
     }

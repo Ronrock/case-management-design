@@ -111,6 +111,26 @@ public class WebhookRepository {
             .list();
     }
 
+    /**
+     * Every subscription owned by one tenant, active or not.
+     *
+     * <p>Distinct from {@link #active}, which is the dispatcher's fan-out query and therefore
+     * also returns untenanted ({@code TENANT_ID_ IS NULL}) subscriptions that receive every
+     * tenant's events. This one is the administrative listing behind
+     * {@code GET /case-api/v2/webhooks} and is strictly scoped: a tenant administrator must not
+     * see another tenant's endpoints, and must not see a global subscription they cannot own.
+     * Added by Task 24 fix round 1 (review finding, Critical) — {@link #all} was reachable over
+     * HTTP and listed every tenant's subscriptions.
+     */
+    public List<Subscription> allForTenant(String tenantId) {
+        return jdbc.sql(SUBSCRIPTION_COLUMNS + """
+
+                WHERE TENANT_ID_ = :tenant ORDER BY CREATED_AT_""")
+            .param("tenant", tenantId)
+            .query(SUBSCRIPTION_MAPPER)
+            .list();
+    }
+
     public void enqueueDelivery(String id, String webhookId, long eventSeq) {
         jdbc.sql("""
                 INSERT INTO CM_WEBHOOK_DELIVERY (ID_, WEBHOOK_ID_, EVENT_SEQ_, STATUS_, ATTEMPTS_,

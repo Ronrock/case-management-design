@@ -24,6 +24,13 @@ public class ActionPolicy {
 
     private static final Set<String> MUTATING_ROLES = Set.of("owner", "handler");
 
+    /**
+     * Identity groups that may administer the deployment itself — deploy case definitions,
+     * subscribe webhooks. An identity group, not a participant role: these actions are not
+     * scoped to any case. See {@link #listForAdministration}.
+     */
+    private static final Set<String> ADMIN_GROUPS = Set.of("admin");
+
     private final StageCompletion stageCompletion = new StageCompletion();
 
     public List<AvailableAction> listForCase(CaseSnapshot snapshot, Set<String> callerRoles) {
@@ -69,7 +76,8 @@ public class ActionPolicy {
         return actions;
     }
 
-    public List<AvailableAction> listForTask(CaseTask task, String callerUserId, Set<String> callerRoles) {
+    public List<AvailableAction> listForTask(CaseTask task, String callerUserId,
+                                            Set<String> participantRoles, Set<String> callerGroups) {
         List<AvailableAction> actions = new ArrayList<>();
         String base = "/tasks/" + task.id();
 
@@ -81,7 +89,7 @@ public class ActionPolicy {
         // membership gets nothing, same as the case- and plan-item-level surfaces. See
         // mayActOnTask() for the rule and why it is OR, not the plain mayMutate() check
         // the other two surfaces use.
-        if (!mayActOnTask(task, callerRoles)) {
+        if (!mayActOnTask(task, participantRoles, callerGroups)) {
             return actions;
         }
         if (task.state() == TaskState.OPEN) {
@@ -95,7 +103,18 @@ public class ActionPolicy {
 
     /**
      * Authorization rule for task actions (review fix, Critical): {@code mayMutate}
-     * ("owner" or "handler") OR membership in the task's own {@code candidateGroups}.
+     * ("owner" or "handler" among the caller's PARTICIPANT roles) OR membership of one of the
+     * task's own {@code candidateGroups} among the caller's IDENTITY groups.
+     *
+     * <p><b>Two parameters, deliberately, and never one merged set</b> (Task 24 fix round 1,
+     * review finding I3). The first cut of the REST wiring passed a single union of participant
+     * roles and identity groups, because {@code candidateGroups} holds group names while
+     * {@code mayMutate} tests role names and a single set had to satisfy both. That union is a
+     * privilege-escalation primitive: an identity group literally named {@code owner} or
+     * {@code handler} would satisfy {@code mayMutate} and grant claim/complete on <em>every</em>
+     * task in <em>every</em> case, with no participant row anywhere. Splitting the parameter
+     * makes the two vocabularies structurally incapable of crossing, so the invariant is in the
+     * code rather than in a deployment convention about how groups are named.
      *
      * <p>Plain {@code mayMutate} — what {@link #listForCase} and {@link #listForPlanItem}
      * use — is wrong here on its own: candidate-group membership is precisely how work
@@ -112,8 +131,101 @@ public class ActionPolicy {
      * (a watcher, or a caller with no roles at all, could otherwise claim any open synced
      * task, gated on task state only).
      */
-    private boolean mayActOnTask(CaseTask task, Set<String> callerRoles) {
-        return mayMutate(callerRoles) || callerRoles.stream().anyMatch(task.candidateGroups()::contains);
+    private boolean mayActOnTask(CaseTask task, Set<String> participantRoles, Set<String> callerGroups) {
+        return mayMutate(participantRoles)
+                || callerGroups.stream().anyMatch(task.candidateGroups()::contains);
+    }
+
+    /**
+     * Case-level collaboration: adding a comment, and starting a BPMN process correlated to the
+     * case.
+     *
+     * <p>Added by Task 24 fix round 1 (review finding, Critical). These endpoints previously had
+     * no rule at all and were gated by authentication alone, so any authenticated user could
+     * write to any case through them — the same caller the case-level rule refuses a title edit.
+     * They are separated from {@link #listForCase} rather than folded into it because they are a
+     * different resource: their hrefs are sub-resources, not case transitions, and a client
+     * reading a case's {@code availableActions[]} should not be told it can "comment" as if that
+     * changed the case's state.
+     *
+     * <p>Rule: {@code mayMutate} on a live (ACTIVE) case — deliberately the same tier as
+     * {@code update}, not a new one. A finer "any participant, including a watcher, may comment"
+     * tier is arguable and is explicitly NOT invented here; introducing a privilege level nobody
+     * specified is how a rule table stops being reviewable.
+     */
+    public List<AvailableAction> listForCollaboration(CaseSnapshot snapshot, Set<String> callerRoles) {
+        List<AvailableAction> actions = new ArrayList<>();
+        if (!mayMutate(callerRoles) || snapshot.caseInstance().state() != CaseState.ACTIVE) {
+            return actions;
+        }
+        String base = "/cases/" + snapshot.caseInstance().id();
+        actions.add(AvailableAction.post("comment", base + "/comments"));
+        actions.add(AvailableAction.post("start-process", base + "/processes"));
+        return actions;
+    }
+
+    /**
+     * A milestone can be achieved manually exactly once, on a live case, by a caller who may
+     * mutate it. Takes the milestone's identity and achieved flag rather than a repository row
+     * type so this class keeps depending only on the domain and the snapshot.
+     */
+    public List<AvailableAction> listForMilestone(CaseSnapshot snapshot, String milestoneId,
+                                                  boolean achieved, Set<String> callerRoles) {
+        List<AvailableAction> actions = new ArrayList<>();
+        if (!mayMutate(callerRoles) || snapshot.caseInstance().state() != CaseState.ACTIVE || achieved) {
+            return actions;
+        }
+        actions.add(AvailableAction.post("achieve",
+                "/cases/" + snapshot.caseInstance().id() + "/milestones/" + milestoneId + "/achieve"));
+        return actions;
+    }
+
+    /**
+     * SLA clocks mirror their own state machine, the same way {@link #listForPlanItem} mirrors
+     * the plan-item one: a RUNNING clock can be paused, a PAUSED clock resumed, and a clock in
+     * any other state (BREACHED, STOPPED) offers neither — which keeps this rule table and
+     * {@code SlaService}'s {@code sla-not-running} conflict from disagreeing.
+     */
+    public List<AvailableAction> listForSla(CaseSnapshot snapshot, String slaId, String status,
+                                            Set<String> callerRoles) {
+        List<AvailableAction> actions = new ArrayList<>();
+        if (!mayMutate(callerRoles) || snapshot.caseInstance().state() != CaseState.ACTIVE) {
+            return actions;
+        }
+        String base = "/cases/" + snapshot.caseInstance().id() + "/slas/" + slaId;
+        if ("RUNNING".equals(status)) {
+            actions.add(AvailableAction.post("pause", base + "/pause"));
+        }
+        if ("PAUSED".equals(status)) {
+            actions.add(AvailableAction.post("resume", base + "/resume"));
+        }
+        return actions;
+    }
+
+    /**
+     * Deployment-wide administration: deploying a case definition and subscribing a webhook.
+     *
+     * <p>Added by Task 24 fix round 1 (review finding, Critical — and the sharper half of it).
+     * Neither of these is scoped to a case, so there is no participant row to consult and none
+     * of the rules above can express them; both were consequently reachable by any authenticated
+     * caller. Deploying a definition rewrites how every future case of that type behaves;
+     * subscribing a webhook opens a continuous outbound stream of case events. They are gated on
+     * an IDENTITY GROUP ({@code admin}), not a participant role, because that is the only
+     * vocabulary that exists above the level of a single case.
+     *
+     * <p>Group membership is asserted against {@code callerGroups} only — never against
+     * participant roles — for the same reason {@link #mayActOnTask} keeps its two parameters
+     * apart: a participant role named {@code admin} on one case must never confer
+     * deployment-wide authority.
+     */
+    public List<AvailableAction> listForAdministration(Set<String> callerGroups) {
+        List<AvailableAction> actions = new ArrayList<>();
+        if (!mayAdminister(callerGroups)) {
+            return actions;
+        }
+        actions.add(AvailableAction.post("deploy-case-definition", "/case-definitions"));
+        actions.add(AvailableAction.post("subscribe-webhook", "/webhooks"));
+        return actions;
     }
 
     public void assertAllowed(CaseSnapshot snapshot, Set<String> callerRoles, String action) {
@@ -138,9 +250,9 @@ public class ActionPolicy {
         }
     }
 
-    public void assertAllowedOnTask(CaseTask task, String callerUserId, Set<String> callerRoles,
-                                     String action) {
-        List<AvailableAction> allowed = listForTask(task, callerUserId, callerRoles);
+    public void assertAllowedOnTask(CaseTask task, String callerUserId, Set<String> participantRoles,
+                                     Set<String> callerGroups, String action) {
+        List<AvailableAction> allowed = listForTask(task, callerUserId, participantRoles, callerGroups);
         if (allowed.stream().noneMatch(a -> a.action().equals(action))) {
             throw new CaseConflictException("action-not-available",
                     "Action '" + action + "' is not available on task " + task.id(),
@@ -148,7 +260,48 @@ public class ActionPolicy {
         }
     }
 
+    public void assertAllowedOnCollaboration(CaseSnapshot snapshot, Set<String> callerRoles,
+                                             String action) {
+        refuseUnlessListed(listForCollaboration(snapshot, callerRoles), action,
+                "case " + snapshot.caseInstance().id() + " in state "
+                        + snapshot.caseInstance().state());
+    }
+
+    public void assertAllowedOnMilestone(CaseSnapshot snapshot, String milestoneId, boolean achieved,
+                                         Set<String> callerRoles, String action) {
+        refuseUnlessListed(listForMilestone(snapshot, milestoneId, achieved, callerRoles), action,
+                "milestone " + milestoneId + (achieved ? " (already achieved)" : ""));
+    }
+
+    public void assertAllowedOnSla(CaseSnapshot snapshot, String slaId, String status,
+                                   Set<String> callerRoles, String action) {
+        refuseUnlessListed(listForSla(snapshot, slaId, status, callerRoles), action,
+                "SLA record " + slaId + " in status " + status);
+    }
+
+    public void assertMayAdminister(Set<String> callerGroups, String action) {
+        refuseUnlessListed(listForAdministration(callerGroups), action, "this deployment");
+    }
+
+    /**
+     * The one place a refusal is minted, so every surface refuses in exactly the same shape:
+     * 409 {@code action-not-available} carrying the actions that WOULD be legal. Consistency
+     * here is the point — a client switches on {@code code} and reads {@code availableActions},
+     * and it must not have to learn a different error shape per resource.
+     */
+    private void refuseUnlessListed(List<AvailableAction> allowed, String action, String subject) {
+        if (allowed.stream().noneMatch(a -> a.action().equals(action))) {
+            throw new CaseConflictException("action-not-available",
+                    "Action '" + action + "' is not available on " + subject,
+                    allowed.stream().map(AvailableAction::action).toList());
+        }
+    }
+
     private boolean mayMutate(Set<String> callerRoles) {
         return callerRoles.stream().anyMatch(MUTATING_ROLES::contains);
+    }
+
+    private boolean mayAdminister(Set<String> callerGroups) {
+        return callerGroups.stream().anyMatch(ADMIN_GROUPS::contains);
     }
 }

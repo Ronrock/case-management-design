@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
@@ -154,7 +155,7 @@ class CaseRepositoryTest extends OracleTestBase {
         CaseInstance closed = newCase("eng-a:5").withState(CaseState.CLOSED);
         repo.insert(closed);
 
-        var active = repo.query(new CaseQuery("t1", CaseState.ACTIVE, null, null, null, 0, 50));
+        var active = repo.query(new CaseQuery("t1", List.of(CaseState.ACTIVE), null, null, null, 0, 50));
 
         assertThat(active).extracting(CaseInstance::id).containsExactly("eng-a:4");
     }

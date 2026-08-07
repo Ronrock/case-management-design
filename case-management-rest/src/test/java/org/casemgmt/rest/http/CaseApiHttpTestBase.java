@@ -11,6 +11,7 @@ import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -40,6 +41,15 @@ abstract class CaseApiHttpTestBase extends OracleTestBase {
      */
     static final String DEFINITION_KEY = "widget-review";
     static final String TENANT = "t1";
+
+    /**
+     * {@code PATCH /cases/{id}} declares {@code consumes = application/merge-patch+json} per
+     * {@code openapi-specs.md} (fix round 1, review finding I6), so every patch in these tests
+     * sends that media type. Sending {@code application/json} now gets a 415 from Spring's
+     * content negotiation — which is itself asserted once, in CaseApiErrorContractTest, so this
+     * constant cannot quietly stop matching the controller.
+     */
+    static final MediaType MERGE_PATCH = MediaType.valueOf("application/merge-patch+json");
 
     @LocalServerPort
     int port;
@@ -81,6 +91,12 @@ abstract class CaseApiHttpTestBase extends OracleTestBase {
             throw new IllegalStateException("Fixture deploy failed: " + response);
         }
         return response.getBody();
+    }
+
+    /** {@code GET /cases} returns the spec's Page envelope; this pulls out {@code items}. */
+    @SuppressWarnings("unchecked")
+    static List<Map<String, Object>> items(ResponseEntity<Map> pageResponse) {
+        return (List<Map<String, Object>>) pageResponse.getBody().get("items");
     }
 
     @SuppressWarnings("unchecked")

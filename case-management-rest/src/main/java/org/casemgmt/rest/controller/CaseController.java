@@ -1,18 +1,24 @@
 package org.casemgmt.rest.controller;
 
+import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
+import org.casemgmt.domain.PlanItem;
+import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseQuery;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.IdempotencyRepository;
 import org.casemgmt.repo.JsonCodec;
+import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.dto.Dtos.CancelRequest;
 import org.casemgmt.rest.dto.Dtos.CaseResponse;
 import org.casemgmt.rest.dto.Dtos.CloseRequest;
 import org.casemgmt.rest.dto.Dtos.CreateCaseRequest;
+import org.casemgmt.rest.dto.Dtos.Page;
 import org.casemgmt.rest.dto.Dtos.PatchCaseRequest;
+import org.casemgmt.rest.error.InvalidRequestException;
 import org.casemgmt.rest.filter.ETagSupport;
 import org.casemgmt.rest.filter.IdempotencySupport;
 import org.casemgmt.rest.policy.ActionPolicy;
@@ -34,17 +40,21 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.Set;
 
 /**
  * Case lifecycle over HTTP: create, query, read, patch, close, cancel (spec §2.1).
  *
- * <p>Every mutating method here follows the same three steps, in this order:
+ * <p>Every mutating method here follows the same four steps, in this order:
  * <ol>
+ *   <li>resolve the caller's tenant from the principal and refuse anything outside it — a case
+ *       in another tenant is reported as 404, never as data (fix round 1, Critical 2);</li>
  *   <li>resolve {@code If-Match} — absent is 428, {@code *} is resolved against the case's
  *       current version and is 412 when there is no case to match (RFC 7232 §3.1);</li>
  *   <li>{@link ActionPolicy#assertAllowed} — the authorization gate. {@code CaseService}
@@ -62,16 +72,31 @@ import java.util.Set;
 @RequestMapping("/case-api/v2/cases")
 public class CaseController {
 
+    /**
+     * {@code pageSize} ceiling, from {@code openapi-specs.md}'s own {@code pageSize} parameter.
+     * Enforced rather than trusted (fix round 1, review finding I8): each row in a page costs a
+     * participant lookup and a plan-item lookup to derive its {@code availableActions[]}, so an
+     * unbounded, client-chosen page size is a cheap way to make the server do arbitrary work.
+     */
+    static final int MAX_PAGE_SIZE = 200;
+    static final int DEFAULT_PAGE_SIZE = 25;
+
     private final CaseService cases;
     private final CaseRepository caseRepo;
+    private final CaseDefinitionRepository definitionRepo;
+    private final PlanItemRepository planItemRepo;
     private final ActionPolicy policy;
     private final CallerResolver callers;
     private final IdempotencySupport idempotency;
 
-    public CaseController(CaseService cases, CaseRepository caseRepo, ActionPolicy policy,
-                          CallerResolver callers, IdempotencyRepository idempotencyRepo) {
+    public CaseController(CaseService cases, CaseRepository caseRepo,
+                          CaseDefinitionRepository definitionRepo, PlanItemRepository planItemRepo,
+                          ActionPolicy policy, CallerResolver callers,
+                          IdempotencyRepository idempotencyRepo) {
         this.cases = cases;
         this.caseRepo = caseRepo;
+        this.definitionRepo = definitionRepo;
+        this.planItemRepo = planItemRepo;
         this.policy = policy;
         this.callers = callers;
         this.idempotency = new IdempotencySupport(idempotencyRepo);
@@ -79,9 +104,9 @@ public class CaseController {
 
     /**
      * Creates a case. No {@code assertAllowed} here and none possible: there is no case yet to
-     * hold roles on, so the gate is authentication plus whatever the deployment's case-definition
-     * identity links say — the creator becomes the case's {@code owner} participant
-     * ({@code CaseService.create}), which is what makes every later call on it authorizable.
+     * hold roles on, so the gate is the caller's tenant plus authentication — the creator becomes
+     * the case's {@code owner} participant ({@code CaseService.create}), which is what makes
+     * every later call on it authorizable.
      *
      * <p>The status comes from {@link IdempotencySupport.Result#status()}, not a hardcoded 201:
      * a replay must reproduce what the original call actually returned. {@code Location} and
@@ -95,11 +120,14 @@ public class CaseController {
             Authentication authentication) {
 
         Actor actor = callers.actor(authentication);
-        var result = idempotency.execute(idempotencyKey, "POST /cases", JsonCodec.toJson(request),
-                () -> cases.create(request.caseDefinitionKey(), request.tenantId(),
-                        request.businessKey(), request.title(),
-                        request.priority() == null ? CasePriority.MEDIUM
-                                : CasePriority.valueOf(request.priority()),
+        String tenantId = callers.requireTenant(actor, request.tenantId());
+        CasePriority priority = InvalidRequestException.enumValue(
+                CasePriority.class, "priority", request.priority(), CasePriority.MEDIUM);
+
+        var result = idempotency.execute(idempotencyKey, idempotencyScope(actor),
+                JsonCodec.toJson(request),
+                () -> cases.create(request.caseDefinitionKey(), tenantId,
+                        request.businessKey(), request.title(), priority,
                         request.variables(), actor),
                 // Replay path: only the id was stored, so the case has to be read back. That is
                 // not a C5 violation — there is no local write to build from on a replay, and
@@ -116,37 +144,70 @@ public class CaseController {
                 .body(response(created, actor));
     }
 
+    /**
+     * The case listing, as {@code openapi-specs.md} declares it (fix round 1, review finding I6):
+     * a {@code Page} envelope rather than a bare array, {@code page}/{@code pageSize} rather than
+     * {@code offset}/{@code limit}, and a repeatable {@code state}.
+     *
+     * <p>Known deviations from the spec, both deliberate and both out of scope for this round:
+     * {@code totalItems}/{@code totalPages} are not emitted (they need a COUNT query
+     * {@code CaseRepository} does not offer), and the spec's {@code sort},
+     * {@code createdAfter}/{@code createdBefore}, {@code participantUser}, {@code queueId},
+     * {@code slaStatus}, {@code priority} and {@code freeText} filters are not implemented. The
+     * envelope is the part that matters now: adding a total to it later is additive, whereas
+     * replacing a bare array with one is breaking.
+     */
     @GetMapping
-    public List<CaseResponse> query(@RequestParam(required = false) String tenantId,
-                                    @RequestParam(required = false) CaseState state,
+    public Page<CaseResponse> query(@RequestParam(required = false) String tenantId,
+                                    @RequestParam(required = false) List<String> state,
                                     @RequestParam(required = false) String assignee,
                                     @RequestParam(required = false) String caseDefinitionKey,
                                     @RequestParam(required = false) String businessKey,
-                                    @RequestParam(defaultValue = "0") int offset,
-                                    @RequestParam(defaultValue = "50") int limit,
+                                    @RequestParam(defaultValue = "0") int page,
+                                    @RequestParam(defaultValue = "" + DEFAULT_PAGE_SIZE) int pageSize,
                                     Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        return caseRepo.query(new CaseQuery(tenantId, state, assignee, caseDefinitionKey,
-                        businessKey, offset, limit)).stream()
-                .map(c -> response(c, actor))
+        String tenant = callers.requireTenant(actor, tenantId);
+
+        List<CaseState> states = state == null ? List.of() : state.stream()
+                .map(s -> InvalidRequestException.enumValue(CaseState.class, "state", s, null))
+                .filter(Objects::nonNull)
                 .toList();
+        int effectivePage = Math.max(page, 0);
+        int effectiveSize = Math.clamp(pageSize, 1, MAX_PAGE_SIZE);
+
+        List<CaseInstance> rows = caseRepo.query(new CaseQuery(tenant, states, assignee,
+                caseDefinitionKey, businessKey, effectivePage * effectiveSize, effectiveSize));
+
+        return new Page<>(withActions(rows, actor), effectivePage, effectiveSize);
     }
 
     @GetMapping("/{caseId}")
     public ResponseEntity<CaseResponse> get(@PathVariable String caseId, Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        CaseInstance c = cases.get(caseId);
+        CaseInstance c = visibleCase(caseId, actor);
         return ResponseEntity.ok().eTag(ETagSupport.format(c.version())).body(response(c, actor));
     }
 
-    @PatchMapping("/{caseId}")
+    /**
+     * {@code consumes} is {@code application/merge-patch+json} per the spec (fix round 1, I6).
+     *
+     * <p>Known deviation, explicitly out of scope: true RFC 7386 null-clearing semantics (an
+     * explicit {@code null} removing a field) are NOT implemented — a null field is treated as
+     * absent, exactly as before. Declaring the media type without the semantics is the lesser of
+     * two evils here: the wire contract now matches the spec a client generates from, and the
+     * one behaviour that differs is recorded rather than silently wrong under
+     * {@code application/json}, which promises nothing at all about merge semantics.
+     */
+    @PatchMapping(path = "/{caseId}", consumes = "application/merge-patch+json")
     public ResponseEntity<CaseResponse> patch(@PathVariable String caseId,
                                               @RequestHeader(value = "If-Match", required = false) String ifMatch,
                                               @RequestBody PatchCaseRequest request,
                                               Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        long version = expectedVersion(ifMatch, caseId);
-        policy.assertAllowed(cases.snapshot(caseId), callers.roles(caseId, actor), "update");
+        long version = expectedVersion(ifMatch, caseId, actor);
+        policy.assertAllowed(cases.snapshot(visibleCase(caseId, actor)),
+                callers.roles(caseId, actor), "update");
 
         Map<String, Object> patch = new LinkedHashMap<>();
         if (request.title() != null) patch.put("title", request.title());
@@ -163,8 +224,9 @@ public class CaseController {
                                               @RequestBody(required = false) CloseRequest request,
                                               Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        long version = expectedVersion(ifMatch, caseId);
-        policy.assertAllowed(cases.snapshot(caseId), callers.roles(caseId, actor), "close");
+        long version = expectedVersion(ifMatch, caseId, actor);
+        policy.assertAllowed(cases.snapshot(visibleCase(caseId, actor)),
+                callers.roles(caseId, actor), "close");
 
         CaseInstance closed = cases.close(caseId, version,
                 request == null ? null : request.outcome(), actor);
@@ -178,13 +240,39 @@ public class CaseController {
                                                @RequestBody(required = false) CancelRequest request,
                                                Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        long version = expectedVersion(ifMatch, caseId);
-        policy.assertAllowed(cases.snapshot(caseId), callers.roles(caseId, actor), "cancel");
+        long version = expectedVersion(ifMatch, caseId, actor);
+        policy.assertAllowed(cases.snapshot(visibleCase(caseId, actor)),
+                callers.roles(caseId, actor), "cancel");
 
         CaseInstance cancelled = cases.cancel(caseId, version,
                 request == null ? null : request.reason(), actor);
         return ResponseEntity.ok().eTag(ETagSupport.format(cancelled.version()))
                 .body(response(cancelled, actor));
+    }
+
+    /**
+     * Scoping the idempotency key to the caller (fix round 1, review finding I4).
+     *
+     * <p>{@code CM_IDEMPOTENCY_KEY} is keyed on {@code (KEY_, SCOPE_)}, so a constant scope makes
+     * the key namespace global: two users who both send {@code Idempotency-Key: retry-1} collide
+     * across tenants. With identical bodies the second caller is handed the first caller's case
+     * id and full replayed body — a cross-tenant disclosure; with different bodies they get a 409
+     * for a key they never used. The user id makes the namespace per-caller, which is the level a
+     * client actually reasons about when it picks a key.
+     */
+    private String idempotencyScope(Actor actor) {
+        return "POST /cases:" + actor.userId();
+    }
+
+    /**
+     * Loads a case, or reports it as absent if it belongs to another tenant. Every single-case
+     * endpoint goes through this — there is no route to a {@code CaseInstance} in this class that
+     * skips the tenant check.
+     */
+    private CaseInstance visibleCase(String caseId, Actor actor) {
+        CaseInstance c = cases.get(caseId);
+        callers.requireVisible("Case", caseId, c.tenantId(), actor);
+        return c;
     }
 
     /**
@@ -194,10 +282,15 @@ public class CaseController {
      * the request into an ordinary 412 {@code version-conflict}. That is a benign, honest
      * outcome for a wildcard (the client asked for "whatever is current" and lost a race), not
      * a lost update — the optimistic-lock check downstream is what actually guarantees that.
+     *
+     * <p>The wildcard lookup is tenant-filtered too, so {@code If-Match: *} cannot be used to
+     * probe whether an id exists in another tenant: to this caller it does not.
      */
-    private long expectedVersion(String ifMatch, String caseId) {
+    private long expectedVersion(String ifMatch, String caseId, Actor actor) {
         return ETagSupport.expectedVersion(ifMatch, "case " + caseId,
                 () -> caseRepo.findById(caseId)
+                        .filter(c -> c.tenantId() != null
+                                && c.tenantId().equals(callers.tenantId(actor)))
                         .map(c -> OptionalLong.of(c.version()))
                         .orElseGet(OptionalLong::empty));
     }
@@ -213,5 +306,27 @@ public class CaseController {
         CaseSnapshot snapshot = cases.snapshot(c);
         List<AvailableAction> actions = policy.listForCase(snapshot, roles);
         return CaseResponse.of(c, actions);
+    }
+
+    /**
+     * The listing's {@code availableActions[]}, in a fixed number of queries rather than three
+     * per row (fix round 1, review finding I8). Roles and plan items are fetched once for the
+     * whole page and case definitions are loaded once per distinct definition — a page of a
+     * single case type therefore costs three queries in total, where the per-row path cost
+     * roughly 150 for a default page.
+     */
+    private List<CaseResponse> withActions(List<CaseInstance> rows, Actor actor) {
+        List<String> ids = rows.stream().map(CaseInstance::id).toList();
+        Map<String, Set<String>> rolesByCase = callers.roles(ids, actor);
+        Map<String, List<PlanItem>> itemsByCase = planItemRepo.findByCases(ids);
+        Map<String, CaseDefinition> definitions = new HashMap<>();
+
+        return rows.stream().map(c -> {
+            CaseDefinition definition =
+                    definitions.computeIfAbsent(c.caseDefId(), definitionRepo::require);
+            CaseSnapshot snapshot = new CaseSnapshot(c, definition,
+                    itemsByCase.getOrDefault(c.id(), List.of()));
+            return CaseResponse.of(c, policy.listForCase(snapshot, rolesByCase.get(c.id())));
+        }).toList();
     }
 }
