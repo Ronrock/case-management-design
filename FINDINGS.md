@@ -10,9 +10,9 @@ fixed, and whether or not the code now works. Several were explicitly ruled **do
 fix** by the human partner and are marked as such. Nothing here has been softened because a later
 task made the symptom go away.
 
-**What was built:** 6 Maven modules, 33 endpoints under `/case-api/v2`, **381 tests, all green**,
+**What was built:** 6 Maven modules, 33 endpoints under `/case-api/v2`, **384 tests, all green**,
 all against real Oracle 23ai via Testcontainers (no H2 anywhere that touches the schema). Per
-module: core 225, rest 81, engine-embedded 10, engine-remote 11, starter 7, poc-app 17.
+module: core 242, rest 94, engine-embedded 10, engine-remote 11, starter 9, poc-app 18.
 
 ---
 
@@ -449,8 +449,25 @@ held outside the case-management database, or per-subscription keys in an extern
 after a restart**, and the dead-letter endpoint is the only way to see that it was needed.
 
 There is no replay endpoint either: a dead-lettered delivery can now be *seen* and still not
-*resent*. That is deliberate scope, not an oversight — replay needs a decision about
-at-least-once-again semantics that nothing in the spec makes.
+*resent*.
+
+> **Correction (corrective round).** An earlier version of this paragraph said replay "needs a
+> decision about at-least-once-again semantics that nothing in the spec makes." **That is false,
+> and it was written without grepping the contract.** Three published documents specify it:
+> `openapi-specs.md:1265` defines `POST /webhooks/{webhookId}/dead-letters/redeliver` → `202
+> Redelivery scheduled`; `design principles.md:169` says DLQ entries "can be redelivered";
+> `db-design.md:355` gives the mechanic — "redelivery resets them to PENDING", which is the
+> at-least-once-again semantic claimed to be missing, stated exactly. Not implementing redelivery
+> is a fine scope decision; calling it unspecified was not. **The accurate statement is: redelivery
+> is fully specified and deliberately not implemented in this PoC.** Reinstating it is small — one
+> `UPDATE ... SET STATUS_ = 'PENDING', NEXT_ATTEMPT_AT_ = SYSTIMESTAMP WHERE WEBHOOK_ID_ = :id AND
+> STATUS_ = 'DEAD'` behind the documented endpoint — and it is worth noting that it would be
+> useless until the secret-durability problem above is solved, since a redelivered event would
+> fail signing again for exactly the same reason. That ordering, not the semantics, is the real
+> argument for deferring it.
+>
+> This is the ninth mechanism a third time: the contract was never grepped. See the note added
+> to the vacuous-mechanisms section.
 
 ### Would this event stream support a cross-engine index? No — not as it stands
 
@@ -637,6 +654,31 @@ proves *a test can fail*; these two prove *a mechanism is reached from everywher
 which is the question the strip cannot ask, because a strip only ever exercises the paths the test
 already knows about.
 
+**And a third grep, learned the hardest way — by this document doing it wrong.** The fix wave that
+closed the eight Importants added `GET /webhooks/{id}/dead-letters` and recorded, in this very
+document, that the endpoint "is not in `openapi-specs.md`" and that redelivery "needs a decision
+about at-least-once-again semantics that nothing in the spec makes". **Both claims were false.** The
+endpoint had been specified all along (`openapi-specs.md:1245`, `design principles.md:169`), and
+redelivery is specified in three places including its exact mechanic (`db-design.md:355`,
+"redelivery resets them to PENDING"). Neither statement cost a single grep to check, and neither
+grep was run.
+
+That is the ninth mechanism a third time, and its sharpest instance: a *findings document*
+asserting what the contract does not say, without reading the contract. The consequence was not
+merely an inaccurate note — the endpoint was implemented from the database's columns instead of
+from the published schema and diverged from it in six fields, because the schema was never opened.
+
+> **When you write something down about a contract — implementing against it, or recording that it
+> is silent — grep it first.** "The spec doesn't cover this" is a claim about a file you can read
+> in one command, and it is the single cheapest claim in this whole document to be wrong about.
+
+The corollary for the suite: **a conformance suite is evidence only about the operations it
+exercises.** `OpenApiConformanceIT` cannot detect an endpoint the document omits, an endpoint the
+document defines and the code never implements, or a response nobody hands it. Adding one case for
+the dead-letter queue immediately found two further defects that had been latent for the whole
+build — an `openapi-specs.md` field with no backing column, and a `CloudEvent` schema that never
+declared the extension attributes the implementation had always emitted.
+
 **And the largest instance of all was not a test at all — it was a whole test category.** The root
 POM declared a `maven-failsafe-plugin` execution that **no module ever bound**. So `*IT` classes
 matched neither surefire's default includes (`**/*Test.java`, `**/*Tests.java`, `**/*TestCase.java`)
@@ -644,7 +686,7 @@ nor any active execution: they were compiled, and then **silently skipped, with 
 no "Tests run" line at all** — not "0 tests", not a skip notice, nothing to notice. Discovered in
 Task 11 and fixed centrally by making surefire run `**/*IT.java` reactor-wide under `test` and
 deleting the dead declaration. Tasks 24, 26 and 27 are entirely `*IT`-based and would all have been
-affected; **this document's own "381 tests green" claim depends on that fix**, which is why it is
+affected; **this document's own "384 tests green" claim depends on that fix**, which is why it is
 recorded here and not only in `pom.xml`'s comment. It is the same failure as the eight above, one
 level up: a mechanism that reports success while protecting nothing, invisible because the report
 looks exactly like the report you expect. The generalisation: **a green build is evidence only about
@@ -763,7 +805,7 @@ spec's own (§11); the rest were found during the build.
 | `CM_ENGINE_COMMAND` and `ENGINE_SYNC_` columns (spec D3) | Remote mode cannot join the local transaction | Fine as a pattern; the columns are PoC-shaped, not target-design |
 | Direct writes in Operaton Tasklist bypass the state machine in remote mode (spec D4) | No outbound push channel from Operaton | Either an engine-side listener pushing back, or Tasklist access removed |
 | Basic auth on Operaton identity instead of OAuth2 (spec D2) | §7 — configuration, not design | Replace `PocSecurityConfig`; nothing else changes |
-| **The idempotency reclaim lease double-executes** | A 5-minute lease on an in-progress key, so a crash does not wedge it forever. (The *other* half of this trade-off — a failed operation wedging the key for the full lease, which fired on ordinary 400/404/422 responses — was found in the final review and is fixed: `IdempotencySupport` now releases the claim on a client error. Server faults deliberately still hold it, since their side effects are unknown) | An operation that legitimately runs longer than the lease **can be reclaimed by a duplicate, and both callers execute — the exact thing idempotency keys exist to prevent.** Standard lease-mutex trade-off (the Redis `SETNX`+TTL shape). Callers with long-running operations must know. Production needs a lease proportional to the operation, or a fencing token |
+| **The idempotency reclaim lease double-executes** | A 5-minute lease on an in-progress key, so a crash does not wedge it forever. Two later fixes narrowed it: `IdempotencySupport` releases the claim on a client error (the failure half, which fired on ordinary 400/404/422 responses and wedged the key for the full lease), and it now checks `complete()`'s affected-row count instead of discarding it — a caller whose claim was reclaimed mid-operation used to receive its own 201 while the STORED response, which every later retry replays, belonged to the other execution. It now gets a 409 naming the collision. The double-execute itself remains | An operation that legitimately runs longer than the lease **can be reclaimed by a duplicate, and both callers execute — the exact thing idempotency keys exist to prevent.** Standard lease-mutex trade-off (the Redis `SETNX`+TTL shape). Callers with long-running operations must know. Production needs a lease proportional to the operation, or a fencing token |
 | `PATCH` declares `application/merge-patch+json` but does not implement null-clearing | Behaviour change with its own test surface | Real merge-patch semantics |
 | `Page` carries no `totalItems`/`totalPages` | Needs a `COUNT` query `CaseRepository` does not have | Additive for every client when added |
 | Schedulers assume a single instance | PoC | Webhook and engine-command dispatch use claim-by-`UPDATE` with a lease. The SLA sweeper has no claim, but is no longer deadlock-prone: Task 27 added `ORDER BY ID_` and `FETCH FIRST 200` to `dueRecords`, so two sweepers take the same rows in the same sequence (the old unordered query could deadlock with `ORA-00060`, which surfaces as `DataAccessException`, escapes the per-record `OptimisticLockException` catch, and aborts the batch) and neither holds `CM_SLA_RECORD`+`CM_CASE` row locks across an unbounded backlog. Two sweepers still duplicate work on the same rows; a claim would be the production answer |
@@ -1009,6 +1051,26 @@ follows is the index, plus the three items that changed this document rather tha
   unobservably" — appeared nowhere. Added above. For a document whose job is findings, the
   composition *was* the finding.
 
+### The fix wave was itself re-reviewed, and needed a corrective round
+
+The re-review confirmed all eight Importants and the three actionable Minors, and then found that
+the wave's own new endpoint had shipped with three problems of exactly the kinds this document
+exists to record — plus two false statements *in this document*. Recorded in full because "the fix
+wave needed a fix wave" is a real data point about the process, not an embarrassment to bury:
+
+| Found | Where it is written up |
+|---|---|
+| Two false claims about what the contract says — the endpoint "is not in `openapi-specs.md`" and redelivery is "unspecified". Both were contradicted by documents in this repository | The R4 dead-letter section, and the redelivery correction above it |
+| The response diverged from the published schema in six fields, because it was written from the table's columns | Same section |
+| `openapi-specs.md` promised a `failedAt` no column backed | Same section — fixed by an additive changeset |
+| The `CloudEvent` schema never declared `tenantid`/`cursor`, so every CloudEvent the API returns was non-conformant | "A third spec defect, found by the same test" |
+| The new endpoint's admin gate and tenant scoping had no test at all | `CaseApiAuthorizationTest` — a third administration endpoint, with both strips |
+| `IdempotencySupport` discarded `complete()`'s new boolean, so the one observable moment of the reclaim double-execute stayed unobserved | Deviations → idempotency reclaim lease row |
+| A test comment claiming more than its assertion checked | `AutoConfigurationTest` — reworded |
+
+The single cause behind the first four is one habit, now written up as the third grep in the
+vacuous-mechanisms section: **the contract was never opened.**
+
 **And one of the twelve was not a defect at all.** The review recorded as a Minor that
 `ProblemDetail.title` is never set and therefore omitted from every problem body. On Spring Framework
 7 that is false: `ProblemDetail.getTitle()` falls back to the status reason phrase when the field is
@@ -1020,8 +1082,50 @@ mechanism's shape. The test was kept, because "the body a client receives carrie
 assertion whoever supplies the value. *Adjudicated against the artifact, not against the reviewer* —
 the same method that settled Task 25's `NoClassDefFoundError` dispute.
 
-**One addition is not covered by `openapi-specs.md`.** `GET /webhooks/{id}/dead-letters` was added
-to close the observability half of finding 6, and the published document does not describe it.
-`OpenApiConformanceIT` validates responses against the document for the endpoints it exercises; it
-does not detect an endpoint the document omits, so this passed silently. Documenting the new
-endpoint is a spec change, listed here rather than made unilaterally.
+**`GET /webhooks/{id}/dead-letters` diverged from a contract that already specified it.** An
+earlier version of this paragraph said the endpoint "is not covered by `openapi-specs.md`" and that
+"the published document does not describe it". **Both statements were false**, written without
+grepping the document: `openapi-specs.md:1245` has defined the operation — tags, parameters, and a
+200 response schema — all along, and `design principles.md:169` names it too.
+
+The real finding is worse than the one that was recorded, and it is an implementation defect rather
+than a documentation gap: **the endpoint was implemented from the table's columns instead of from
+the published schema, and diverged from it in six fields at once.** The contract specifies
+`{event, attempts, lastError, failedAt}`; the first cut emitted
+`{id, webhookId, eventSeq, attempts, lastStatusCode, lastError}` — two documented fields missing,
+four undocumented ones added. Nothing caught it because `OpenApiConformanceIT` only validates the
+operations it is handed, and no case exercised this path. Corrected: the response now carries
+`event` (the full CloudEvent, resolved through a batched `EventRepository.bySeqs`) and `failedAt`,
+and `OpenApiConformanceIT` covers the operation against a genuinely populated queue.
+
+`failedAt` required a schema change, and that is a spec defect in its own right: **`openapi-specs.md`
+promised a timestamp that `db-design.sql` defines no column for.** `DELIVERED_AT_` is null for a
+DEAD row, `NEXT_ATTEMPT_AT_` is stale from the last retry scheduled, and `markDead` clears
+`CLAIMED_AT_`. Added as the additive changeset `cm-poc-webhook-delivery-failed-at`, per this
+schema's own convention. It is also the field an operator most needs for the restart failure the
+endpoint exists to make visible — "did these all die at 09:14?" — and nothing recorded the answer.
+
+Two fields were kept beyond the published four, and `openapi-specs.md` was corrected to declare
+them with inline comments naming the reason (the precedent Task 27 set for the `Page` schema):
+`id`, because a listing whose entries cannot be named is awkward for operator tooling, and
+`lastStatusCode`, because null-versus-a-number is exactly what distinguishes "died before the
+request went out" — the restart signature — from an HTTP failure, and that distinction is
+unrecoverable once flattened into `lastError` prose. Both are additive and cannot break a client
+written against the original four.
+
+### A third spec defect, found by the same test: `CloudEvent` never declared its own extensions
+
+Adding the dead-letter conformance case caused the **first** validation of a CloudEvent against the
+published `CloudEvent` schema anywhere in the suite — the two event feeds were never covered. It
+failed immediately: `CaseEvent.toCloudEvent` has always emitted a `tenantid` extension attribute,
+and `GET /events`/`GET /cases/{caseId}/events` add a `cursor` one, and the schema declared neither.
+Undeclared properties are an error to swagger-request-validator by default (the same behaviour
+documented on the `Page` schema), so **every CloudEvent this API has ever returned was
+non-conformant against its own published schema** — undetected for the whole build because nothing
+validated one. The envelope was always legal *CloudEvents* (1.0 permits extension attributes); it
+simply was not what this document said. Both are now declared, with a comment explaining that
+`cursor` appears on the feeds and deliberately not on a dead-letter entry.
+
+This is the same lesson as the two corrections above, one level down: **a conformance suite is
+evidence only about the operations it exercises**, exactly as a green build is evidence only about
+the tests that ran.
