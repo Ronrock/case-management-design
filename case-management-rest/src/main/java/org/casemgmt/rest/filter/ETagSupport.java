@@ -2,8 +2,10 @@ package org.casemgmt.rest.filter;
 
 import org.casemgmt.error.PreconditionRequiredException;
 import org.casemgmt.rest.error.MalformedETagException;
+import org.casemgmt.rest.error.PreconditionFailedException;
 
 import java.util.OptionalLong;
+import java.util.function.Supplier;
 
 public final class ETagSupport {
 
@@ -54,6 +56,40 @@ public final class ETagSupport {
             parseTag(tags[i].trim());
         }
         return OptionalLong.of(first);
+    }
+
+    /**
+     * Evaluates a full {@code If-Match} header against a target and answers the version an
+     * update should assert — the second half of RFC 7232 §3.1, which {@link #parseIfMatch}
+     * deliberately leaves to its caller (carried finding C4).
+     *
+     * <p>For a concrete entity-tag that is simply the tag's version, and the ordinary
+     * optimistic-lock check downstream decides whether it still matches. For the wildcard
+     * ({@code If-Match: *} — "any current representation") the rule has two halves and only
+     * one of them lives in {@code parseIfMatch}: the request proceeds <em>if a representation
+     * exists</em>, and the precondition is false — 412, not 404 and not a successful update —
+     * if it does not. This method is where that second half is enforced, and it is the only
+     * way a caller should turn a wildcard into a version.
+     *
+     * @param target        human-readable identification of the resource, for the 412 detail
+     * @param currentVersion looks up the target's current version; {@link OptionalLong#empty()}
+     *                       means the target has no current representation
+     * @throws org.casemgmt.error.PreconditionRequiredException if the header is absent (428)
+     * @throws org.casemgmt.rest.error.PreconditionFailedException on {@code *} with no
+     *         current representation (412)
+     */
+    public static long expectedVersion(String ifMatchHeader, String target,
+                                       Supplier<OptionalLong> currentVersion) {
+        OptionalLong requested = parseIfMatch(ifMatchHeader);
+        if (requested.isPresent()) {
+            return requested.getAsLong();
+        }
+        OptionalLong current = currentVersion.get();
+        if (current.isEmpty()) {
+            throw new PreconditionFailedException(
+                    "If-Match: * requires a current representation of " + target + ", which does not exist");
+        }
+        return current.getAsLong();
     }
 
     private static long parseTag(String rawTag) {

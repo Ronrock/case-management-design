@@ -116,9 +116,25 @@ public class CaseService {
     }
 
     public CaseSnapshot snapshot(String caseId) {
-        CaseInstance instance = cases.require(caseId);
+        return snapshot(cases.require(caseId));
+    }
+
+    /**
+     * Builds a snapshot around a {@link CaseInstance} the caller already holds, instead of
+     * re-reading {@code CM_CASE}.
+     *
+     * <p>Added by Task 24 for the REST layer, and for the same reason Task 4's rule exists: a
+     * controller that has just performed a successful optimistic update holds the authoritative
+     * post-write row and must not go back to the database for it. {@code availableActions[]} is
+     * derived from the snapshot, so re-reading here would let a concurrent writer's row decide
+     * which actions get advertised alongside a body built from <em>this</em> call's write —
+     * the two would describe different versions of the case. Plan items are still read (they
+     * are not part of the row the caller wrote, and the plan model may legitimately have moved
+     * during the same transaction).
+     */
+    public CaseSnapshot snapshot(CaseInstance instance) {
         return new CaseSnapshot(instance, definitions.require(instance.caseDefId()),
-                planItems.findByCase(caseId));
+                planItems.findByCase(instance.id()));
     }
 
     @SuppressWarnings("unchecked")

@@ -69,6 +69,27 @@ public class ProblemDetailHandler {
         return problem(HttpStatus.BAD_REQUEST, "invalid-request", e.getMessage(), Map.of());
     }
 
+    /**
+     * Carried finding C4. Same 412 as {@link #onOptimisticLock}, deliberately a different
+     * {@code code}: "no current representation to match" is not "matched the wrong version".
+     */
+    @ExceptionHandler(PreconditionFailedException.class)
+    public ProblemDetail onPreconditionFailed(PreconditionFailedException e) {
+        return problem(HttpStatus.PRECONDITION_FAILED, "precondition-failed", e.getMessage(), Map.of());
+    }
+
+    /**
+     * Carried finding C2: a plan item declaring a {@code formKey} the case definition has no
+     * schema for used to escape as a bare {@code IllegalStateException} and ship as an opaque
+     * 500. See {@link InvalidCaseDefinitionException} for why the definition author, not the
+     * server, owns this one.
+     */
+    @ExceptionHandler(InvalidCaseDefinitionException.class)
+    public ProblemDetail onInvalidCaseDefinition(InvalidCaseDefinitionException e) {
+        return problem(HttpStatus.BAD_REQUEST, "case-definition-invalid", e.getMessage(),
+                Map.of("caseDefinitionKey", e.caseDefinitionKey()));
+    }
+
     private ProblemDetail problem(HttpStatus status, String code, String detail,
                                   Map<String, Object> extras) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);

@@ -3,6 +3,7 @@ package org.casemgmt.service;
 import org.casemgmt.domain.*;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.error.CaseConflictException;
+import org.casemgmt.error.InvalidCaseDefinitionException;
 import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
@@ -133,8 +134,15 @@ public class CaseTaskService {
             // "forms" map) would otherwise disable this task's entire safety net with no signal
             // anywhere. Failing loudly here, the same way CaseSnapshot.definitionOf treats an
             // unresolvable reference, surfaces the inconsistency instead of masking it.
+            //
+            // Task 24 (carried finding C2): the type thrown here used to be a bare
+            // IllegalStateException, which ProblemDetailHandler maps nowhere and Spring
+            // therefore ships as an opaque 500. See InvalidCaseDefinitionException's Javadoc
+            // for why a definition-authoring typo is 400-shaped rather than a server fault.
+            // The condition detected, and the message, are unchanged.
             Map<String, Object> schema = definitions.formSchema(c.caseDefKey(), task.formKey())
-                    .orElseThrow(() -> new IllegalStateException("Task " + taskId + " declares formKey '"
+                    .orElseThrow(() -> new InvalidCaseDefinitionException(c.caseDefKey(),
+                            "Task " + taskId + " declares formKey '"
                             + task.formKey() + "' but case definition '" + c.caseDefKey()
                             + "' has no matching form schema"));
             formValidator.validate(schema, variables);
