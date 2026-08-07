@@ -24,20 +24,27 @@ import static org.assertj.core.api.Assertions.assertThat;
  * processing routed over real HTTP to a SEPARATE, independent Operaton engine — not a fake, not
  * a mock, not the same JVM's local engine wearing a different hat.
  *
- * <p><b>The "remote engine" is a second, real instance of {@link PocApplication} itself</b>
- * (embedded mode, on its own random port), which is exactly the deployment this PoC is meant to
- * demonstrate (spec: "every DevOps team runs its own engine + case service" — {@code
- * openapi-specs.md}'s own description). A THIRD instance, {@code casemgmt.engine.mode=remote},
- * points its {@code casemgmt.engine.remote.base-url} at the second instance's {@code
- * /engine-rest} and drives the whole complaint flow purely over its own HTTP API — it never
- * touches the engine instance directly. Both share the one Oracle schema
- * ({@link PocOracleSupport}), which is what lets a single {@code PocBootstrap} run (whichever
- * instance starts first) seed users, groups and the complaint definition once for both — Operaton
- * and this schema both support more than one engine node against one database, which is the
- * production shape this mirrors, not a test-only trick.
+ * <p><b>Correction (Fix round 1, review):</b> the "remote engine" is a second, real instance of
+ * {@link PocApplication} (embedded mode, on its own random port) — but it runs its embedded
+ * Operaton engine against the SAME Oracle datasource as the third, remote-mode instance ({@link
+ * PocOracleSupport}), which is what lets a single {@code PocBootstrap} run (whichever instance
+ * starts first) seed users, groups and the complaint definition once for both. That means this is
+ * accurately described as <b>two Operaton engine nodes sharing one database</b>, not two fully
+ * independent engines — a real, standard Operaton deployment shape (clustered engine nodes
+ * against one schema), but not the stronger claim an earlier draft of this Javadoc made. The claim
+ * that matters survives that correction intact: the remote-mode instance's ONLY gateway to engine
+ * work is {@code OutboxEngineGateway} (an {@code @Primary} bean — see {@code
+ * RemoteEngineAutoConfiguration}), which never calls a {@link TaskService} at all, only enqueues a
+ * {@code CM_ENGINE_COMMAND} row; the only thing that can ever drain it is {@code
+ * EngineCommandDispatcher}, registered ONLY by {@code RemoteEngineAutoConfiguration} (never by
+ * {@code EmbeddedEngineAutoConfiguration}) and invoked only via {@code
+ * CaseManagementSchedulers.dispatchEngineCommands}'s {@code ObjectProvider.ifAvailable} — which is
+ * empty, and therefore a no-op, in an embedded-mode context. So even sharing a datasource, an
+ * embedded-mode context structurally cannot drain the remote-mode instance's own outbox; the HTTP
+ * round trip this test observes is the only path there is.
  *
- * <p>Two independent proofs that this is genuinely asynchronous and genuinely remote, not a
- * same-JVM shortcut wearing a costume:
+ * <p>Three proofs that this is genuinely asynchronous and genuinely remote, not a same-JVM
+ * shortcut wearing a costume:
  * <ol>
  *   <li>{@link #theComplaintCasePathRunsEndToEndInRemoteModeAgainstARealSeparateEngine()} polls
  *   {@code engineSync} on the freshly-created task and asserts it starts {@code PENDING} (never
@@ -45,14 +52,23 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   {@code claim} is genuinely absent from {@code availableActions[]} until the starter's own
  *   {@code EngineCommandDispatcher} (Task 25's real scheduler, not a fake) drains the command and
  *   flips it — then, independently of any of THIS application's own tables, queries the engine
- *   instance's own {@link TaskService} directly and asserts a real Operaton task exists with the
+ *   node's own {@link TaskService} directly and asserts a real Operaton task exists with the
  *   expected name and candidate groups, correlated by the {@code caseId} task variable {@link
- *   org.casemgmt.engine.embedded.EmbeddedEngineGateway} always sets;</li>
- *   <li>{@link #anUnreachableRemoteEngineLeavesTheTaskPermanentlyPendingRatherThanSilentlySynced()}
- *   points a remote-mode instance at a dead port instead and proves the SAME task never leaves
- *   {@code PENDING} and {@code claim} never appears — the mechanism-stripping half: if {@code
- *   engineSync} flipped to {@code SYNCED} regardless of whether anything is listening, the first
- *   assertion above would be proving nothing.</li>
+ *   org.casemgmt.engine.embedded.EmbeddedEngineGateway} always sets. As of Fix round 1 (Important
+ *   4), {@code /engine-rest} requires authentication, so this also exercises — and depends on —
+ *   {@code RemoteEngineAutoConfiguration.engineRestClient}'s basic-auth credentials actually being
+ *   correct;</li>
+ *   <li>{@link #anUnreachableRemoteEngineLeavesTheTaskPendingAfterAFailedAttempt()} points a
+ *   remote-mode instance at a dead port instead and proves the SAME task never leaves {@code
+ *   PENDING} and {@code claim} never appears after one failed attempt — the mechanism-stripping
+ *   half: if {@code engineSync} flipped to {@code SYNCED} regardless of whether anything is
+ *   listening, the first test's assertion on it would be proving nothing;</li>
+ *   <li>{@link #wrongRemoteEngineCredentialsLeaveTheTaskPendingRatherThanSynced()} points a
+ *   remote-mode instance at the SAME real, reachable engine node as the first test, but with the
+ *   wrong password — proving the credentials the first test sends are actually load-bearing (the
+ *   401 {@code RestClientResponseException} {@link org.casemgmt.engine.remote.RemoteEngineGateway}
+ *   wraps as {@link org.casemgmt.engine.EngineException} sends the command back through the same
+ *   retry path a dead port does), not merely that the port answers.</li>
  * </ol>
  */
 @SuppressWarnings({"rawtypes", "unchecked"})
@@ -149,13 +165,21 @@ class RemoteModeComplaintIT {
     /**
      * Mechanism-stripping counterpart, kept as a permanent assertion rather than a one-off
      * manual check: points remote mode at a port nothing is listening on and proves the SAME
-     * task never leaves {@code PENDING} — the {@code EngineCommandDispatcher} retries and
-     * dead-letters, but nothing ever reports success back, so {@code claim} never appears. If
-     * {@code engineSync} flipped to {@code SYNCED} regardless of connectivity, the previous
-     * test's assertion on it would be worthless.
+     * task never leaves {@code PENDING} after one failed attempt — {@code
+     * EngineCommandDispatcher.drainOnce} catches the connection failure and calls {@code
+     * markRetry}, so nothing ever reports success back and {@code claim} never appears. If {@code
+     * engineSync} flipped to {@code SYNCED} regardless of connectivity, the first test's
+     * assertion on it would be worthless.
+     *
+     * <p><b>Corrected name (Fix round 1, review Minor):</b> this does NOT prove permanence. {@code
+     * EngineCommand.BACKOFF} starts at one minute and escalates to ten hours over five attempts
+     * before {@code exhausted()} lets {@link org.casemgmt.engine.EngineCommandDispatcher} mark the
+     * command {@code DEAD} and report {@code FAILED} — reaching that state needs over twelve
+     * cumulative hours, far outside any sane test budget. What this test actually establishes,
+     * and no more, is that the first attempt's failure does not get silently reported as success.
      */
     @Test
-    void anUnreachableRemoteEngineLeavesTheTaskPermanentlyPendingRatherThanSilentlySynced() throws Exception {
+    void anUnreachableRemoteEngineLeavesTheTaskPendingAfterAFailedAttempt() throws Exception {
         int deadPort;
         try (java.net.ServerSocket probe = new java.net.ServerSocket(0)) {
             deadPort = probe.getLocalPort();
@@ -180,7 +204,47 @@ class RemoteModeComplaintIT {
 
         // Several dispatcher cycles' worth of waiting — long enough that, if the mechanism were
         // broken (e.g. the dispatcher silently marking commands SYNCED regardless of outcome),
-        // it would have shown up by now.
+        // it would have shown up by now. NOT long enough to reach BACKOFF's 1-minute retry, which
+        // is exactly the point: this proves the FIRST attempt's failure, not eventual dead-lettering.
+        Thread.sleep(2000);
+
+        Map<String, Object> task = findTask(http, caseId, "Register complaint");
+        assertThat(task.get("engineSync")).isEqualTo("PENDING");
+        assertThat((List<Map<String, Object>>) task.get("availableActions")).isEmpty();
+    }
+
+    /**
+     * Fix round 1, Important 4: {@code /engine-rest} now requires authentication (it used to
+     * {@code permitAll()}). Points a remote-mode instance at the SAME real, reachable engine node
+     * the first test uses, but with a wrong password, and proves the task never leaves {@code
+     * PENDING} — i.e. that the credentials {@code RemoteEngineAutoConfiguration.engineRestClient}
+     * sends are actually checked and actually required, not merely present and ignored. Without
+     * this test, the first test's basic-auth path was exercised but never PROVEN load-bearing —
+     * exactly the Task 25 lesson about a harness that looks like it covers a condition but never
+     * actually produces it.
+     */
+    @Test
+    void wrongRemoteEngineCredentialsLeaveTheTaskPendingRatherThanSynced() throws Exception {
+        ConfigurableApplicationContext engine = bootPocApplication(Map.of());
+        int enginePort = portOf(engine);
+
+        ConfigurableApplicationContext remote = bootPocApplication(Map.of(
+                "casemgmt.engine.mode", "remote",
+                "casemgmt.engine.remote.base-url", "http://localhost:" + enginePort + "/engine-rest",
+                "casemgmt.engine.remote.username", "admin",
+                "casemgmt.engine.remote.password", "definitely-the-wrong-password",
+                "casemgmt.schedulers.engine-command-interval-ms", "200"));
+        int remotePort = portOf(remote);
+        RestClient http = httpClient(remotePort, "alice");
+
+        Map<String, Object> created = (Map<String, Object>) http.post().uri("/case-api/v2/cases")
+                .header("Idempotency-Key", "remote-mode-badauth-" + UUID.randomUUID())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("caseDefinitionKey", "complaint", "tenantId", "t1",
+                        "title", "Wrong credentials probe"))
+                .retrieve().toEntity(Map.class).getBody();
+        String caseId = (String) created.get("id");
+
         Thread.sleep(2000);
 
         Map<String, Object> task = findTask(http, caseId, "Register complaint");

@@ -47,12 +47,24 @@ public class PocSecurityConfig {
         };
     }
 
+    /**
+     * Fix round 1, Important 4 (review): {@code /engine-rest/**} used to fall through to {@code
+     * .anyRequest().permitAll()} — the brief's own config, verbatim. On a runnable app that also
+     * seeds a real {@code admin} user, that meant anyone who could reach the port could complete
+     * tasks, deploy processes and read history through Operaton's own REST API, bypassing every
+     * role, tenant and {@code If-Match} check the case API enforces — and it meant the remote
+     * gateway's basic-auth credentials ({@code casemgmt.engine.remote.username/password}, sent by
+     * {@code RemoteEngineAutoConfiguration.engineRestClient}) were never actually checked by
+     * anything. Both {@code /case-api/v2/**} and {@code /engine-rest/**} now require
+     * authentication; {@code RemoteModeComplaintIT} was extended (see its own Javadoc) to prove
+     * the remote gateway's credentials are what let it through, not merely that the port answers.
+     */
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         return http
                 .csrf(csrf -> csrf.disable())          // no browser sessions: this is an API
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/case-api/v2/**").authenticated()
+                        .requestMatchers("/case-api/v2/**", "/engine-rest/**").authenticated()
                         .anyRequest().permitAll())
                 .httpBasic(basic -> { })
                 .build();

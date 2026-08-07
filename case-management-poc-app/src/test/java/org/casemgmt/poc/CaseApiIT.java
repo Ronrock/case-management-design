@@ -2,6 +2,10 @@ package org.casemgmt.poc;
 
 import org.casemgmt.poc.support.PocAppEmbeddedTestBase;
 import org.junit.jupiter.api.Test;
+import org.operaton.bpm.engine.RuntimeService;
+import org.operaton.bpm.engine.TaskService;
+import org.operaton.bpm.engine.task.Task;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
@@ -26,9 +30,31 @@ import static org.assertj.core.api.Assertions.assertThat;
  * report, deviation D5): that draft could not run before this module had an
  * {@code @SpringBootApplication}, and its scenario is reproduced and extended here against the
  * real complaint plan model rather than a placeholder.
+ *
+ * <p><b>Design gap, not a defect (Fix round 1, review Important 1):</b> a {@code PROCESS_TASK}
+ * plan item's {@code processDefinitionKey} is parsed, stored on {@code PlanItemDefinition} and
+ * never read again — nothing in {@code TransitionApplier}, {@code CaseService} or {@code
+ * PlanModelInstantiator} reacts to {@code sendDecisionLetter} becoming {@code ACTIVE} by starting
+ * it. The plan never specified that a {@code PROCESS_TASK} auto-starts its process (checked
+ * before writing this note), so this is not something to wire up here. It does mean the ONLY way
+ * {@code decision-letter.bpmn} is ever instantiated is an explicit {@code POST
+ * /cases/{caseId}/processes} — which {@link #theComplaintCasePathRunsEndToEndInEmbeddedModeAndCloses()}
+ * below now genuinely calls, driving both of the process's own user tasks to completion through
+ * the embedded engine's {@link org.operaton.bpm.engine.TaskService} — and that completing the
+ * process does NOT complete {@code sendDecisionLetter}'s plan item either; the test completes it
+ * separately, standing in for whatever a real deployment would use (a BPMN completion listener,
+ * an operator, a webhook consumer) to close that loop. Recorded here for Task 27's
+ * {@code FINDINGS.md}.
  */
 @SuppressWarnings({"rawtypes", "unchecked"})
 class CaseApiIT extends PocAppEmbeddedTestBase {
+
+    // Real Operaton beans from the SAME embedded-mode context — used only to drive
+    // decision-letter.bpmn's own two user tasks (see theDecisionLetterProcessIsActuallyStartedAndRuns
+    // below). Nothing in this module's production code reacts to a BPMN process completing —
+    // see that test's Javadoc — so this is the only way to prove the process itself runs.
+    @Autowired TaskService taskService;
+    @Autowired RuntimeService runtimeService;
 
     @Test
     void pocBootstrapSeedsTheComplaintDefinitionUsersAndGroups() {
@@ -92,10 +118,49 @@ class CaseApiIT extends PocAppEmbeddedTestBase {
         claimAndComplete((String) assessTask.get("id"), Map.of("outcome", "upheld"));
 
         // ---- sendDecisionLetter: a PROCESS_TASK plan item, no CM_TASK behind it ----
+        //
+        // Fix round 1, Important 1 (review): nothing in TransitionApplier, CaseService or
+        // PlanModelInstantiator reacts to a PROCESS_TASK plan item becoming ACTIVE — the plan
+        // never specified that link (see this class's own Javadoc and the report's design-gap
+        // section). An earlier draft of this test just called completePlanItem() directly here,
+        // which proved nothing about decision-letter.bpmn beyond "it deployed without throwing".
+        // This now genuinely starts the linked process through the one endpoint that exists for
+        // it (POST /cases/{caseId}/processes) and drives its own two user tasks to completion
+        // through Operaton's own TaskService — the same embedded engine this whole test already
+        // runs against — before completing the plan item by the same manual mechanism as before.
         Map<String, Object> decisionLetterItem = findPlanItem(caseId, "sendDecisionLetter");
         assertThat(decisionLetterItem.get("state")).isEqualTo("ACTIVE");
         assertThat((List<Map<String, Object>>) decisionLetterItem.get("availableActions"))
                 .extracting(a -> a.get("action")).contains("complete");
+
+        ResponseEntity<Map> startedProcess = client("alice").post()
+                .uri("/case-api/v2/cases/{caseId}/processes", caseId)
+                .header("If-Match", "*").contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("processDefinitionKey", "decision-letter",
+                        "planItemId", decisionLetterItem.get("id")))
+                .retrieve().toEntity(Map.class);
+        assertThat(startedProcess.getStatusCode().value()).isEqualTo(201);
+        assertThat(startedProcess.getBody().get("engineSync")).isEqualTo("SYNCED"); // embedded: synchronous
+        String processInstanceId = (String) startedProcess.getBody().get("processInstanceId");
+        assertThat(runtimeService.createProcessInstanceQuery()
+                .processInstanceId(processInstanceId).count()).isEqualTo(1);
+
+        Task draft = onlyActiveTask(processInstanceId);
+        assertThat(draft.getName()).isEqualTo("Draft decision letter");
+        taskService.complete(draft.getId());
+        Task send = onlyActiveTask(processInstanceId);
+        assertThat(send.getName()).isEqualTo("Send letter");
+        taskService.complete(send.getId());
+
+        // The BPMN process genuinely ran to completion on the real engine — independent of
+        // anything this test wrote into CM_ tables.
+        assertThat(runtimeService.createProcessInstanceQuery()
+                .processInstanceId(processInstanceId).count()).isEqualTo(0);
+
+        // Completing the process does NOT complete the plan item — see the Javadoc above, and
+        // the report's design-gap section: that link does not exist. Driving it here is this
+        // test standing in for whatever, in a real deployment, would call this endpoint (a BPMN
+        // completion listener, an operator, a webhook consumer) once the letter is actually sent.
         completePlanItem(caseId, (String) decisionLetterItem.get("id"));
         assertThat(findMilestone(caseId, "decided").get("achieved")).isEqualTo(true);
 
@@ -162,6 +227,14 @@ class CaseApiIT extends PocAppEmbeddedTestBase {
                 .body(Map.of("variables", variables))
                 .retrieve().toEntity(Map.class);
         assertThat(completed.getStatusCode().value()).isEqualTo(200);
+    }
+
+    /** Exactly one task should ever be active on decision-letter.bpmn's own sequential flow. */
+    private Task onlyActiveTask(String processInstanceId) {
+        List<Task> tasks = taskService.createTaskQuery().processInstanceId(processInstanceId).list();
+        assertThat(tasks).as("decision-letter.bpmn's active task for process %s", processInstanceId)
+                .hasSize(1);
+        return tasks.get(0);
     }
 
     private void completePlanItem(String caseId, String itemId) {

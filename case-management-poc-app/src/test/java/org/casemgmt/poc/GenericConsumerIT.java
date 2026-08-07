@@ -42,15 +42,25 @@ import static org.assertj.core.api.Assertions.assertThat;
  * </ol>
  *
  * <p><b>Why this never touches the discretionary {@code investigation} branch, without
- * knowing its name.</b> {@code caseCanClose} (spec) only requires every plan item flagged
- * {@code required} in the definition; a plan item flagged {@code manualActivation} is, by
- * CMMN's own vocabulary, discretionary — offered to a case worker, never forced. This consumer
- * therefore acts reactively (claims/completes whatever is put in front of it — an offered task,
- * or an ACTIVE process-task plan item nothing else will complete) and never proactively invokes
- * {@code enable} on an item the definition marks {@code manualActivation}. That is a generic,
- * structural rule ("discretionary work is optional"), not a disguised "skip anything named
- * investigation" — the assertion at the end of this test proves it by checking the SAME
- * {@code manualActivation} flag, never a name.
+ * knowing its name — corrected (Fix round 1, review Important 2).</b> An earlier draft of this
+ * class computed a {@code manualActivation} lookup INSIDE the driving loop, but it sat behind a
+ * {@code STAGE}/{@code HUMAN_TASK} type guard that already excludes every item this case type
+ * ever marks discretionary ({@code investigation} is a {@code STAGE}, {@code investigateAspect}
+ * a {@code HUMAN_TASK}) — the lookup was dead code, reachable but never able to change the
+ * outcome, exactly the "looks protective, isn't" shape flagged in review. Removed. What actually
+ * keeps this consumer off the discretionary branch, for this case type, is simpler and fully
+ * generic: it never calls {@code enable} or {@code start} on anything, at all — only {@code
+ * claim}/{@code complete} on what a worklist task or an {@code availableActions[]} entry already
+ * offers it. Since a discretionary item requires an explicit {@code start} to ever leave {@code
+ * ENABLED} (see the note on {@code targetOnEntry} below), never calling {@code start} is
+ * sufficient on its own.
+ *
+ * <p>The {@code manualActivation} flag still earns a real, load-bearing place in this file: the
+ * assertion at the end reads it — generically, via {@code GET /case-definitions/{key}}, never a
+ * hardcoded name — to independently verify that whatever the DEFINITION marks discretionary was
+ * in fact never started. That assertion is proved non-vacuous by mechanism-stripping (see the
+ * report): forcing {@code investigation} through {@code enable}+{@code start} makes it fail with
+ * the item's real state ({@code ACTIVE}), not the expected {@code AVAILABLE}/{@code ENABLED}.
  */
 @SuppressWarnings({"rawtypes", "unchecked"})
 class GenericConsumerIT extends PocAppEmbeddedTestBase {
@@ -69,13 +79,10 @@ class GenericConsumerIT extends PocAppEmbeddedTestBase {
         Map<String, Object> definitionDetail = map(http, "/case-definitions/" + definitionKey);
         List<Map<String, Object>> planItemDefs =
                 (List<Map<String, Object>>) definitionDetail.get("planItems");
-        // Correlated by defKey, not by the definition's display "name": a live PlanItem's own
-        // "name" field is actually its defKey (PlanModelInstantiator sets it that way — a real
-        // quirk of this API, not an assumption invented here), while the definition listing's
-        // "name" field is the human-readable display name. defKey is the value the two sides
-        // actually share.
-        Map<String, Map<String, Object>> defByDefKey = planItemDefs.stream()
-                .collect(Collectors.toMap(p -> (String) p.get("defKey"), p -> p));
+        // planItemDefs' "defKey" is the value a live PlanItem's own "name" field actually holds
+        // (PlanModelInstantiator sets it that way — a real quirk of this API, not an assumption
+        // invented here), which is why the final assertion below correlates on defKey rather
+        // than the definition's separate, human-readable display "name".
 
         // ---- create a case of whatever type was discovered — no literal type name here ----
         Map<String, Object> created = (Map<String, Object>) http.post().uri(resolve("/cases"))
@@ -149,9 +156,7 @@ class GenericConsumerIT extends PocAppEmbeddedTestBase {
                 if ("STAGE".equals(type) || "HUMAN_TASK".equals(type)) {
                     continue;
                 }
-                Map<String, Object> def = defByDefKey.get(item.get("name"));
-                boolean discretionary = def != null && Boolean.TRUE.equals(def.get("manualActivation"));
-                if (!discretionary && hasAction(item, "complete")) {
+                if (hasAction(item, "complete")) {
                     invoke(http, action(item, "complete"), null);
                     progressed = true;
                 }
