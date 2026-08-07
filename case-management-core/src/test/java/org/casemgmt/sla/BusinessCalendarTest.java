@@ -192,4 +192,35 @@ class BusinessCalendarTest {
         assertThat(abutting.addDuration(at(2026, 8, 5, 9, 0), Duration.ofHours(8)))
                 .isEqualTo(at(2026, 8, 5, 17, 0));
     }
+
+    @Test
+    void workingDurationBetweenSumsAPartialSameDayWindow() {
+        // Thursday 10:00 to Thursday 14:00: entirely inside one working day.
+        assertThat(calendar().workingDurationBetween(at(2026, 8, 6, 10, 0), at(2026, 8, 6, 14, 0)))
+                .isEqualTo(Duration.ofHours(4));
+    }
+
+    @Test
+    void workingDurationBetweenSkipsTheWeekend() {
+        // Same instants as skipsTheWeekend above, but asking for the inverse question:
+        // Friday 16:00 to Monday 10:00 is only 1h(Fri 16-17) + 1h(Mon 09-10) = 2h of
+        // business time, not the ~66 wall-clock hours between them.
+        assertThat(calendar().workingDurationBetween(at(2026, 8, 7, 16, 0), at(2026, 8, 10, 10, 0)))
+                .isEqualTo(Duration.ofHours(2));
+    }
+
+    @Test
+    void workingDurationBetweenSkipsAHoliday() {
+        // Same instants as skipsHolidays above: Thursday 16:00 to the following Monday
+        // 10:00, with Friday 2026-12-25 a holiday in between. 1h(Thu 16-17) + 1h(Mon 09-10) = 2h.
+        assertThat(calendar().workingDurationBetween(at(2026, 12, 24, 16, 0), at(2026, 12, 28, 10, 0)))
+                .isEqualTo(Duration.ofHours(2));
+    }
+
+    @Test
+    void workingDurationBetweenIsZeroWhenToIsNotAfterFrom() {
+        OffsetDateTime instant = at(2026, 8, 6, 12, 0);
+        assertThat(calendar().workingDurationBetween(instant, instant)).isEqualTo(Duration.ZERO);
+        assertThat(calendar().workingDurationBetween(instant, at(2026, 8, 6, 9, 0))).isEqualTo(Duration.ZERO);
+    }
 }

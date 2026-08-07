@@ -22,6 +22,10 @@ public class SlaRepository {
             ID_, CASE_ID_, TARGET_ID_, STATUS_, STARTED_AT_, DUE_AT_, WARN_AT_, PAUSED_AT_,
             PAUSED_REASON_, PAUSED_TOTAL_SECS_, VERSION_""";
 
+    private static final String TARGET_COLUMNS = """
+            ID_, POLICY_ID_, TARGET_KEY_, NAME_, DURATION_ISO_, WARNING_ISO_,
+            PAUSED_STATES_JSON_, BREACH_ACTIONS_JSON_""";
+
     private final JdbcClient jdbc;
 
     public SlaRepository(JdbcClient jdbc) { this.jdbc = jdbc; }
@@ -65,17 +69,31 @@ public class SlaRepository {
     }
 
     public List<TargetRow> targetsFor(String policyId) {
-        return jdbc.sql("""
-                SELECT ID_, POLICY_ID_, TARGET_KEY_, NAME_, DURATION_ISO_, WARNING_ISO_,
-                       PAUSED_STATES_JSON_, BREACH_ACTIONS_JSON_
-                FROM CM_SLA_TARGET WHERE POLICY_ID_ = :id""")
+        return jdbc.sql("SELECT " + TARGET_COLUMNS + " FROM CM_SLA_TARGET WHERE POLICY_ID_ = :id")
             .param("id", policyId)
-            .query((rs, n) -> new TargetRow(rs.getString("ID_"), rs.getString("POLICY_ID_"),
-                    rs.getString("TARGET_KEY_"), rs.getString("NAME_"), rs.getString("DURATION_ISO_"),
-                    rs.getString("WARNING_ISO_"),
-                    JsonCodec.toList(rs.getString("PAUSED_STATES_JSON_")),
-                    JsonCodec.toList(rs.getString("BREACH_ACTIONS_JSON_"))))
+            .query(SlaRepository::mapTarget)
             .list();
+    }
+
+    /**
+     * Single-target lookup by id — added for pause/resume/sweep (Task 21 fix round 1): those
+     * only know a {@code CM_SLA_RECORD}'s {@code TARGET_ID_}, not its policy, and need the
+     * target's own {@code PAUSED_STATES_JSON_}/{@code BREACH_ACTIONS_JSON_} to make {@code
+     * SlaService.pause}'s reason and {@code SlaSweeper}'s breach-event emission actually mean
+     * something (review findings S3) instead of being read from the database and never consulted.
+     */
+    public TargetRow target(String id) {
+        return jdbc.sql("SELECT " + TARGET_COLUMNS + " FROM CM_SLA_TARGET WHERE ID_ = :id")
+                .param("id", id).query(SlaRepository::mapTarget).optional()
+                .orElseThrow(() -> new NotFoundException("SlaTarget", id));
+    }
+
+    private static TargetRow mapTarget(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
+        return new TargetRow(rs.getString("ID_"), rs.getString("POLICY_ID_"),
+                rs.getString("TARGET_KEY_"), rs.getString("NAME_"), rs.getString("DURATION_ISO_"),
+                rs.getString("WARNING_ISO_"),
+                JsonCodec.toList(rs.getString("PAUSED_STATES_JSON_")),
+                JsonCodec.toList(rs.getString("BREACH_ACTIONS_JSON_")));
     }
 
     public void insertRecord(SlaRecord r) {

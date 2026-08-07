@@ -153,6 +153,46 @@ public class BusinessCalendar {
                 "Could not consume " + duration + " within 5 years — check the calendar definition");
     }
 
+    /**
+     * The inverse of {@link #addDuration}: total working time that falls between two instants,
+     * skipping evenings/weekends/holidays exactly as {@code addDuration} does. Added for SLA
+     * pause/resume (Task 21 fix round 1, S1/I4): resuming a paused clock needs "how much business
+     * time was left when we paused" so it can re-add exactly that much from the resume instant —
+     * a plain wall-clock {@code Duration.between} would shift the deadline by calendar time
+     * including nights/weekends the clock was never meant to run through.
+     *
+     * <p>{@code Duration.ZERO} if {@code to} is not strictly after {@code from} — never negative,
+     * so a caller can feed the result straight into {@link #addDuration} without an extra guard.
+     * Walks the same day-by-day interval structure {@code addDuration} uses (see that method's
+     * Javadoc for the 1825-iteration safety bound), just summing overlaps with {@code [cursor, to]}
+     * instead of consuming a remaining budget.
+     */
+    public Duration workingDurationBetween(OffsetDateTime from, OffsetDateTime to) {
+        if (!to.isAfter(from)) {
+            return Duration.ZERO;
+        }
+
+        ZonedDateTime cursor = from.atZoneSameInstant(zone);
+        ZonedDateTime end = to.atZoneSameInstant(zone);
+        Duration total = Duration.ZERO;
+
+        for (int day = 0; day < 1825 && cursor.isBefore(end); day++) {
+            LocalDate date = cursor.toLocalDate();
+            for (Interval interval : intervalsOn(date)) {
+                ZonedDateTime open = ZonedDateTime.of(date, interval.from(), zone);
+                ZonedDateTime close = ZonedDateTime.of(date, interval.to(), zone);
+
+                ZonedDateTime start = cursor.isAfter(open) ? cursor : open;
+                ZonedDateTime stop = end.isBefore(close) ? end : close;
+                if (start.isBefore(stop)) {
+                    total = total.plus(Duration.between(start, stop));
+                }
+            }
+            cursor = ZonedDateTime.of(date.plusDays(1), LocalTime.MIN, zone);
+        }
+        return total;
+    }
+
     private List<Interval> intervalsOn(LocalDate date) {
         if (holidays.contains(date)) {
             return List.of();

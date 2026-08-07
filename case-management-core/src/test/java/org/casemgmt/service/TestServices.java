@@ -85,7 +85,9 @@ public final class TestServices {
      * a {@link JdbcClient} from it here.
      */
     public static SlaService slaService(JdbcClient jdbc) {
-        return new SlaService(new SlaRepository(jdbc), new CaseRepository(jdbc));
+        var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        return new SlaService(new SlaRepository(jdbc), new CaseRepository(jdbc), publisher);
     }
 
     public static SlaSweeper slaSweeper(JdbcClient jdbc) {

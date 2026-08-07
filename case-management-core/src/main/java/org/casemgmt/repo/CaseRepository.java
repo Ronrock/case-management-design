@@ -116,6 +116,42 @@ public class CaseRepository {
                 c.variables(), expectedVersion + 1, c.createdAt(), updatedAt, c.closedAt());
     }
 
+    /**
+     * Targeted, versionless write of the denormalised {@code SLA_STATUS_} column only — added
+     * for {@code SlaSweeper} (Task 21 fix round 1, review finding I2/I3).
+     *
+     * <p>Deliberately NOT the full-row {@link #update} above, and deliberately does not bump
+     * {@code VERSION_}: {@code SlaSweeper} runs on a schedule (Task 26: every 60s) against every
+     * case with a due SLA clock, and {@code update}'s optimistic {@code VERSION_} check makes it
+     * collide with ANY ordinary user editing ANY unrelated field on the SAME case at the SAME
+     * time — not a rare race, a routine one, on a live user-facing table. A plain user edit
+     * should never fail with 412 just because the sweeper happened to run a moment earlier, and
+     * the sweeper should never have to retry (or abort a whole batch, see {@code SlaSweeper}'s
+     * Javadoc) just because a user saved the case's title. {@code SLA_STATUS_} is explicitly
+     * documented as denormalized in {@code db-design.sql} for exactly this reason: it is owned by
+     * the sweeper, not by the user's optimistic version.
+     *
+     * <p>Monotonic against downgrade from {@code BREACHED}: {@link
+     * org.casemgmt.repo.SlaRepository#dueRecords} has no stable ordering, so a case with one
+     * target already breached and another only warning could otherwise have its status flip
+     * depending on which record the sweeper happens to process last in a batch, or which of two
+     * separate sweeps runs later — a warning must never mask a breach. The {@code WHERE} clause
+     * below is the single, race-free place that rule is enforced: it reads and compares the
+     * current value in the same statement as the write, so there is no read-then-write gap for a
+     * concurrent sweep to land in between.
+     *
+     * @return true if a row was actually changed (false for an unknown case id, or a same-status
+     *         no-op, or a rejected downgrade — none of which the sweeper needs to react to)
+     */
+    public boolean updateSlaStatusMonotonic(String caseId, String status) {
+        int rows = jdbc.sql("""
+                UPDATE CM_CASE SET SLA_STATUS_ = :status
+                WHERE ID_ = :id AND SLA_STATUS_ <> :status
+                  AND NOT (SLA_STATUS_ = 'BREACHED' AND :status = 'WARNING')""")
+            .param("status", status).param("id", caseId).update();
+        return rows > 0;
+    }
+
     public List<CaseInstance> query(CaseQuery q) {
         StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_CASE WHERE 1 = 1");
         List<Object[]> params = new ArrayList<>();
