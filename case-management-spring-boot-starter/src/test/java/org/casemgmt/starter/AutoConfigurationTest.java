@@ -222,9 +222,15 @@ class AutoConfigurationTest {
                     assertThat(context.getBean(EventPublisher.class))
                             .isSameAs(SubstitutingConfiguration.EVENT_PUBLISHER);
 
-                    // ...and the substitute is genuinely wired THROUGH: PlanModelEvaluator takes
-                    // a CriterionEvaluator, so an override that the context holds but nothing
-                    // consumes would be a substitution in name only.
+                    // The isSameAs assertions above are what carry this test; this last one adds
+                    // only that the rest of the bean graph still constructs around the
+                    // substitutes rather than failing to resolve a dependency. It does NOT show
+                    // the substitutes are wired THROUGH to their consumers, which an earlier
+                    // version of this comment claimed — it shows CaseService exists. (That
+                    // conclusion does happen to hold, because every injection point here is
+                    // by type with exactly one candidate, but this assertion is not the evidence
+                    // for it, and a comment asserting more than its assertion checks is the
+                    // vacuous-mechanism shape this project keeps finding.)
                     assertThat(context).hasSingleBean(CaseService.class);
                 });
     }

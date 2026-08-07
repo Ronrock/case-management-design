@@ -268,6 +268,35 @@ class IdempotencySupportTest {
     }
 
     /**
+     * Corrective round: {@code execute} discarded {@code complete()}'s boolean, so the one moment
+     * the documented reclaim-lease double-execute becomes OBSERVABLE went unobserved. A caller
+     * whose lease expired mid-operation, and whose claim a duplicate request then reclaimed and
+     * finalised, would still be handed its own 201 and body — while the STORED response, which
+     * every later retry of that key replays, belonged to the other execution. Two callers, two
+     * results, one key, no signal.
+     *
+     * <p>Attribution: the fake reports the lost claim by returning false from {@code complete}
+     * exactly as the guarded SQL does, and the assertion pins the message to the reclaim
+     * wording — a generic {@code IdempotencyConflictException} could also come from
+     * {@code begin}, which is a different condition entirely.
+     */
+    @Test
+    void aClaimLostToAReclaimerIsReportedRatherThanSilentlyReturningOK() {
+        FakeIdempotencyRepository reclaimed = new FakeIdempotencyRepository() {
+            @Override
+            public boolean complete(String key, String scope, int status, String responseJson) {
+                super.complete(key, scope, status, responseJson);
+                return false;   // someone else finalised this row first
+            }
+        };
+
+        assertThatThrownBy(() -> new IdempotencySupport(reclaimed)
+                .execute("k1", "POST /cases", "{}", () -> "created", s -> s, v -> v, 201))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("reclaimed it");
+    }
+
+    /**
      * Negative control for the whole block: a SUCCESSFUL operation must not release anything.
      * Without this, "the claim was released" is satisfiable by releasing unconditionally, which
      * would disable idempotency altogether while every test above still passed.

@@ -2,6 +2,7 @@ package org.casemgmt.rest.filter;
 
 import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.error.FormValidationException;
+import org.casemgmt.error.IdempotencyConflictException;
 import org.casemgmt.error.InvalidCaseDefinitionException;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.error.OptimisticLockException;
@@ -41,6 +42,12 @@ import java.util.function.Supplier;
  * a corrected payload got 409 "already used with a different payload", and a retry with the
  * original got 409 "still in progress". See {@link #releasesClaim} for exactly which failures
  * release and — just as deliberately — which do not.
+ *
+ * <p><b>A lost claim is reported, not ignored</b> (corrective round). {@code repo.complete}
+ * returns whether this caller still owned the claim it is finalising; discarding that boolean
+ * left the one moment the documented reclaim-lease double-execute becomes OBSERVABLE silently
+ * unobserved — this caller would get its own 201 and body while the stored response, which every
+ * later retry of that key replays, belonged to a different execution.
  */
 public class IdempotencySupport {
 
@@ -91,7 +98,24 @@ public class IdempotencySupport {
             }
             throw e;
         }
-        repo.complete(key, scope, successStatus, serializer.apply(value));
+        if (!repo.complete(key, scope, successStatus, serializer.apply(value))) {
+            // The guard on complete()'s UPDATE is only half the fix; this is the other half
+            // (corrective round). A false here means the claim this call thought it held had
+            // already been finalised by someone else — its lease expired, a duplicate request
+            // reclaimed it and stored ITS response. Returning normally would hand this caller a
+            // 201 and a body while the stored response, which every subsequent retry of this key
+            // replays, belongs to a different execution: two callers, two results, one key, and
+            // no signal anywhere. That is precisely the double-execute the reclaim lease is
+            // documented as risking, and the one moment it becomes observable.
+            //
+            // Reported as a conflict rather than swallowed: the work DID happen (the operation
+            // returned), so this is not a failure the client can retry into a clean state — it is
+            // a genuine collision the client has to know about, which is what 409 means here and
+            // what it already means for every other idempotency conflict this class raises.
+            throw new IdempotencyConflictException(
+                    "Idempotency key " + key + " was completed by a concurrent request that "
+                            + "reclaimed it; this request's own work may have been performed twice");
+        }
         return new Result<>(value, successStatus, false);
     }
 

@@ -368,6 +368,71 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
     }
 
     /**
+     * The THIRD administration endpoint, added in the final review's fix wave and shipped with
+     * its gate unasserted (corrective round). {@code EventController.deadLetters} makes two
+     * claims in its own Javadoc — administration-gated, and tenant-scoped so a foreign id is
+     * reported absent rather than forbidden — and the test above was titled "the TWO
+     * administration endpoints" and never extended to three. A new authorization surface added
+     * during a wave whose whole theme was "one door guarded, the other open" should not ship
+     * with its own door unchecked.
+     *
+     * <p>Both halves are asserted the way this class asserts everything: alice does the same
+     * thing on the same URL and gets 200, so a refusal is the gate and not a dead route; and the
+     * foreign-tenant id is checked to be INDISTINGUISHABLE from a nonexistent one, not merely
+     * refused — "both are refused" is satisfied by a 403/404 split, which is precisely the
+     * existence oracle the 404 exists to avoid.
+     */
+    @Test
+    void anOrdinaryUserCannotReadADeadLetterQueueAndAnotherTenantsIdDoesNotExist() {
+        ResponseEntity<Map> subscribed = alice().post().uri("/webhooks")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("url", "https://alice.test/hook", "eventTypes", List.of("case.created")))
+                .retrieve().toEntity(Map.class);
+        assertThat(subscribed.getStatusCode().value()).isEqualTo(201);
+        String webhookId = (String) subscribed.getBody().get("id");
+
+        // Bodies are read as raw String, not Map, on purpose: a refusal that stops working
+        // returns the endpoint's JSON ARRAY, and deserialising that into a Map fails with a
+        // Jackson error that names neither the status nor this gate. Reading the text keeps the
+        // failure legible as "expected 409, got 200" when the mechanism is stripped.
+        //
+        // carol is a legitimate, authenticated user of the right tenant with no admin group.
+        ResponseEntity<String> carol = client("carol").get()
+                .uri("/webhooks/{id}/dead-letters", webhookId).retrieve().toEntity(String.class);
+        assertThat(carol.getStatusCode().value()).isEqualTo(409);
+        assertThat(carol.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(carol.getBody()).contains("\"code\":\"action-not-available\"");
+
+        // dave IS an administrator — of tenant t2. Administration is not a cross-tenant licence,
+        // and alice's subscription must be as invisible to him as an id that was never minted.
+        ResponseEntity<String> foreign = client("dave").get()
+                .uri("/webhooks/{id}/dead-letters", webhookId).retrieve().toEntity(String.class);
+        ResponseEntity<String> nonexistent = client("dave").get()
+                .uri("/webhooks/{id}/dead-letters", "webhook-that-never-existed")
+                .retrieve().toEntity(String.class);
+        assertThat(foreign.getStatusCode().value())
+                .as("another tenant's subscription and a made-up id must be indistinguishable")
+                .isEqualTo(nonexistent.getStatusCode().value());
+        assertThat(foreign.getStatusCode().value()).isEqualTo(404);
+        assertThat(foreign.getBody()).contains("\"code\":\"not-found\"");
+        assertThat(nonexistent.getBody()).contains("\"code\":\"not-found\"");
+        // Compared with each id's own echo removed. The two bodies are not byte-identical — the
+        // problem `detail` names the id that was asked for — but that echoes back only what this
+        // caller already supplied, so it discloses nothing. Everything else must match, or the
+        // difference is the oracle.
+        assertThat(foreign.getBody().replace(webhookId, "<id>"))
+                .as("beyond the caller's own echoed id, the two answers must be identical")
+                .isEqualTo(nonexistent.getBody().replace("webhook-that-never-existed", "<id>"));
+
+        // Positive control: the owning administrator reads it successfully, so neither refusal
+        // above is a broken route or a missing bean.
+        ResponseEntity<List> owner = alice().get()
+                .uri("/webhooks/{id}/dead-letters", webhookId).retrieve().toEntity(List.class);
+        assertThat(owner.getStatusCode().value()).isEqualTo(200);
+        assertThat(owner.getBody()).isEmpty();
+    }
+
+    /**
      * Fix round 1, review finding I3, over the wire. mallory's IDENTITY groups are named
      * {@code owner} and {@code handler} — participant-role names. Under the merged role set the
      * first cut used, that gave her claim and complete on every task in every case with no

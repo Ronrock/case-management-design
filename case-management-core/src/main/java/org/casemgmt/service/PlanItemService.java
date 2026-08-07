@@ -220,6 +220,29 @@ public class PlanItemService {
      * <p>{@code terminate} is deliberately NOT gated: terminating an item is always legal from
      * any live state (that is the whole point of it being the escape hatch), and its subtree is
      * handled by {@link #cascadeTerminate} instead of being refused.
+     *
+     * <p><b>What {@code blockingItems} does not block on, and what covers the gap.</b> It ignores
+     * a child that is neither {@code required} nor {@code ACTIVE} — an optional child sitting at
+     * AVAILABLE or ENABLED does not stop its stage completing (see
+     * {@link org.casemgmt.rules.StageCompletion#blockingItems}, which is deliberately shared with
+     * the evaluator so both surfaces answer identically). So a manual {@code complete} on such a
+     * stage is permitted here, and what stops it orphaning that child is {@code reevaluate}: the
+     * evaluator would already have autocompleted the same stage, sweeping the leftover child via
+     * {@code childrenToTerminate}, before any client could observe it. Unreachable today for that
+     * reason, and stated so nobody removes the compensating behaviour on the grounds that this
+     * check "already covers it" — it does not, and the two together are what make the invariant
+     * hold.
+     *
+     * <p><b>The richer refusal is not reachable over HTTP.</b> {@code blocking-items-open} names
+     * the specific items in the way, which is the diagnostic a client actually wants. A client
+     * never sees it: {@code PlanItemController.act} calls
+     * {@code ActionPolicy.assertAllowedOnPlanItem} first, and the projection no longer offers
+     * {@code complete} for a blocked stage, so the request is refused earlier with
+     * {@code action-not-available} — correct, and silent about WHY. Enforcement is satisfied
+     * either way (this check is what a direct service caller hits, and what would catch a
+     * projection that drifted); only the diagnostic is lost at the wire. Recorded rather than
+     * restructured: making the wire carry it means reordering the controller's gate or teaching
+     * {@code ActionPolicy} to explain a refusal it currently only decides.
      */
     private void assertModelInvariants(CaseSnapshot snapshot, PlanItem item, PlanItemState to) {
         if ((to == PlanItemState.ENABLED || to == PlanItemState.ACTIVE)
