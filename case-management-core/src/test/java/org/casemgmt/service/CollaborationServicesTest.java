@@ -77,11 +77,11 @@ class CollaborationServicesTest extends OracleTestBase {
 
     @Test
     void startingAProcessRecordsTheCorrelation() {
-        var row = processes.start(caseId, null, "decision-letter", Map.of("x", 1), alice);
+        var row = processes.start(caseId, null, "letter-process", Map.of("x", 1), alice);
 
         assertThat(row.processInstanceId()).isNotBlank();
         assertThat(processes.forCase(caseId)).hasSize(1);
-        assertThat(gateway.startedProcesses).containsExactly("decision-letter");
+        assertThat(gateway.startedProcesses).containsExactly("letter-process");
     }
 
     /**
@@ -100,7 +100,7 @@ class CollaborationServicesTest extends OracleTestBase {
     void startingAProcessInRemoteModeUsesTheRowIdAsAPlaceholder() {
         LinkedProcessService remoteProcesses = TestServices.processService(dataSource(), new NullInstanceGateway());
 
-        var row = remoteProcesses.start(caseId, null, "decision-letter", Map.of(), alice);
+        var row = remoteProcesses.start(caseId, null, "letter-process", Map.of(), alice);
 
         assertThat(row.processInstanceId()).isEqualTo(row.id());
         assertThat(row.engineSync()).isEqualTo(CaseTask.EngineSync.PENDING);
@@ -151,7 +151,7 @@ class CollaborationServicesTest extends OracleTestBase {
         OutboxEngineGateway outbox = new OutboxEngineGateway(commands, id -> {});
         LinkedProcessService remoteProcesses = TestServices.processService(dataSource(), outbox);
 
-        var started = remoteProcesses.start(caseId, null, "decision-letter", Map.of(), alice);
+        var started = remoteProcesses.start(caseId, null, "letter-process", Map.of(), alice);
         assertThat(started.processInstanceId()).isEqualTo(started.id());
         assertThat(started.engineSync()).isEqualTo(CaseTask.EngineSync.PENDING);
 

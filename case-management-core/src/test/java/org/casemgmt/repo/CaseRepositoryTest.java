@@ -25,11 +25,11 @@ class CaseRepositoryTest extends OracleTestBase {
         // here — only seed the CM_CASE_DEF row that CM_CASE's FK requires.
         jdbc().sql("""
                 INSERT INTO CM_CASE_DEF (ID_, KEY_, VERSION_NO_, NAME_)
-                VALUES ('complaint:1', 'complaint', 1, 'Complaint')""").update();
+                VALUES ('widget-review:1', 'widget-review', 1, 'Widget review')""").update();
     }
 
     private CaseInstance newCase(String id) {
-        return new CaseInstance(id, "eng-a", "t1", "complaint:1", "complaint", 1,
+        return new CaseInstance(id, "eng-a", "t1", "widget-review:1", "widget-review", 1,
                 "BK-1", "Broken widget", CaseState.ACTIVE, CasePriority.HIGH,
                 null, null, "alice", "NONE", null, null,
                 Map.of("amount", 250, "channel", "web"), 0L,

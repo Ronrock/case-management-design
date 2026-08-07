@@ -99,8 +99,20 @@ class AutoConfigurationTest {
     /**
      * Fix round 1, Important 2, part 2: {@code EmbeddedEngineAutoConfiguration} is gated only on
      * {@code casemgmt.enabled}, not {@code casemgmt.engine.mode} — so it still activates in remote
-     * mode, and a correctly-configured remote-mode consumer without the Operaton engine on the
-     * classpath must not have its context blow up on that class's own introspection.
+     * mode, and a correctly-configured remote-mode consumer must end up with a context that has
+     * not failed.
+     *
+     * <p><b>What this test does NOT prove (Task 25 review, corrected in Task 27):</b> it does not
+     * protect the introspection property that motivated the nested-{@code @ConditionalOnClass}
+     * restructuring in {@link EmbeddedEngineAutoConfiguration}. It passed against the UNNESTED
+     * shape too. {@code FilteredClassLoader} owns zero URLs (it calls
+     * {@code super(new URL[0], parent)}), so it never DEFINES a class; every filtered name is
+     * merely hidden from {@code loadClass}, while {@code getDeclaredMethods()} resolves parameter
+     * types through the class's DEFINING loader — here the application loader, which sees
+     * {@code TaskService} on this module's own test classpath. No in-process harness can produce
+     * the absence this test appears to simulate. Kept because "remote mode with this
+     * auto-configuration active still yields a working context" is worth pinning on its own terms;
+     * the restructuring's guard is the code shape itself, documented there.
      */
     @Test
     void embeddedAutoConfigurationSurvivesEngineAbsentFromClasspathInRemoteMode() {

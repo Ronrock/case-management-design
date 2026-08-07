@@ -113,7 +113,7 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
 
         publisher.failNextAudit();
 
-        assertThatThrownBy(() -> processes.start(caseId, null, "decision-letter", Map.of(), alice))
+        assertThatThrownBy(() -> processes.start(caseId, null, "letter-process", Map.of(), alice))
                 .isInstanceOf(IllegalStateException.class);
 
         assertThat(countAll("CM_LINKED_PROCESS")).isEqualTo(processCountBefore);

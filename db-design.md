@@ -247,7 +247,7 @@ erDiagram
 
 | Column | Type | Key | Notes |
 |---|---|---|---|
-| `ID_` | VARCHAR2(64) | **PK** | `{key}:{version}` |
+| `ID_` | VARCHAR2(64) | **PK** | `{tenant}:{key}:{version}` — corrected in Task 27; see below |
 | `KEY_`, `VERSION_NO_`, `TENANT_ID_` | VARCHAR2 / NUMBER | UQ | Unique together |
 | `NAME_`, `DESCRIPTION_` | VARCHAR2 | | |
 | `SLA_POLICY_ID_` | VARCHAR2(64) | | Loose ref to `CM_SLA_POLICY` |
@@ -256,6 +256,21 @@ erDiagram
 | `FORMS_JSON_` | CLOB (IS JSON) | | `{formKey: JSON Schema}` — served by `/forms/{formKey}` |
 | `ROUTING_JSON_` | CLOB (IS JSON) | | `[{condition, queueId}]` |
 | `DEPLOYED_AT_`, `DEPLOYED_BY_` | TSTZ / VARCHAR2 | | |
+
+> **`ID_` derivation, corrected (Task 24 fix round 3, ruled by the human partner).** It was
+> originally `{key}:{version}` — a primary key derived from a strict subset of the columns its own
+> `UNIQUE(KEY_, VERSION_NO_, TENANT_ID_)` constraint spans, while `nextVersion` counts per tenant.
+> Two tenants deploying their first version of the same key therefore both minted
+> `widget-review:1` and collided (`ORA-00001`), which meant a multi-tenant deployment could host a
+> given case-definition key in exactly one tenant. It is now `{tenant}:{key}:{version}`, with
+> per-tenant version numbering kept.
+>
+> **`db-design.sql:27` still carries the old `-- {key}:{version}` comment and is deliberately left
+> that way.** That file is executed by Liquibase as a `sqlFile` changeset whose checksum is
+> computed over the file's bytes, comments included — editing one comment invalidates the
+> already-applied `cm-schema-v1` changeset on every existing database. The alternative,
+> `validCheckSum: ANY`, would permanently disable integrity checking on the schema's most
+> important changeset to fix a comment. This note is the correction of record; see `FINDINGS.md`.
 
 **`CM_PLAN_ITEM_DEF`** — normalized plan-item templates (queried per item during state-machine evaluation; forms/roles stay JSON because they're read whole).
 

@@ -58,9 +58,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>The {@code manualActivation} flag still earns a real, load-bearing place in this file: the
  * assertion at the end reads it — generically, via {@code GET /case-definitions/{key}}, never a
  * hardcoded name — to independently verify that whatever the DEFINITION marks discretionary was
- * in fact never started. That assertion is proved non-vacuous by mechanism-stripping (see the
- * report): forcing {@code investigation} through {@code enable}+{@code start} makes it fail with
- * the item's real state ({@code ACTIVE}), not the expected {@code AVAILABLE}/{@code ENABLED}.
+ * in fact never started.
+ *
+ * <p><b>How that assertion was proved non-vacuous (restated accurately in Task 27; the earlier
+ * wording described a run that did not happen as written).</b> A {@code POST .../enable} strip was
+ * tried FIRST and failed for the WRONG reason — {@code investigation} declares no entry criteria,
+ * so it is already {@code ENABLED} the instant the case exists and {@code enable} is not a legal
+ * transition from there. That attempt proved nothing and was discarded. The strip that counts
+ * replaced it: a raw forced {@code POST .../start} on the {@code investigation} plan item,
+ * inserted right after case creation and bypassing the consumer's own logic. It made the assertion
+ * fail with the item's real observed state, {@code COMPLETED} (started, then completed by the
+ * stage/close machinery), against the expected {@code AVAILABLE}/{@code ENABLED} — the right
+ * failure for the right reason. The strip was then removed and the file confirmed byte-identical.
  */
 @SuppressWarnings({"rawtypes", "unchecked"})
 class GenericConsumerIT extends PocAppEmbeddedTestBase {

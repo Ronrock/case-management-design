@@ -55,6 +55,7 @@ paths:
                       items:
                         type: array
                         items: {$ref: '#/components/schemas/CaseDefinition'}
+                    additionalProperties: true
     post:
       tags: [Case Definitions]
       summary: Deploy a new case definition (new key or new version)
@@ -216,6 +217,7 @@ paths:
                       items:
                         type: array
                         items: {$ref: '#/components/schemas/Case'}
+                    additionalProperties: true
     post:
       tags: [Cases]
       summary: Create a case
@@ -538,6 +540,7 @@ paths:
                       items:
                         type: array
                         items: {$ref: '#/components/schemas/Task'}
+                    additionalProperties: true
 
   /cases/{caseId}/tasks:
     get:
@@ -989,6 +992,7 @@ paths:
                       items:
                         type: array
                         items: {$ref: '#/components/schemas/QueueItem'}
+                    additionalProperties: true
 
   /cases/{caseId}/assign:
     post:
@@ -1082,6 +1086,7 @@ paths:
                       items:
                         type: array
                         items: {$ref: '#/components/schemas/Case'}
+                    additionalProperties: true
             text/csv:
               schema: {type: string}
 
@@ -1286,6 +1291,7 @@ paths:
                       items:
                         type: array
                         items: {$ref: '#/components/schemas/AuditEntry'}
+                    additionalProperties: true
 
   /case-history:
     get:
@@ -1316,6 +1322,7 @@ paths:
                       items:
                         type: array
                         items: {$ref: '#/components/schemas/Case'}
+                    additionalProperties: true
 
 components:
   securitySchemes:
@@ -1455,6 +1462,17 @@ components:
 
     Page:
       type: object
+      # additionalProperties is deliberate, and it is a workaround, not a preference. Every
+      # listing composes this envelope with `allOf: [Page, {properties: {items: [...]}}]`, and a
+      # validator that treats an undeclared property as an error (the common default, including
+      # swagger-request-validator, which OpenApiConformanceIT uses) then finds NO satisfiable
+      # instance: subschema 0 rejects `items`, subschema 1 rejects `page`/`pageSize`. `allOf` and
+      # implicit additionalProperties:false are mutually hostile in OpenAPI 3.0 and this idiom is
+      # unvalidatable without one of them giving way. Found by implementation in Task 27.
+      # A production spec should declare a concrete per-collection page component
+      # (CasePage, TaskPage, ...) instead; that keeps strictness AND typing. Not done here
+      # because it multiplies seven usages into seven components for a PoC.
+      additionalProperties: true
       properties:
         page: {type: integer}
         pageSize: {type: integer}
@@ -1472,12 +1490,19 @@ components:
         Server-computed action the caller may perform now (HATEOAS-lite).
         Frontends render these instead of re-implementing the state machine.
       properties:
-        id: {type: string, example: close}
+        # Renamed from `id` to `action` in Task 27 to match the implementation and every consumer
+        # written against it. This is the single most load-bearing field name in the whole
+        # document — it is what a generic client switches on — and a client written from the old
+        # spec would have found no `id` on any response.
+        action: {type: string, example: close}
+        # NOT IMPLEMENTED: nothing emits a human-readable label. Kept declared because a renderer
+        # needs one; recorded as an R3 gap in FINDINGS.md rather than quietly deleted.
         name: {type: string, example: Close case}
         method: {type: string, example: POST}
         href: {type: string, example: /cases/eng-a:123/close}
         formKey:
           type: string
+          nullable: true
           description: Optional form schema to render before invoking
 
     CaseState:
@@ -1492,16 +1517,23 @@ components:
         tenantId: {type: string}
         caseDefinitionKey: {type: string}
         caseDefinitionVersion: {type: integer}
-        businessKey: {type: string}
+        businessKey: {type: string, nullable: true}
         title: {type: string}
         state: {$ref: '#/components/schemas/CaseState'}
         priority: {type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL]}
-        assignee: {type: string}
-        queueId: {type: string}
-        initiator: {type: string}
+        assignee: {type: string, nullable: true}
+        queueId: {type: string, nullable: true}
+        initiator: {type: string, nullable: true}
         slaStatus: {type: string, enum: [ON_TRACK, WARNING, BREACHED, NONE]}
+        # Added in Task 27: both are emitted on every case response and were undeclared.
+        # `version` is not decoration — it is the value of the ETag, so a client written from this
+        # document could not have found the number it needs for the next If-Match.
+        outcome: {type: string, nullable: true}
+        version: {type: integer, format: int64}
         variables: {$ref: '#/components/schemas/Variables'}
         createdAt: {type: string, format: date-time}
+        # NOT IMPLEMENTED: CaseResponse carries createdAt and closedAt but no updatedAt, though
+        # CM_CASE.UPDATED_AT_ exists and is maintained. Recorded in FINDINGS.md.
         updatedAt: {type: string, format: date-time}
         closedAt: {type: string, format: date-time, nullable: true}
         availableActions:
@@ -1637,10 +1669,18 @@ components:
         candidateGroups:
           type: array
           items: {type: string}
-        formKey: {type: string}
+        formKey: {type: string, nullable: true}
         priority: {type: integer}
         dueDate: {type: string, format: date-time, nullable: true}
         createdAt: {type: string, format: date-time}
+        # Added in Task 27: all three are emitted on every task response and were undeclared.
+        # `state` and `version` are ordinary omissions (version is the task's ETag value).
+        # `engineSync` is a PoC-only addition (deviation D3): in remote mode a task exists in
+        # CM_TASK before it exists on the engine, and this field is what tells a client the
+        # difference — availableActions is empty until it reads SYNCED.
+        state: {type: string, enum: [OPEN, CLAIMED, COMPLETED, TERMINATED]}
+        engineSync: {type: string, enum: [PENDING, SYNCED, FAILED]}
+        version: {type: integer, format: int64}
         availableActions:
           type: array
           items: {$ref: '#/components/schemas/AvailableAction'}

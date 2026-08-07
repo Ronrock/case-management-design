@@ -34,22 +34,43 @@ public class EmbeddedEngineAutoConfiguration {
      * ({@link #embeddedEngineRequirementCheck}) ever gets a chance to produce its friendly
      * message — precisely the failure that check exists to pre-empt.
      *
-     * <p>Actually reproducing that with a widened {@code FilteredClassLoader} (hiding
-     * {@code ProcessEngine}, {@code TaskService}, {@code RuntimeService} AND
-     * {@code EmbeddedEngineGateway} together, both through the full auto-configuration stack and
-     * in isolation with only this class registered) did NOT trigger it on this Spring Boot 4.0.7 /
-     * JDK combination — {@code AutoConfigurationTest.embeddedModeWithoutAnEngineOnTheClasspathFailsWithAClearMessage}
-     * and a temporary isolated diagnostic both still produced the friendly message / a clean
-     * context, not a {@code NoClassDefFoundError}, even with the WIDER filter and the ORIGINAL
-     * (unnested) shape. Most likely Spring's own {@code ReflectionUtils} tolerates a
-     * {@code NoClassDefFoundError} while enumerating declared methods, and/or ASM-based condition
-     * evaluation short-circuits before any bean method that fails its own condition is ever
-     * reflectively resolved. That tolerance is an internal implementation detail, not a
-     * documented contract, so this restructuring is applied anyway as the textbook-idiomatic
-     * Spring Boot shape (many auto-configurations in the wild use exactly this
-     * nested-{@code @ConditionalOnClass}-configuration pattern for optional integrations) rather
-     * than relying on an unspecified resilience behaviour to keep working — see the Task 25
-     * report's Fix round 1 section for the full mechanism-stripping trail on this one.
+     * <p><b>This nesting is the only thing preventing that failure. It is not optional, and it is
+     * not cargo cult.</b> An attempt to reproduce the {@code NoClassDefFoundError} in-process with
+     * a widened {@code FilteredClassLoader} (hiding {@code ProcessEngine}, {@code TaskService},
+     * {@code RuntimeService} AND {@code EmbeddedEngineGateway} together) did NOT trigger it — but
+     * that non-reproduction was a HARNESS ARTIFACT, adjudicated by bytecode inspection rather than
+     * by taking either side's word for it, and it says nothing whatever about whether the original
+     * shape was safe:
+     * <ul>
+     *   <li>{@code FilteredClassLoader} cannot isolate anything here. {@code javap} of
+     *       spring-boot-test-4.0.7 shows its constructor calls {@code super(new URL[0], parent)}:
+     *       it owns ZERO URLs and therefore never DEFINES a class — every non-filtered name is
+     *       delegated to, and defined by, the application classloader. The configuration class is
+     *       also handed to {@code ApplicationContextRunner} as a {@code Class} literal from test
+     *       source, so it is app-loaded regardless of the filter.
+     *       {@code Class.getDeclaredMethods()} resolves parameter types through the DEFINING
+     *       loader — the application loader, which sees {@code TaskService} on this module's own
+     *       test classpath. Non-reproduction was structurally guaranteed.</li>
+     *   <li>The tempting explanation that Spring tolerates the error is FALSE. {@code javap} of
+     *       spring-core-7.0.8 {@code ReflectionUtils.getDeclaredMethods} shows an exception table
+     *       catching {@code Throwable} and rethrowing
+     *       {@code IllegalStateException("Failed to introspect Class...")}. Spring explicitly does
+     *       NOT swallow a {@code NoClassDefFoundError} there.</li>
+     *   <li>The other tempting explanation, ASM short-circuiting, does not apply either: the outer
+     *       class's own {@code @ConditionalOnProperty} matched, so it was registered and
+     *       instantiated, at which point {@code buildAutowiringMetadata} runs
+     *       {@code getDeclaredMethods} unconditionally — a method-level {@code @ConditionalOnClass}
+     *       notwithstanding.</li>
+     * </ul>
+     *
+     * <p>With the nesting in place the outer class carries NO Operaton and no
+     * {@code org.casemgmt.engine.embedded} type in any signature (only a no-arg
+     * {@code BeanFactoryPostProcessor} returning a Spring type), so the failure is structurally
+     * impossible in both modes. No test pins this, and realistically none can in-process: any
+     * in-JVM attempt still resolves this configuration class through a loader that can see the
+     * optional jar. The guard IS the code shape. Un-nesting it re-opens the failure with nothing
+     * in the suite to notice. See the Task 25 report and the Task 27 {@code FINDINGS.md} entry
+     * "harness isolation" for the full trail.
      */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(ProcessEngine.class)

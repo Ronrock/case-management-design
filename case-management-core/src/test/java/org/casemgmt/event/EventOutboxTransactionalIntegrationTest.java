@@ -40,7 +40,7 @@ class EventOutboxTransactionalIntegrationTest extends OracleTestBase {
     void setUp() {
         jdbc().sql("""
                 INSERT INTO CM_CASE_DEF (ID_, KEY_, VERSION_NO_, NAME_)
-                VALUES ('complaint:1', 'complaint', 1, 'Complaint')""").update();
+                VALUES ('widget-review:1', 'widget-review', 1, 'Widget review')""").update();
         jdbc().sql("""
                 INSERT INTO CM_WEBHOOK_SUB (ID_, TENANT_ID_, URL_, EVENT_TYPES_JSON_, ACTIVE_,
                     SECRET_HASH_, MAX_RETRIES_, VERSION_)
@@ -60,7 +60,7 @@ class EventOutboxTransactionalIntegrationTest extends OracleTestBase {
         jdbc().sql("""
                 INSERT INTO CM_CASE (ID_, ENGINE_ID_, TENANT_ID_, CASE_DEF_ID_, CASE_DEF_KEY_,
                     CASE_DEF_VER_, TITLE_, STATE_)
-                VALUES (:id, 'eng-a', 't1', 'complaint:1', 'complaint', 1, 'Original title', 'ACTIVE')""")
+                VALUES (:id, 'eng-a', 't1', 'widget-review:1', 'widget-review', 1, 'Original title', 'ACTIVE')""")
             .param("id", caseId).update();
     }
 

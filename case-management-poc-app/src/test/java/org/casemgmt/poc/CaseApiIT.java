@@ -81,6 +81,54 @@ class CaseApiIT extends PocAppEmbeddedTestBase {
         assertThat(wrongPassword.getStatusCode().value()).isEqualTo(401);
     }
 
+    /**
+     * Guards the human-ruled fix that {@code /engine-rest} must require authentication (Task 26,
+     * Important 4) against silent reversion — the obligation carried into Task 27.
+     *
+     * <p>The pre-existing coverage could not do this. {@code RemoteModeComplaintIT}'s
+     * wrong-password test proves credentials are CHECKED, but it would pass identically under the
+     * old {@code .anyRequest().permitAll()} configuration: {@code BasicAuthenticationFilter}
+     * rejects a malformed-credential {@code Authorization} header with 401 before any
+     * authorization rule is consulted, so the request never reaches the matcher. Revert
+     * {@code PocSecurityConfig}'s matcher to {@code permitAll} and every other test in the module
+     * stays green. This one does not: with no {@code Authorization} header at all there is nothing
+     * for the authentication filter to reject, and only the matcher can produce a 401.
+     *
+     * <p>The second half is attribution, not coverage: the SAME request with valid credentials is
+     * NOT refused, so the 401 above is Spring Security turning away an anonymous caller and not a
+     * missing endpoint, an unmapped {@code /engine-rest} servlet or a broken engine — any of which
+     * would also produce a non-200 and satisfy a bare "not authorized" assertion.
+     *
+     * <p>It asserts "not 401" rather than "200" deliberately. Operaton's own answer to a bare
+     * {@code GET /task} depends on what is in the shared engine database when it runs: 200 when
+     * this class runs alone, 400 in a full-module run after the other classes have created tasks
+     * against the same schema. That variability is Operaton's business, not this test's — pinning
+     * it would make this test fail for a reason that has nothing to do with the matcher it guards.
+     * The authentication outcome is stable in both cases and is the whole subject here.
+     */
+    @Test
+    void engineRestRefusesUnauthenticatedRequests() {
+        var anonymous = org.springframework.web.client.RestClient.builder()
+                .baseUrl("http://localhost:" + port)
+                .defaultStatusHandler(status -> true, (request, response) -> { })
+                .build();
+
+        ResponseEntity<String> unauthenticated = anonymous.get().uri("/engine-rest/task")
+                .retrieve().toEntity(String.class);
+        assertThat(unauthenticated.getStatusCode().value())
+                .as("GET /engine-rest/task with no credentials must be refused by the security "
+                        + "matcher; a 200 here means /engine-rest is open to the world again")
+                .isEqualTo(401);
+
+        ResponseEntity<String> authenticated = client("admin").get().uri("/engine-rest/task")
+                .retrieve().toEntity(String.class);
+        assertThat(authenticated.getStatusCode().value())
+                .as("the identical request with valid credentials is not refused, so the 401 above "
+                        + "is attributable to authentication and nothing else; body was: %s",
+                        authenticated.getBody())
+                .isNotEqualTo(401);
+    }
+
     @Test
     void theComplaintCasePathRunsEndToEndInEmbeddedModeAndCloses() {
         // ---- brief's Step 6, automated ----

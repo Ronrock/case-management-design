@@ -21,18 +21,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * O2, remote-mode half: the complaint case runs end to end with THIS application's own case
- * processing routed over real HTTP to a SEPARATE, independent Operaton engine — not a fake, not
- * a mock, not the same JVM's local engine wearing a different hat.
+ * processing routed over real HTTP, in a different JVM process context, to a SECOND Operaton
+ * engine node — not a fake, not a mock, not the same context's local engine wearing a different
+ * hat.
  *
- * <p><b>Correction (Fix round 1, review):</b> the "remote engine" is a second, real instance of
- * {@link PocApplication} (embedded mode, on its own random port) — but it runs its embedded
- * Operaton engine against the SAME Oracle datasource as the third, remote-mode instance ({@link
- * PocOracleSupport}), which is what lets a single {@code PocBootstrap} run (whichever instance
- * starts first) seed users, groups and the complaint definition once for both. That means this is
- * accurately described as <b>two Operaton engine nodes sharing one database</b>, not two fully
- * independent engines — a real, standard Operaton deployment shape (clustered engine nodes
- * against one schema), but not the stronger claim an earlier draft of this Javadoc made. The claim
- * that matters survives that correction intact: the remote-mode instance's ONLY gateway to engine
+ * <p><b>Precisely what "remote" means here (corrected in Task 27; an earlier lead sentence claimed
+ * "a SEPARATE, independent Operaton engine", which the paragraph below has always retracted):</b>
+ * the "remote engine" is a second, real instance of {@link PocApplication} (embedded mode, on its
+ * own random port) that runs its embedded Operaton engine against the SAME Oracle datasource as
+ * the remote-mode instance ({@link PocOracleSupport}) — which is what lets a single
+ * {@code PocBootstrap} run (whichever instance starts first) seed users, groups and the complaint
+ * definition once for both. So this is <b>two Operaton engine nodes sharing one database</b>, a
+ * real and standard Operaton deployment shape (clustered engine nodes against one schema), and NOT
+ * two fully independent engines. The claim that matters survives intact: the remote-mode
+ * instance's ONLY gateway to engine
  * work is {@code OutboxEngineGateway} (an {@code @Primary} bean — see {@code
  * RemoteEngineAutoConfiguration}), which never calls a {@link TaskService} at all, only enqueues a
  * {@code CM_ENGINE_COMMAND} row; the only thing that can ever drain it is {@code
