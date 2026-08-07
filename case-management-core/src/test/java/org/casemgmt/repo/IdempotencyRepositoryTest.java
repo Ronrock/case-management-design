@@ -58,4 +58,20 @@ class IdempotencyRepositoryTest extends OracleTestBase {
         repo.begin("k1", "POST /cases", "hash-a");
         assertThat(repo.begin("k1", "POST /cases/bulk", "hash-a")).isEmpty();
     }
+
+    // Review fix (Important, I5): a caller that begin()s and then crashes or throws before
+    // calling complete() must not wedge every retry of that key for the full 48h purge
+    // window. Simulates an abandoned claim by backdating CREATED_AT_ past the reclaim
+    // lease directly (the public API has no way to create an old row instantly), then
+    // proves a same-key retry reclaims it rather than conflicting.
+    @Test
+    void anAbandonedInProgressRowIsReclaimedAfterTheLeaseExpires() {
+        repo.begin("k1", "POST /cases", "hash-a");   // never completed
+        jdbc().sql("""
+                UPDATE CM_IDEMPOTENCY_KEY SET CREATED_AT_ = SYSTIMESTAMP - NUMTODSINTERVAL(10, 'MINUTE')
+                WHERE KEY_ = :key AND SCOPE_ = :scope""")
+            .param("key", "k1").param("scope", "POST /cases").update();
+
+        assertThat(repo.begin("k1", "POST /cases", "hash-a")).isEmpty();
+    }
 }

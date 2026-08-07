@@ -58,8 +58,14 @@ public class ProblemDetailHandler {
         return problem(HttpStatus.INTERNAL_SERVER_ERROR, "model-error", e.getMessage(), Map.of());
     }
 
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ProblemDetail onBadRequest(IllegalArgumentException e) {
+    // Scoped to MalformedETagException, NOT a blanket IllegalArgumentException handler
+    // (review finding, Important): core throws IllegalArgumentException from several
+    // sites that are not client-shaped — WebhookRepository's paging-limit guard,
+    // PlanModelInstantiator's bad parentStageKey (which the status table above routes to
+    // 500 model-error) — and a blanket handler here would misclassify both as 400. See
+    // MalformedETagException's javadoc.
+    @ExceptionHandler(MalformedETagException.class)
+    public ProblemDetail onMalformedETag(MalformedETagException e) {
         return problem(HttpStatus.BAD_REQUEST, "invalid-request", e.getMessage(), Map.of());
     }
 

@@ -1,13 +1,14 @@
 package org.casemgmt.rest;
 
 import org.casemgmt.error.*;
+import org.casemgmt.rest.error.MalformedETagException;
 import org.casemgmt.rest.error.ProblemDetailHandler;
 import org.casemgmt.rest.filter.ETagSupport;
 import org.junit.jupiter.api.Test;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -47,13 +48,30 @@ class ErrorMappingTest {
         assertThat(problem.getStatus()).isEqualTo(428);
     }
 
+    // Review fix (Important, fifth vacuous test caught in this plan): the original version
+    // of this test asserted only status 422 and containsKey("violations") — it would keep
+    // passing if the handler emitted the wrong pointers, or no pointers at all inside the
+    // list. Now asserts the exact extracted content, including the two RFC 6901 shapes
+    // Task 17 specifically fixed and that are easiest to corrupt: a nested pointer
+    // (/nested/outcome) and the empty-string ROOT pointer ("") for a violation against the
+    // whole document — the one most easily mangled into "/" or silently dropped.
     @Test
     void formViolationsMapTo422WithPointers() {
-        ProblemDetail problem = handler.onFormInvalid(new FormValidationException(
-                List.of(new FormValidationException.Violation("/outcome", "must be one of [approve, reject]"))));
+        ProblemDetail problem = handler.onFormInvalid(new FormValidationException(List.of(
+                new FormValidationException.Violation("/outcome", "must be one of [approve, reject]"),
+                new FormValidationException.Violation("/nested/outcome", "must be a string"),
+                new FormValidationException.Violation("", "outcome is required"))));
 
         assertThat(problem.getStatus()).isEqualTo(422);
-        assertThat(problem.getProperties()).containsKey("violations");
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, String>> violations =
+                (List<Map<String, String>>) problem.getProperties().get("violations");
+
+        assertThat(violations).containsExactly(
+                Map.of("pointer", "/outcome", "message", "must be one of [approve, reject]"),
+                Map.of("pointer", "/nested/outcome", "message", "must be a string"),
+                Map.of("pointer", "", "message", "outcome is required"));
     }
 
     @Test
@@ -67,5 +85,36 @@ class ErrorMappingTest {
     void aMissingIfMatchHeaderIsRejectedRatherThanAssumed() {
         assertThatThrownBy(() -> ETagSupport.parse(null))
                 .isInstanceOf(PreconditionRequiredException.class);
+    }
+
+    // Review fix (Important, I4): RFC 7232 §3.1 defines If-Match: * as "matches any current
+    // representation" — the request should proceed, not 400. parse() (kept narrow on
+    // purpose, see its javadoc) still rejects "*"; parseIfMatch() is the RFC-complete entry
+    // point that understands it.
+    @Test
+    void wildcardIfMatchMeansAnyCurrentRepresentation() {
+        assertThat(ETagSupport.parseIfMatch("*")).isEmpty();
+    }
+
+    @Test
+    void multiValueIfMatchParsesTheFirstListedTag() {
+        assertThat(ETagSupport.parseIfMatch("\"5\", \"7\"")).hasValue(5L);
+    }
+
+    @Test
+    void multiValueIfMatchStillRejectsAMalformedEntry() {
+        assertThatThrownBy(() -> ETagSupport.parseIfMatch("\"5\", not-a-number"))
+                .isInstanceOf(MalformedETagException.class);
+    }
+
+    // Review fix (Important, I6): a malformed If-Match header must map to 400 through its
+    // own exception type, not a blanket IllegalArgumentException handler that would also
+    // catch unrelated, non-client-shaped exceptions elsewhere in core.
+    @Test
+    void malformedETagMapsTo400() {
+        ProblemDetail problem = handler.onMalformedETag(
+                new MalformedETagException("not-a-number", new NumberFormatException()));
+        assertThat(problem.getStatus()).isEqualTo(400);
+        assertThat(problem.getProperties()).containsEntry("code", "invalid-request");
     }
 }

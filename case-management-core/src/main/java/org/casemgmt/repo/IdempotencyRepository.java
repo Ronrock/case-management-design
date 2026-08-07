@@ -10,6 +10,16 @@ import java.util.Optional;
  * Idempotency-Key handling (spec §6.4). The row is inserted BEFORE the work happens,
  * so a concurrent duplicate collides on the primary key rather than doing the work twice.
  *
+ * <p><b>Required transaction boundary</b> (review finding, Important — I5): {@code begin}
+ * and {@code complete} must each run as their own, separately-committed unit of work, never
+ * wrapped together with the caller's business operation in one enclosing
+ * {@code @Transactional} (see {@code case-management-rest}'s {@code IdempotencySupport}
+ * class javadoc, which owns the call site). If {@code begin}'s INSERT were deferred inside a
+ * still-open outer transaction, a concurrent duplicate request would never see the
+ * in-progress row until that transaction committed — the exact race this class exists to
+ * close. This is why neither this class nor {@code IdempotencySupport} carries a
+ * {@code @Transactional} annotation.
+ *
  * <p>In-progress rows are marked by {@code RESPONSE_STATUS_ = 0} — never a real HTTP status —
  * with {@code RESPONSE_JSON_} left {@code NULL}. Deviation from an earlier draft that stored a
  * literal sentinel string ({@code "__IN_PROGRESS__"}) in {@code RESPONSE_JSON_}: that column
@@ -20,6 +30,22 @@ import java.util.Optional;
  * treats as satisfied, not violated) — already relied on elsewhere in this schema by
  * {@code CM_AUDIT_LOG.BEFORE_JSON_}/{@code AFTER_JSON_}, which are nullable CLOBs under the
  * identical constraint shape.
+ *
+ * <p><b>Abandoned-claim reclaim</b> (review finding, Important — I5): if the caller that won
+ * {@code begin()} crashes, or its own operation throws, before it ever calls {@code complete},
+ * the row is stuck at status 0 forever with no automatic release — {@link
+ * #purgeOlderThanHours} deletes it eventually, but at the spec's 48h retention window that is
+ * a 48-hour wedge on every retry of that key, not an acceptable recovery path. {@code begin}
+ * instead treats an in-progress row older than {@link #LEASE_MINUTES} as abandoned and lets a
+ * new caller reclaim it via a conditional {@code UPDATE ... WHERE RESPONSE_STATUS_ = 0 AND
+ * CREATED_AT_ < threshold}: the same "zero-rows-affected-means-someone-else-got-there-first"
+ * pattern this codebase already uses for optimistic-lock updates, keyed on a time threshold
+ * instead of a version number. When two callers race to reclaim the same abandoned row,
+ * Oracle's row lock serialises the two UPDATEs and only the first affects a row — the second
+ * evaluates its WHERE clause against the now-fresh CREATED_AT_ and affects zero, so at most
+ * one caller ever wins. A fresh in-progress row
+ * (within the lease) still conflicts exactly as before — {@code anInFlightDuplicateConflicts}
+ * below covers that branch and remains a real, reachable production path.
  */
 public class IdempotencyRepository {
 
@@ -27,6 +53,14 @@ public class IdempotencyRepository {
 
     /** Sentinel HTTP status for a row whose work has not completed yet. Never a real status. */
     private static final int IN_PROGRESS_STATUS = 0;
+
+    /**
+     * How long an in-progress row is treated as genuinely in flight before a new caller may
+     * reclaim it (see class javadoc). Minutes, not the 48h purge window: long enough that a
+     * normal request in flight is never mistaken for abandoned, short enough that a crashed
+     * caller does not wedge retries for anywhere near 48h.
+     */
+    private static final int LEASE_MINUTES = 5;
 
     private final JdbcClient jdbc;
 
@@ -43,11 +77,11 @@ public class IdempotencyRepository {
                 .update();
             return Optional.empty();
         } catch (DuplicateKeyException e) {
-            return Optional.of(replay(key, scope, requestHash));
+            return replayOrReclaim(key, scope, requestHash);
         }
     }
 
-    private StoredResponse replay(String key, String scope, String requestHash) {
+    private Optional<StoredResponse> replayOrReclaim(String key, String scope, String requestHash) {
         var row = jdbc.sql("""
                 SELECT REQUEST_HASH_, RESPONSE_STATUS_, RESPONSE_JSON_ FROM CM_IDEMPOTENCY_KEY
                 WHERE KEY_ = :key AND SCOPE_ = :scope""")
@@ -64,11 +98,24 @@ public class IdempotencyRepository {
             throw new IdempotencyConflictException(
                     "Idempotency key " + key + " was already used with a different payload");
         }
-        if (status == IN_PROGRESS_STATUS) {
-            throw new IdempotencyConflictException(
-                    "A request with idempotency key " + key + " is still in progress — retry shortly");
+        if (status != IN_PROGRESS_STATUS) {
+            return Optional.of(new StoredResponse(status, body));
         }
-        return new StoredResponse(status, body);
+
+        int reclaimed = jdbc.sql("""
+                UPDATE CM_IDEMPOTENCY_KEY SET CREATED_AT_ = SYSTIMESTAMP
+                WHERE KEY_ = :key AND SCOPE_ = :scope AND RESPONSE_STATUS_ = :inProgress
+                    AND CREATED_AT_ < SYSTIMESTAMP - NUMTODSINTERVAL(:leaseMinutes, 'MINUTE')""")
+            .param("key", key).param("scope", scope).param("inProgress", IN_PROGRESS_STATUS)
+            .param("leaseMinutes", LEASE_MINUTES)
+            .update();
+        if (reclaimed == 1) {
+            // We now own this claim as if begin()'s INSERT had just succeeded: proceed.
+            return Optional.empty();
+        }
+        // Still within the lease (genuinely in flight) or another caller reclaimed it first.
+        throw new IdempotencyConflictException(
+                "A request with idempotency key " + key + " is still in progress — retry shortly");
     }
 
     public void complete(String key, String scope, int status, String responseJson) {
