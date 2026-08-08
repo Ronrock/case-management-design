@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: case-management-poc
+  datasource:
+    url: jdbc:oracle:thin:@localhost:1521/FREEPDB1
+    username: cm
+    password: cm
+    driver-class-name: oracle.jdbc.OracleDriver
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.xml
+
+casemgmt:
+  enabled: true
+  engine-id: eng-a
+  engine:
+    mode: embedded
+  events:
+    type-prefix: org.example.cm
+
+operaton:
+  bpm:
+    database:
+      schema-update: true
+    admin-user:
+      id: admin
+      password: admin
+    # Deviation from the brief: PocBootstrap.seedProcesses deploys processes/decision-letter.bpmn
+    # explicitly (spec's own bootstrap contract). Operaton's own auto-deployment feature scans
+    # the same classpath:/processes/ location by default, which — under a DIFFERENT deployment
+    # name than PocBootstrap's "poc-processes" — is not caught by enableDuplicateFiltering (that
+    # only compares against the latest deployment of the SAME name) and would silently mint a
+    # second, redundant version of decision-letter on every startup. PocBootstrap is the one
+    # deployment mechanism this PoC uses; auto-deployment is switched off so there is only ever
+    # one.
+    auto-deployment-enabled: false
+    # Deviation, found in this task, not in the brief: Operaton rejects any identity-group id
+    # that fails its resource-id whitelist, which defaults to (effectively) [a-zA-Z0-9]+ — no
+    # colon. PocBootstrap.TENANT_ID's "tenant:t1" group (deviation D1, required so
+    # CallerResolver.tenantId has a group to read at all) is REJECTED by that default with
+    # "Group has an invalid id: 'tenant:t1' is not a valid resource identifier"
+    # (org.operaton.bpm.engine.ProcessEngineException, reproduced against a real embedded
+    # engine while writing this task's IT). Widened to allow the colon this PoC's own tenant
+    # and candidate-group conventions use; still rejects anything genuinely unsafe for a
+    # resource id (spaces, quotes, SQL/HTML metacharacters).
+    generic-properties:
+      properties:
+        generalResourceWhitelistPattern: "[a-zA-Z0-9_:-]+"

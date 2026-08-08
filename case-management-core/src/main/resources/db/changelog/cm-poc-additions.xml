@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+  <!-- PoC-ONLY additions (spec §3.5). These are NOT part of the target design:
+       they exist because remote mode cannot join the local transaction. -->
+
+  <changeSet id="cm-poc-engine-command" author="casemgmt">
+    <createTable tableName="CM_ENGINE_COMMAND">
+      <column name="ID_" type="VARCHAR2(64)"><constraints primaryKey="true" nullable="false"/></column>
+      <column name="CASE_ID_" type="VARCHAR2(140)"><constraints nullable="false"/></column>
+      <column name="TYPE_" type="VARCHAR2(30)"><constraints nullable="false"/></column>
+      <column name="PAYLOAD_JSON_" type="CLOB"/>
+      <column name="STATUS_" type="VARCHAR2(20)" defaultValue="PENDING"><constraints nullable="false"/></column>
+      <column name="ATTEMPTS_" type="NUMBER(3)" defaultValueNumeric="0"><constraints nullable="false"/></column>
+      <column name="NEXT_ATTEMPT_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="LAST_ERROR_" type="VARCHAR2(2000)"/>
+      <column name="CREATED_AT_" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="SYSTIMESTAMP">
+        <constraints nullable="false"/>
+      </column>
+    </createTable>
+    <sql>
+      ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT CK_CM_ENGCMD_STATUS
+        CHECK (STATUS_ IN ('PENDING','RETRYING','DONE','DEAD'))
+    </sql>
+    <createIndex tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_DUE">
+      <column name="STATUS_"/><column name="NEXT_ATTEMPT_AT_"/>
+    </createIndex>
+  </changeSet>
+
+  <!-- Task 13 review round 2: claimDue's original SELECT ... FOR UPDATE SKIP LOCKED never
+       mutated any row, so two claims with no markDone/markRetry between them returned the same
+       row every time - the FOR UPDATE lock is released the instant the single autocommitted
+       SELECT statement completes, long before the engine call or the status update that was
+       meant to follow it. Fixed with claim-by-UPDATE (see EngineCommandRepository.claimDue):
+       these two columns let a claiming UPDATE mark rows atomically as this dispatcher's, and
+       let a claim whose dispatcher died mid-flight be recognised as stale and reclaimed rather
+       than stranded forever. A new changeset, not an edit to cm-poc-engine-command above, per
+       Liquibase convention: already-applied changesets are immutable. -->
+  <changeSet id="cm-poc-engine-command-claim" author="casemgmt">
+    <addColumn tableName="CM_ENGINE_COMMAND">
+      <column name="CLAIM_TOKEN_" type="VARCHAR2(64)"/>
+      <column name="CLAIMED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <sql>ALTER TABLE CM_ENGINE_COMMAND DROP CONSTRAINT CK_CM_ENGCMD_STATUS</sql>
+    <sql>
+      ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT CK_CM_ENGCMD_STATUS
+        CHECK (STATUS_ IN ('PENDING','RETRYING','CLAIMED','DONE','DEAD'))
+    </sql>
+    <createIndex tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_CLAIM">
+      <column name="CLAIM_TOKEN_"/>
+    </createIndex>
+  </changeSet>
+
+  <!-- Task 19: same claim-by-UPDATE fix as cm-poc-engine-command-claim above, applied to the
+       webhook delivery outbox for the same reason — SELECT ... FOR UPDATE SKIP LOCKED releases
+       its lock the instant the SELECT returns on this codebase's autocommit connections, long
+       before the outbound HTTP call, so two dispatchers would claim the same delivery row. See
+       WebhookRepository.claimDueDeliveries. -->
+  <changeSet id="cm-poc-webhook-delivery-claim" author="casemgmt">
+    <addColumn tableName="CM_WEBHOOK_DELIVERY">
+      <column name="CLAIM_TOKEN_" type="VARCHAR2(64)"/>
+      <column name="CLAIMED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <sql>ALTER TABLE CM_WEBHOOK_DELIVERY DROP CONSTRAINT CK_CM_WHD_STATUS</sql>
+    <sql>
+      ALTER TABLE CM_WEBHOOK_DELIVERY ADD CONSTRAINT CK_CM_WHD_STATUS
+        CHECK (STATUS_ IN ('PENDING','DELIVERED','RETRYING','CLAIMED','DEAD'))
+    </sql>
+    <createIndex tableName="CM_WEBHOOK_DELIVERY" indexName="IX_CM_WHD_CLAIM">
+      <column name="CLAIM_TOKEN_"/>
+    </createIndex>
+  </changeSet>
+
+  <!-- Task 27 corrective round: openapi-specs.md:1245 documents GET
+       /webhooks/{webhookId}/dead-letters as returning a `failedAt` timestamp per row, and
+       CM_WEBHOOK_DELIVERY has no column that carries it — DELIVERED_AT_ is null for a DEAD row,
+       NEXT_ATTEMPT_AT_ is stale from the last retry that was scheduled, and markDead clears
+       CLAIMED_AT_ as it finalises the row. So the published response could not be served at all
+       without this. It is also the field an operator most needs for the failure that motivated
+       the endpoint (see WebhookDispatcher's Javadoc on what a restart costs): "did these all die
+       at 09:14, when we restarted?" is exactly the question, and nothing recorded the answer.
+       A new changeset rather than an edit to cm-poc-webhook-delivery-claim above, per Liquibase
+       convention: already-applied changesets are immutable. -->
+  <changeSet id="cm-poc-webhook-delivery-failed-at" author="casemgmt">
+    <addColumn tableName="CM_WEBHOOK_DELIVERY">
+      <column name="FAILED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-poc-engine-sync-columns" author="casemgmt">
+    <addColumn tableName="CM_TASK">
+      <column name="ENGINE_SYNC_" type="VARCHAR2(20)" defaultValue="SYNCED">
+        <constraints nullable="false"/>
+      </column>
+    </addColumn>
+    <addColumn tableName="CM_LINKED_PROCESS">
+      <column name="ENGINE_SYNC_" type="VARCHAR2(20)" defaultValue="SYNCED">
+        <constraints nullable="false"/>
+      </column>
+    </addColumn>
+  </changeSet>
+</databaseChangeLog>

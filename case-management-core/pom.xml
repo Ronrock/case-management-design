@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.casemgmt</groupId>
+    <artifactId>case-management-root</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>case-management-core</artifactId>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-jdbc</artifactId>
+    </dependency>
+    <!-- Task 13 prerequisite: spring-boot-starter-jdbc brings spring-tx (the @Transactional
+         annotation and PlatformTransactionManager SPI) but NOT spring-context or spring-aop —
+         those are what actually create the AOP proxy that intercepts an @Transactional call and
+         opens/commits/rolls back a real transaction. Without this, @EnableTransactionManagement
+         and @Configuration processing are unavailable and @Transactional stays a silent no-op,
+         exactly the gap Task 5 found. No version pinned here: managed by the spring-boot BOM
+         already imported (see dependencyManagement comment above spring-boot-starter-jdbc),
+         so this resolves to the same Spring version (7.0.8) as spring-tx/spring-jdbc. -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.liquibase</groupId>
+      <artifactId>liquibase-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.networknt</groupId>
+      <artifactId>json-schema-validator</artifactId>
+    </dependency>
+    <!-- Fix-round addition (Jackson finding): declare Jackson 2's jackson-databind directly.
+         core has no Jackson 3 (tools.jackson.*) on its classpath at all, so code in this
+         module (e.g. a future JsonCodec) must use com.fasterxml.jackson.databind.ObjectMapper.
+         Before this, jackson-databind arrived only transitively via json-schema-validator;
+         declaring it directly makes the compile-time dependency explicit instead of
+         incidental. No new version: it inherits the version already pinned in root
+         dependencyManagement (2.21.5, resolved via the operaton-bpm-spring-boot-starter
+         BOM import, the same version every other module's Jackson-2-compat path uses). -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <!-- JUEL: pulled in on its own, NOT via operaton-engine, so core stays engine-free.
+         org.operaton.bpm.impl.juel is an expression library, not the process engine. -->
+    <dependency>
+      <groupId>org.operaton.bpm.juel</groupId>
+      <artifactId>operaton-juel</artifactId>
+      <version>${version.operaton}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>oracle-free</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.oracle.database.jdbc</groupId>
+      <artifactId>ojdbc11</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Task 25: ArchitectureTest enforces "core stays engine-free" and "no case-type
+         vocabulary in the service layer" mechanically. Test-scoped only, like every other
+         ArchUnit consumer in this reactor (case-management-poc-app). -->
+    <dependency>
+      <groupId>com.tngtech.archunit</groupId>
+      <artifactId>archunit-junit5</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Publishes a test-jar containing EngineGatewayContract (and any other shared test
+           fixtures under src/test/java) so case-management-engine-embedded and
+           case-management-engine-remote can each depend on it with <type>test-jar</type>
+           and subclass the contract to prove their EngineGateway implementations agree. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>test-jar</id>
+            <goals><goal>test-jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <!-- Copies db-design.sql (repo root, the design's single source of truth) into the
+           build so Liquibase's sqlFile changeset can execute it verbatim: no second copy
+           of the DDL is maintained anywhere. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>copy-design-ddl</id>
+            <phase>generate-resources</phase>
+            <goals><goal>copy-resources</goal></goals>
+            <configuration>
+              <outputDirectory>${project.build.outputDirectory}/db/changelog/sql</outputDirectory>
+              <resources>
+                <resource>
+                  <directory>${project.basedir}/..</directory>
+                  <includes><include>db-design.sql</include></includes>
+                </resource>
+              </resources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

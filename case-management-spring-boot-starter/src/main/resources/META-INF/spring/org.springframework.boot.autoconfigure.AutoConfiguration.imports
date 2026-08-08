@@ -1,0 +1,4 @@
+org.casemgmt.starter.EmbeddedEngineAutoConfiguration
+org.casemgmt.starter.RemoteEngineAutoConfiguration
+org.casemgmt.starter.CaseManagementAutoConfiguration
+org.casemgmt.starter.CaseManagementSchedulers

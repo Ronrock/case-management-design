@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:operaton="http://operaton.org/schema/1.0/bpmn"
+                  id="defs-decision-letter" targetNamespace="http://casemgmt.org/poc">
+  <!-- operaton:historyTimeToLive is not in the brief's original fragment. Deviation, found in
+       this task: this Operaton version refuses to deploy ANY process with no TTL at all —
+       "ENGINE-12018 History Time To Live (TTL) cannot be null" — reproduced against a real
+       embedded engine while writing this task's IT. 180 days is an arbitrary, PoC-appropriate
+       default; a production deployment would set this per the org's own history-retention
+       policy. -->
+  <bpmn:process id="decision-letter" name="Decision letter" isExecutable="true"
+                operaton:historyTimeToLive="180">
+    <bpmn:startEvent id="start"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="draft"/>
+    <bpmn:userTask id="draft" name="Draft decision letter" operaton:candidateGroups="handlers"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="draft" targetRef="send"/>
+    <bpmn:userTask id="send" name="Send letter" operaton:candidateGroups="handlers"/>
+    <bpmn:sequenceFlow id="f3" sourceRef="send" targetRef="end"/>
+    <bpmn:endEvent id="end"/>
+  </bpmn:process>
+</bpmn:definitions>

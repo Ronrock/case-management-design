@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>org.casemgmt</groupId>
+    <artifactId>case-management-root</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>case-management-engine-remote</artifactId>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.casemgmt</groupId>
+      <artifactId>case-management-core</artifactId>
+    </dependency>
+    <!-- Test-jar of case-management-core: brings in EngineGatewayContract so this module's
+         tests can subclass it and prove the HTTP-based gateway satisfies the same contract
+         as the in-process gateway. -->
+    <dependency>
+      <groupId>org.casemgmt</groupId>
+      <artifactId>case-management-core</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <!-- Test-only "remote engine": a bare Operaton app with engine-rest exposed on a random
+         port, so RemoteEngineGateway can be proved against real HTTP + real serialization
+         instead of a mock. No Docker available here, hence H2 rather than Testcontainers. -->
+    <dependency>
+      <groupId>org.operaton.bpm.springboot</groupId>
+      <artifactId>operaton-bpm-spring-boot-starter-rest</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

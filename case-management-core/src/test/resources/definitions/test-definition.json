@@ -1,0 +1,25 @@
+{
+  "key": "widget-review",
+  "name": "Widget Review",
+  "tenantId": "t1",
+  "roles": ["owner", "handler", "reviewer"],
+  "forms": {
+    "reviewForm": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "required": ["outcome"],
+      "properties": {
+        "outcome": { "type": "string", "enum": ["approve", "reject"] },
+        "note": { "type": "string" }
+      }
+    }
+  },
+  "planItems": [
+    { "defKey": "intake", "type": "STAGE", "name": "Intake", "manualActivation": false, "sortOrder": 10 },
+    { "defKey": "review", "type": "HUMAN_TASK", "name": "Review", "parentStageKey": "intake",
+      "manualActivation": false, "required": true, "formKey": "reviewForm",
+      "candidateGroups": ["reviewers"], "sortOrder": 20 },
+    { "defKey": "reviewed", "type": "MILESTONE", "name": "Reviewed",
+      "entryCriteria": ["${items.review.state == 'COMPLETED'}"], "sortOrder": 30 }
+  ]
+}

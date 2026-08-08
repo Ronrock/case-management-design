@@ -1,0 +1,9 @@
+{
+  "key": "txn-create-demo",
+  "name": "Txn Create Demo",
+  "tenantId": "t1",
+  "planItems": [
+    { "defKey": "taskA", "type": "HUMAN_TASK", "sortOrder": 10 },
+    { "defKey": "taskB", "type": "HUMAN_TASK", "sortOrder": 20 }
+  ]
+}
