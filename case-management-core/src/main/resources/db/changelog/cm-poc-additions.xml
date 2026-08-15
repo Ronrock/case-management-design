@@ -7,6 +7,12 @@
   <!-- PoC-ONLY additions (spec §3.5). These are NOT part of the target design:
        they exist because remote mode cannot join the local transaction. -->
 
+  <!-- Migration ordering policy: treat this file as append-only once a changeset may have
+       been applied by a developer, CI database, or shared environment. Liquibase identifies
+       changesets by file, id, and author, but this file also serves as an execution timeline.
+       Add corrective changesets at the end with a rationale; do not move existing changesets
+       purely to improve topical grouping. -->
+
   <changeSet id="cm-poc-engine-command" author="casemgmt">
     <createTable tableName="CM_ENGINE_COMMAND">
       <column name="ID_" type="VARCHAR2(64)"><constraints primaryKey="true" nullable="false"/></column>
