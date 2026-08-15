@@ -62,7 +62,7 @@ CloudEvents, `source` from your `engine-id`, type prefixed by your `type-prefix`
 | Work | `case.planitem.transitioned` `case.milestone.achieved` `case.process.started` |
 | Tasks | `case.task.created` `case.task.claimed` `case.task.completed` |
 | Collaboration | `case.comment.added` |
-| SLA | `case.sla.started` `case.sla.paused` `case.sla.resumed` `case.sla.warning` `case.sla.breached` |
+| SLA | `case.sla.started` `case.sla.paused` `case.sla.resumed` `case.sla.warning` `case.sla.breached` `case.sla.escalated` |
 
 ### Push — webhooks
 
@@ -71,17 +71,19 @@ POST /case-api/v2/webhooks
 { "url": "https://you.example/hooks/cases",
   "eventTypes": ["case.closed", "case.sla.breached"] }
 ```
-→ `201` with the plaintext `secret`, **shown exactly once**. Only a SHA-256 hash is stored.
+→ `201` with the plaintext `secret`, **shown exactly once**. A SHA-256 hash is stored for
+verification and encrypted signing material is stored for delivery after restart.
 
 Deliveries are signed HMAC-SHA256 in `X-Case-Signature: sha256=<hex>`. Verify before trusting the
 body. Failures retry on a backoff ladder, then land in a dead-letter queue:
 
 ```http
-GET /case-api/v2/webhooks/{id}/dead-letters
+GET /case-api/v2/webhooks/{id}/dead-letters?page=0&pageSize=25
+POST /case-api/v2/webhooks/{id}/dead-letters/redeliver
 ```
 
-Redelivery is specified but not implemented
-([issue #7](https://github.com/Ronrock/case-management-design/issues/7)).
+Dead-letter listing is pageable and capped at 200 rows per page. Redelivery resets all DEAD rows
+for the subscription to PENDING with a fresh retry budget.
 
 ### Pull — the cursor feed
 
@@ -89,22 +91,17 @@ Redelivery is specified but not implemented
 GET /case-api/v2/events?after=1042&limit=100
 ```
 
-> **Two limits you must design around.**
->
-> **The pull feed can skip events.** A transaction taking a lower sequence number but committing
-> later falls below a cursor that already advanced past it. Don't treat it as a gap-free log
-> ([issue #3](https://github.com/Ronrock/case-management-design/issues/3)).
->
-> **Webhook secrets don't survive a restart.** They're held in memory, so every existing
-> subscription must be re-created after the service restarts
-> ([issue #4](https://github.com/Ronrock/case-management-design/issues/4)).
+The pull feed is backed by serialized event sequence allocation. Consumers may still receive
+at-least-once duplicates across webhook and pull recovery, but a committed lower event sequence
+cannot appear after a consumer has advanced past a higher one.
 
 ---
 
 ## SLA clocks
 
 Attach a policy to a case type and clocks start with the case. A sweeper emits a warning when the
-threshold passes and a breach when the deadline does.
+threshold passes, a breach when the deadline does, and an escalation event when a target includes
+the `ESCALATE` breach action.
 
 ### Business time, not wall time
 
@@ -131,6 +128,10 @@ POST /case-api/v2/cases/{id}/slas/{slaId}/resume
 Resume re-derives the deadline through the calendar rather than adding elapsed wall-clock time, so
 a pause across a weekend costs the case only its working hours.
 
+Targets may configure `pauseReasons` as a whitelist of accepted pause reasons. The legacy database
+column is still named `PAUSED_STATES_JSON_`, but the runtime treats it as reasons, not lifecycle
+states.
+
 ---
 
 ## Configuration
@@ -141,19 +142,24 @@ a pause across a weekend costs the case only its working hours.
 | `casemgmt.engine-id` | — | Stamped as the CloudEvents `source`. |
 | `casemgmt.engine.mode` | `embedded` | `embedded` or `remote`. |
 | `casemgmt.engine.remote.base-url` | — | `engine-rest` root. |
-| `casemgmt.engine.remote.username` / `.password` | — | Basic auth for the engine. |
+| `casemgmt.engine.remote.auth-mode` | `auto` | `auto`, `none`, `basic`, or `bearer`. |
+| `casemgmt.engine.remote.username` / `.password` | — | Basic auth for the engine when `auth-mode=basic`. |
+| `casemgmt.engine.remote.bearer-token` | — | Static bearer token for controlled deployments; prefer a `RemoteEngineBearerTokenProvider` for OIDC/client credentials. |
 | `casemgmt.engine.remote.connect-timeout-ms` | `5000` | TCP connect bound. |
 | `casemgmt.engine.remote.read-timeout-ms` | `10000` | Bounds a hung engine. |
 | `casemgmt.events.type-prefix` | **none** | Startup fails if unset and webhooks are enabled. |
+| `casemgmt.webhooks.secret-encryption-key` | **none** | Base64 AES key for persisted webhook signing secrets. |
+| `casemgmt.webhooks.secret-key-id` | `default` | Key id stored next to encrypted webhook secrets. |
+| `casemgmt.security.mode` | `basic` | Local PoC mode. Use `oidc` for JWT/OIDC bearer-token mode. |
 | `casemgmt.schedulers.enabled` | `true` | Turns off all background workers. |
 | `casemgmt.schedulers.webhook-interval-ms` | `5000` | Webhook drain. |
 | `casemgmt.schedulers.engine-command-interval-ms` | `5000` | Remote-mode outbox drain. |
 | `casemgmt.schedulers.sla-sweep-interval-ms` | `60000` | SLA warning/breach sweep. |
 | `casemgmt.schedulers.idempotency-purge-interval-ms` | `3600000` | Retention purge. |
 
-> **Single instance today.** Webhook and engine-command dispatch claim rows safely across instances.
-> The SLA sweeper does not — run one instance, or accept duplicated sweep work
-> ([issue #15](https://github.com/Ronrock/case-management-design/issues/15)).
+> **Multi-instance schedulers.** Webhook dispatch, engine-command dispatch and SLA sweeping all
+> claim bounded batches before processing. This avoids duplicate scheduler work across application
+> instances; leases still mean long-running claimed work should be monitored.
 
 ---
 
@@ -163,25 +169,21 @@ Five beans are declared `@ConditionalOnMissingBean`. Declare your own and it win
 
 | Bean | Substitute it to… |
 |---|---|
-| `CallerResolver` | Map an OAuth2 principal instead of Operaton identity. |
+| `CallerResolver` | Map a custom principal or Worker Permissions model. |
 | `ActionPolicy` | Change the role model or the action vocabulary. |
 | `CriterionEvaluator` | Swap the expression language. |
 | `FormValidator` | Use a different schema dialect. |
 | `EventPublisher` | Change the event envelope or add a sink. |
 
-### Moving to OAuth2
+### Moving to OIDC
 
-Replace the security configuration and `CallerResolver`; nothing else changes.
+Set `casemgmt.security.mode=oidc`, configure Spring's
+`spring.security.oauth2.resourceserver.jwt.*` issuer/JWKS settings, and map the configured OIDC
+claims to the authorities the platform expects.
 
-```java
-@Bean
-CallerResolver callerResolver(ParticipantRepository participants) {
-    return new OAuth2CallerResolver(participants);   // yours wins
-}
-```
-
-Your mapping must produce **exactly one** `tenant:<id>` authority — zero or several is rejected
-rather than defaulted.
+The default OIDC converter maps `tenant` to `tenant:<id>`, maps `groups` directly, and maps
+`worker_permissions` directly by default. A bank deployment can still replace `CallerResolver` or
+`ActionPolicy` when Worker Permissions require a different vocabulary.
 
 > **Controllers are not overridable.** They arrive via `@Import`. To change an endpoint's behaviour,
 > change the policy or the service behind it.
@@ -196,14 +198,9 @@ Documented gaps that change how you'd use this. The
 
 | Limit | What it means for you |
 |---|---|
-| Webhook secrets don't survive restart | Re-create every subscription after a restart, or pushes silently dead-letter. |
-| The pull feed can skip events | Don't rely on it as a gap-free log or sole recovery path. |
-| `PROCESS_TASK` is inert | Entering the item won't start the BPMN process. Start it via `POST /cases/{id}/processes`. |
-| Optional children of criteria-entered stages | A non-required child can be swept when its parent auto-completes. Mark it `required` to be safe. |
-| Idempotency lease | Operations longer than 5 minutes can double-execute. |
-| Merge-patch null | You cannot clear a field by sending `null`. |
-| No page totals | Page until you get a short page. |
-| Single-instance sweeper | Run one instance, or accept duplicated SLA sweeps. |
+| Remote engine OIDC token source | Use `casemgmt.engine.remote.auth-mode=bearer` and provide a `RemoteEngineBearerTokenProvider` backed by the bank's OIDC/client-credential integration. The local PoC may still use Basic Auth for convenience. |
+| Production UI completeness | The Lit package proves standalone and portal-adapter integration, but production form UX, accessibility, and bank design-system fit still require product work. |
+| Engine Tasklist writes | Ordinary users are blocked from direct `engine-rest` writes. If Tasklist writes must remain available, add engine-side reconciliation back into the case state machine. |
 
 ---
 
@@ -214,7 +211,7 @@ Documented gaps that change how you'd use this. The
 | Startup fails naming `type-prefix` | Set `casemgmt.events.type-prefix`. It has no default on purpose. |
 | Every request is `403` | The principal has no `tenant:<id>` authority, or has more than one. |
 | A task never appears in the worklist | Remote mode and it hasn't synced (`engineSync: PENDING`), or your groups don't match its `candidateGroups`. |
-| A criterion never fires | Check the `defKey` spelling — an unknown reference fails silently. |
+| A criterion never fires | Check the `defKey` spelling. Unknown references are rejected when a definition is deployed. |
 | Close is refused | A `required` item is still open. The `409` body names it. |
-| Webhooks stopped after a deploy | The secret map is in memory. Re-create the subscriptions. |
+| Webhooks cannot be signed after startup | `casemgmt.webhooks.secret-encryption-key` is missing or changed since the subscription was created. |
 | A child item never opens | Check its parent stage's state before its criteria — containment is enforced. |

@@ -10,8 +10,9 @@
 --   * References to Camunda entities (task id, process instance id) are stored
 --     as plain VARCHAR2 WITHOUT foreign keys: Camunda deletes runtime rows on
 --     completion, so hard FKs would break. Correlation is by ID + history.
---   * All primary keys are VARCHAR2(64) application-generated IDs. Case IDs
---     are globally unique: '{engineId}:{uuid}' (design principle 6).
+--   * Most primary keys are VARCHAR2(64) application-generated IDs. Case IDs
+--     are globally unique: '{engineId}:{uuid}' (design principle 6); case
+--     definition IDs are tenant-qualified '{tenant}:{key}:{version}'.
 --   * Every mutable resource carries VERSION_ (NUMBER) for optimistic locking;
 --     the REST layer derives the ETag from it (design principle 2 / App. B).
 --   * TIMESTAMP WITH TIME ZONE everywhere; engines run in different regions.
@@ -24,7 +25,7 @@
 --------------------------------------------------------------------------------
 
 CREATE TABLE CM_CASE_DEF (
-    ID_               VARCHAR2(64)   NOT NULL,       -- {key}:{version}
+    ID_               VARCHAR2(64)   NOT NULL,       -- {tenant}:{key}:{version}
     KEY_              VARCHAR2(255)  NOT NULL,
     VERSION_NO_       NUMBER(10)     NOT NULL,
     NAME_             VARCHAR2(255)  NOT NULL,
@@ -291,7 +292,7 @@ CREATE TABLE CM_SLA_TARGET (
     NAME_           VARCHAR2(255)  NOT NULL,
     DURATION_ISO_   VARCHAR2(30)   NOT NULL,          -- PT8H
     WARNING_ISO_    VARCHAR2(30),                     -- PT6H
-    PAUSED_STATES_JSON_ CLOB,                         -- ["WAITING_ON_CUSTOMER"]
+    PAUSED_STATES_JSON_ CLOB,                         -- legacy name; pause reasons JSON
     BREACH_ACTIONS_JSON_ CLOB,                        -- ["ESCALATE","EMIT_EVENT"]
     CONSTRAINT PK_CM_SLA_TARGET PRIMARY KEY (ID_),
     CONSTRAINT FK_CM_SLAT_POLICY FOREIGN KEY (POLICY_ID_)
@@ -510,7 +511,7 @@ CREATE TABLE CM_WEBHOOK_SUB (
     EVENT_TYPES_JSON_ CLOB        NOT NULL,           -- ["com.example.case.sla.*"]
     ACTIVE_        NUMBER(1)      DEFAULT 1 NOT NULL,
     SECRET_HASH_   VARCHAR2(255)  NOT NULL,           -- store hashed, never plain
-    MAX_RETRIES_   NUMBER(3)      DEFAULT 8 NOT NULL,
+    MAX_RETRIES_   NUMBER(3)      DEFAULT 5 NOT NULL,
     VERSION_       NUMBER(19)     DEFAULT 0 NOT NULL,
     CREATED_AT_    TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
     CONSTRAINT PK_CM_WEBHOOK PRIMARY KEY (ID_),
@@ -549,7 +550,7 @@ CREATE INDEX IX_CM_WHD_DEAD ON CM_WEBHOOK_DELIVERY (WEBHOOK_ID_, STATUS_);
 -- compliance record with its own retention (design doc §10.4).
 CREATE TABLE CM_AUDIT_LOG (
     ID_           VARCHAR2(64)   NOT NULL,
-    CASE_ID_      VARCHAR2(140)  NOT NULL,            -- no FK: survives case purge
+    CASE_ID_      VARCHAR2(140),                      -- nullable for platform-level actions; no FK: survives case purge
     TENANT_ID_    VARCHAR2(64),
     TS_           TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
     ACTOR_        VARCHAR2(255)  NOT NULL,

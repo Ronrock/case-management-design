@@ -19,6 +19,7 @@ public final class EventTypes {
     public static final String SLA_RESUMED = "case.sla.resumed";
     public static final String SLA_WARNING = "case.sla.warning";
     public static final String SLA_BREACHED = "case.sla.breached";
+    public static final String SLA_ESCALATED = "case.sla.escalated";
 
     private EventTypes() {}
 }

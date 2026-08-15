@@ -182,24 +182,19 @@ public class CaseRepository {
     }
 
     public List<CaseInstance> query(CaseQuery q) {
-        StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_CASE WHERE 1 = 1");
-        List<Object[]> params = new ArrayList<>();
-        if (q.tenantId() != null)    { sql.append(" AND TENANT_ID_ = :tenantId");     params.add(new Object[]{"tenantId", q.tenantId()}); }
-        if (!q.states().isEmpty())   { sql.append(" AND STATE_ IN (:states)");
-                                       params.add(new Object[]{"states",
-                                               q.states().stream().map(CaseState::name).toList()}); }
-        if (q.assignee() != null)    { sql.append(" AND ASSIGNEE_ = :assignee");      params.add(new Object[]{"assignee", q.assignee()}); }
-        if (q.caseDefKey() != null)  { sql.append(" AND CASE_DEF_KEY_ = :defKey");    params.add(new Object[]{"defKey", q.caseDefKey()}); }
-        if (q.businessKey() != null) { sql.append(" AND BUSINESS_KEY_ = :bk");        params.add(new Object[]{"bk", q.businessKey()}); }
+        Predicate predicate = predicate(q);
+        StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_CASE")
+                .append(predicate.where());
         // CREATED_AT_ alone is not a stable sort key: rows created in the same instant (or
         // truncated to the same stored precision) would otherwise have undefined relative
         // order between paginated calls, which can skip or duplicate rows across pages in a
         // worklist. ID_ is unique, so it makes the ordering — and therefore the pagination —
         // deterministic.
-        sql.append(" ORDER BY CREATED_AT_ DESC, ID_ ASC OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY");
+        sql.append(orderBy(q));
+        sql.append(" OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY");
 
         var spec = jdbc.sql(sql.toString());
-        for (Object[] p : params) {
+        for (Object[] p : predicate.params()) {
             spec = spec.param((String) p[0], p[1]);
         }
         return spec.param("offset", q.offset())
@@ -207,6 +202,117 @@ public class CaseRepository {
                    .query(CaseRepository::map)
                    .list();
     }
+
+    public long count(CaseQuery q) {
+        Predicate predicate = predicate(q);
+        var spec = jdbc.sql("SELECT COUNT(*) FROM CM_CASE" + predicate.where());
+        for (Object[] p : predicate.params()) {
+            spec = spec.param((String) p[0], p[1]);
+        }
+        return spec.query(Long.class).single();
+    }
+
+    private static Predicate predicate(CaseQuery q) {
+        StringBuilder sql = new StringBuilder(" WHERE 1 = 1");
+        List<Object[]> params = new ArrayList<>();
+        if (q.tenantId() != null) {
+            sql.append(" AND TENANT_ID_ = :tenantId");
+            params.add(new Object[]{"tenantId", q.tenantId()});
+        }
+        if (!q.states().isEmpty()) {
+            sql.append(" AND STATE_ IN (:states)");
+            params.add(new Object[]{"states", q.states().stream().map(CaseState::name).toList()});
+        }
+        if (q.assignee() != null) {
+            sql.append(" AND ASSIGNEE_ = :assignee");
+            params.add(new Object[]{"assignee", q.assignee()});
+        }
+        if (q.caseDefKey() != null) {
+            sql.append(" AND CASE_DEF_KEY_ = :defKey");
+            params.add(new Object[]{"defKey", q.caseDefKey()});
+        }
+        if (q.businessKey() != null) {
+            sql.append(" AND BUSINESS_KEY_ = :bk");
+            params.add(new Object[]{"bk", q.businessKey()});
+        }
+        if (q.participantUser() != null) {
+            sql.append("""
+                    AND EXISTS (
+                        SELECT 1 FROM CM_PARTICIPANT p
+                        WHERE p.CASE_ID_ = CM_CASE.ID_ AND p.USER_ID_ = :participantUser)""");
+            params.add(new Object[]{"participantUser", q.participantUser()});
+        }
+        if (q.queueId() != null) {
+            sql.append(" AND QUEUE_ID_ = :queueId");
+            params.add(new Object[]{"queueId", q.queueId()});
+        }
+        if (q.slaStatus() != null) {
+            sql.append(" AND SLA_STATUS_ = :slaStatus");
+            params.add(new Object[]{"slaStatus", q.slaStatus()});
+        }
+        if (q.priority() != null) {
+            sql.append(" AND PRIORITY_ = :priority");
+            params.add(new Object[]{"priority", q.priority().name()});
+        }
+        if (q.createdAfter() != null) {
+            sql.append(" AND CREATED_AT_ >= :createdAfter");
+            params.add(new Object[]{"createdAfter", q.createdAfter()});
+        }
+        if (q.createdBefore() != null) {
+            sql.append(" AND CREATED_AT_ < :createdBefore");
+            params.add(new Object[]{"createdBefore", q.createdBefore()});
+        }
+        if (q.freeText() != null && !q.freeText().isBlank()) {
+            String needle = q.freeText().toLowerCase();
+            sql.append("""
+                    AND (
+                        LOWER(TITLE_) LIKE :freeTextLike
+                        OR LOWER(BUSINESS_KEY_) LIKE :freeTextLike
+                        OR EXISTS (
+                            SELECT 1 FROM CM_COMMENT cm
+                            WHERE cm.CASE_ID_ = CM_CASE.ID_
+                              AND DBMS_LOB.INSTR(LOWER(cm.TEXT_), :freeTextNeedle) > 0
+                        )
+                    )""");
+            params.add(new Object[]{"freeTextLike", "%" + needle + "%"});
+            params.add(new Object[]{"freeTextNeedle", needle});
+        }
+        return new Predicate(sql.toString(), params);
+    }
+
+    private static String orderBy(CaseQuery q) {
+        if (q.sort().isEmpty()) {
+            return " ORDER BY CREATED_AT_ DESC, ID_ ASC";
+        }
+        List<String> terms = new ArrayList<>();
+        for (CaseQuery.SortTerm term : q.sort()) {
+            terms.add(sortColumn(term.field()) + (term.descending() ? " DESC" : " ASC"));
+        }
+        terms.add("ID_ ASC");
+        return " ORDER BY " + String.join(", ", terms);
+    }
+
+    private static String sortColumn(String field) {
+        return switch (field) {
+            case "createdAt" -> "CREATED_AT_";
+            case "updatedAt" -> "UPDATED_AT_";
+            case "closedAt" -> "CLOSED_AT_";
+            case "priority" -> """
+                    CASE PRIORITY_
+                        WHEN 'LOW' THEN 1
+                        WHEN 'MEDIUM' THEN 2
+                        WHEN 'HIGH' THEN 3
+                        WHEN 'CRITICAL' THEN 4
+                        ELSE 0
+                    END""";
+            case "state" -> "STATE_";
+            case "title" -> "TITLE_";
+            case "businessKey" -> "BUSINESS_KEY_";
+            default -> throw new IllegalArgumentException("Unsupported case sort field: " + field);
+        };
+    }
+
+    private record Predicate(String where, List<Object[]> params) {}
 
     private static CaseInstance map(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
         return new CaseInstance(

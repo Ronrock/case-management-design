@@ -130,6 +130,25 @@ class CaseApiIT extends PocAppEmbeddedTestBase {
     }
 
     @Test
+    void engineRestWritesAreReservedForTheEngineIntegrationCredential() {
+        ResponseEntity<String> ordinaryUser = client("alice").post()
+                .uri("/engine-rest/task/not-a-real-task/complete")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of())
+                .retrieve().toEntity(String.class);
+        assertThat(ordinaryUser.getStatusCode().value()).isEqualTo(403);
+
+        ResponseEntity<String> integrationCredential = client("admin").post()
+                .uri("/engine-rest/task/not-a-real-task/complete")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of())
+                .retrieve().toEntity(String.class);
+        assertThat(integrationCredential.getStatusCode().value())
+                .as("admin must reach Operaton rather than be stopped by the case API security layer")
+                .isNotIn(401, 403);
+    }
+
+    @Test
     void theComplaintCasePathRunsEndToEndInEmbeddedModeAndCloses() {
         // ---- brief's Step 6, automated ----
         ResponseEntity<Map> created = client("alice").post().uri("/case-api/v2/cases")

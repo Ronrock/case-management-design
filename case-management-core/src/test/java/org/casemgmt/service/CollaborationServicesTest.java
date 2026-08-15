@@ -121,7 +121,7 @@ class CollaborationServicesTest extends OracleTestBase {
         public void claimTask(String id, String user) {}
         public void completeTask(String id, Map<String, Object> v) {}
         public EngineProcessRef startProcess(StartProcessRequest r) {
-            return new EngineProcessRef(null, r.processDefinitionKey());
+            return new EngineProcessRef(null, r.processDefinitionKey(), r.caseId());
         }
         public void cancelProcess(String id, String reason) {}
         public List<EngineTaskRef> findTasks(EngineTaskQuery q) { return List.of(); }
@@ -188,7 +188,7 @@ class CollaborationServicesTest extends OracleTestBase {
         String reviewedPlanItemId = new PlanItemRepository(jdbc()).findByCase(caseId).stream()
                 .filter(i -> i.name().equals("reviewed")).findFirst().orElseThrow().id();
         String milestoneId = org.casemgmt.domain.CaseIds.newId();
-        new MilestoneRepository(jdbc()).insert(milestoneId, caseId, reviewedPlanItemId, "Acknowledged");
+        new MilestoneRepository(jdbc()).insert(milestoneId, caseId, reviewedPlanItemId, "Confirmed");
 
         var achieved = milestones.achieve(caseId, milestoneId, alice);
         assertThat(achieved.achieved()).isTrue();
@@ -198,6 +198,6 @@ class CollaborationServicesTest extends OracleTestBase {
         // wording drifted or the wrong milestone's name leaked in.
         assertThatThrownBy(() -> milestones.achieve(caseId, milestoneId, alice))
                 .isInstanceOf(CaseConflictException.class)
-                .hasMessage("Milestone Acknowledged is already achieved");
+                .hasMessage("Milestone Confirmed is already achieved");
     }
 }

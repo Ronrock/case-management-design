@@ -28,10 +28,10 @@ module: core 244, rest 94, engine-embedded 10, engine-remote 11, starter 9, poc-
 
 | Risk | Verdict | One-line reason |
 |---|---|---|
-| R1 — plan-item state machine | **Held, with changes** | The evaluator works; the spec's CMMN subset under-specified containment, cascade-on-end and criteria-vs-autocompletion, and all three gaps produced real bugs. One defect ships documented (evaluator ordering); the manual-path seam found in the final review is fixed. |
+| R1 — plan-item state machine | **Held, with changes** | The evaluator works; the spec's CMMN subset under-specified containment, cascade-on-end and criteria-vs-autocompletion, and all three gaps produced real bugs. The known evaluator ordering and manual-path defects are fixed. |
 | R2 — Operaton integration | **Held** | Both gateways execute the identical shared contract, and the one silent divergence found is locked by an assertion proven to fail against the old code. |
-| R3 — model-driven contract | **Held for sufficiency, partial by design** | A consumer with zero case-type knowledge drove a case to `CLOSED`. Six contract gaps found; rendering, UX and live-update remain unproven without a UI. |
-| R4 — events and federation | **Split: atomicity held, federation did not** | The transactional outbox is proven under rollback. The pull-recovery path silently loses events under concurrency, which is the half a cross-engine index depends on. |
+| R3 — model-driven contract | **Held for sufficiency, partial by design** | A consumer with zero case-type knowledge drove a case to `CLOSED`. The main contract gaps around unsafe actions, process-task activation and action labels are fixed; rendering, UX and live-update remain unproven without a production UI. |
+| R4 — events and federation | **Substantially fixed** | The transactional outbox is proven under rollback; event cursor ordering, webhook secret durability and DLQ redelivery are structurally closed. |
 
 ---
 
@@ -98,16 +98,12 @@ presenting the projection defect on its own invites someone to fix the projectio
 enforcement corrupting cases. The second item is now stated as **one finding with three instances**,
 below, and has been fixed.
 
-**(a) A probable `PlanModelEvaluator`/`StageCompletion` ordering defect.** `singlePass` builds
-`completingStages` from the **pre-round snapshot**, and `claimedForTermination` is derived before
-the loop, while `isContained` requires the parent to be `ACTIVE` in that same snapshot. A stage
-that auto-completes in the round *after* it activates therefore evaluates its own completion
-against a snapshot in which a criteria-admitted child is not yet materialised — and then sweeps
-that child to `TERMINATED`. `blockingItems` does not block on a non-required, non-`ACTIVE` child,
-so nothing stops it. **This loses any non-required child of a criteria-entered stage.** In the
-complaint model `required: true` masks it for the one item that would otherwise hit it. Reported
-rather than fixed because the fix is evaluator semantics, not a fixture change, and it arrived in
-the last task; the write-up was independently verified against the code by a reviewer.
+**(a) A `PlanModelEvaluator`/`StageCompletion` ordering defect.** FIXED. `singlePass` built
+`completingStages` from the **pre-round snapshot**, while containment required the parent stage to
+already be `ACTIVE` in that same snapshot. A stage that auto-completed in the round after it became
+active could therefore sweep a non-required child before that child had one round to materialise.
+The evaluator now tracks stages activated in the previous round and suppresses autocomplete for
+those stages once, so children can enter before leftover-child termination is considered.
 
 **(b) The manual plan-item path bypassed `StageCompletion` entirely — one seam, three instances.**
 FIXED in Task 27.
@@ -281,7 +277,7 @@ must fork it.
 
 ---
 
-## R3 — Model-driven contract (partial — no UI)
+## R3 — Model-driven contract (partial — UI scaffold only)
 
 **Verdict: held for sufficiency; partial by design (spec D7).** `GenericConsumerIT` creates a case
 of a type it discovered from `GET /case-definitions`, drives it to `CLOSED`, and asserts every
@@ -293,36 +289,19 @@ case-shaped URL), and fills forms from JSON Schema **shape** only — `required`
 reach `CLOSED`.
 
 So the contract is *sufficient* to drive a UI. That is the claim §8 obligation 1 makes, and it
-holds.
+holds. A Lit Web Components shell now exists under `case-management-web-components` with standalone,
+IRIS and IB Portal adapters; it is an integration scaffold, not a production workflow UI.
 
 ### Where the contract fell short
 
-1. **The offered action set is not always safe to act on.** `ActionPolicy.listForPlanItem` offers
-   `complete` on a stage with required children still open (R1 defect (b) above). A generic
-   consumer that trusts `availableActions[]` — which is the entire premise — corrupts the case. The
-   consumer had to add a type-based exclusion to work around it. **This is the sharpest R3 result
-   in the build:** the model-driven contract is only as good as the agreement between what is
-   projected and what is legal, and here they disagree.
-   `design principles.md` Appendix C names the failure it is guarding against — "the user clicks a
-   button that then fails with a 409" — and the actual outcome here is worse than the one it
-   names: the button does not fail, it succeeds and corrupts the case.
-2. **`PROCESS_TASK` plan items are inert.** Nothing in `TransitionApplier`, `CaseService` or
-   `PlanModelInstantiator` reacts to a `PROCESS_TASK` item becoming `ACTIVE`.
-   `processDefinitionKey` is parsed, stored on `PlanItemDefinition` and **never read at runtime**.
-   The only way to start a process is an explicit `POST /cases/{caseId}/processes`, and completing
-   that process does not complete the plan item either. Neither direction of the linkage exists.
-   Checked against the plan before writing this: **the plan never specified that a `PROCESS_TASK`
-   auto-starts its process**, so this is a design gap, not an implementation failure — but it means
-   a generic consumer cannot cause a case's BPMN fragment to run at all. `CaseApiIT` now genuinely
-   instantiates `decision-letter.bpmn` through the endpoint that does exist and drives its two user
-   tasks to completion on the real engine, so the process is proven to run; nothing proves the plan
-   model can trigger it.
-3. **Actions carry no human-readable label.** `AvailableAction` is
-   `{action, href, method, formKey}` — exactly what design spec §8 obligation 2 requires, so the
-   implementation is correct — but a renderer has to invent the button text from the verb.
-   `openapi-specs.md` declared a `name` field that nothing emits. Kept declared, marked NOT
-   IMPLEMENTED, and recorded here: the first thing a real UI will ask for is a label, and probably a
-   localisable one.
+1. **The offered action set was not always safe to act on.** FIXED. `ActionPolicy.listForPlanItem`
+   and the manual plan-item mutation path now share the same containment/blocking semantics, so a
+   generic consumer can trust `availableActions[]` without adding case-type-specific exclusions.
+2. **`PROCESS_TASK` plan items were inert.** FIXED. When a `PROCESS_TASK` enters `ACTIVE`,
+   `TransitionApplier` reads `processDefinitionKey`, starts the linked process through
+   `EngineGateway`, records the `CM_LINKED_PROCESS` row and emits `case.process.started`.
+3. **Actions carried no human-readable label.** FIXED. `AvailableAction` now emits `name` alongside
+   `action`, `href`, `method` and optional `formKey`, giving a generic renderer stable button text.
 4. **`Violation.pointer` was not a JSON Pointer.** networknt 1.5.8 emits JSONPath dot notation by
    default — `$.outcome`, `$.nested.outcome`, bare `$` for a missing required field — while design
    spec §6.5 promises RFC 6901 *"so a renderer can attach messages to inputs without knowing the
@@ -363,17 +342,18 @@ Stated because §1.2 point 3 requires it:
   form a back-office worker can work in, or how a 40-field schema behaves.
 - **Whether `availableActions[]` maps onto real interaction patterns.** Every action here is a
   single POST with an optional form. Bulk operations, multi-step wizards, optimistic UI, and "what
-  happens to my open form when the case changes underneath me" are untouched. So is the missing
-  label (gap 3).
+  happens to my open form when the case changes underneath me" are untouched.
 - **Whether event-cursor polling is a workable live-update mechanism.** Sequential cursor resume is
-  tested and works. But see R4: under concurrent writers the cursor **permanently skips events**, so
-  as a live-update mechanism it is not merely unproven, it is known-unsound in its current form.
+  tested and works, and the concurrent-writer skip was fixed by serializing event append sequence
+  allocation. Live-update UX remains unproven because no production UI has exercised reconnect,
+  optimistic refresh, or duplicate handling.
 
 ---
 
 ## R4 — Events and federation
 
-**Verdict: split. The atomicity half held and is proven. The federation half did not.**
+**Verdict: substantially fixed. The atomicity half held and is proven; the recovery feed, webhook
+secret durability and dead-letter redelivery gaps are now structurally closed.**
 
 ### The outbox holds under rollback — proven, not asserted
 
@@ -425,39 +405,22 @@ Three real defects were found in the dispatcher and fixed:
   semantic stated in Javadoc: deactivating a subscription stops future fan-out, it does not recall
   deliveries already committed to the outbox.
 
-### Restarting the application permanently dead-letters every pre-existing subscription
+### Webhook subscriptions now survive application restart
 
-**Stated as one thing, because the composition IS the finding** (final whole-branch review,
-Important 6). Its three ingredients each appear elsewhere in this document, individually recorded as
-PoC-shaped or minor — the in-memory secret map in the deviations table, the pre-HTTP throw in the
-bullet list immediately above, `MAX_RETRIES_` in the bullet after it. Nowhere did any sentence say
-what they do together, and for a document whose job is findings, that omission was the defect.
+The in-memory `ConcurrentHashMap` shortcut has been removed from the starter. `WebhookService`
+persists encrypted signing material through `WebhookSecretStore` in the same transaction as the
+subscription row, while `SECRET_HASH_` remains a one-way verification hash. The default starter
+store is database-backed and AES-GCM encrypted by `casemgmt.webhooks.secret-encryption-key`; the
+dispatcher resolves from that store, so a new process can sign deliveries for subscriptions created
+before restart. `WebhookSecretStoreTest` proves a fresh store instance decrypts an existing
+subscription secret.
 
-1. `CaseManagementAutoConfiguration` holds webhook secrets in an in-memory `ConcurrentHashMap`.
-2. After **any** restart, `secretResolver.apply(sub.id())` returns `null` for every pre-existing
-   subscription → `HmacSigner.sign` throws → caught by `drainOnce`'s generic handler, which called
-   `fail(delivery, null, ...)` with no subscription, so `maxRetries` fell back to `BACKOFF.size()`
-   instead of the subscription's own value.
-3. Every pending delivery therefore burned its retries and **dead-lettered permanently** — into a
-   queue with no endpoint to read it and no way to replay it.
+Operational caveat: changing or losing the configured encryption key makes existing encrypted
+secrets undecryptable. A bank deployment should hold that key in KMS/Vault or replace
+`WebhookSecretStore` with the enterprise secret-store integration.
 
-**Fixed as far as this codebase can reach, which is not all the way.** `drainOnce` now carries
-whatever subscription `deliver` had loaded into the catch, so the pre-HTTP failure path uses the
-subscription's configured `MAX_RETRIES_` rather than an accidental fallback — the failure is bounded
-by policy instead of by which branch happened to fire. `GET /webhooks/{id}/dead-letters` now exposes
-`WebhookService.deadLetters`, which existed and was reachable only from tests; it reports
-`lastStatusCode` and `lastError`, because a dead-letter listing that cannot say *why* a delivery
-died is not observability, and "why" is exactly the question a restart raises.
-
-**What is NOT fixed, and must be before any deployment:** the secret's durability. There is no fix
-inside this codebase — signing needs plaintext, `SECRET_HASH_` is one-way by design, and adding a
-plaintext column is explicitly the wrong answer. Production needs reversible encryption with the key
-held outside the case-management database, or per-subscription keys in an external secret store
-(Vault, KMS) that `secretResolver` calls out to. Until then, **every subscription must be re-created
-after a restart**, and the dead-letter endpoint is the only way to see that it was needed.
-
-There is no replay endpoint either: a dead-lettered delivery can now be *seen* and still not
-*resent*.
+Dead-lettered deliveries can now be listed and redelivered. Redelivery resets all DEAD rows for the
+subscription to PENDING with a fresh retry budget; the next dispatcher run handles delivery.
 
 > **Correction (corrective round).** An earlier version of this paragraph said replay "needs a
 > decision about at-least-once-again semantics that nothing in the spec makes." **That is false,
@@ -467,48 +430,27 @@ There is no replay endpoint either: a dead-lettered delivery can now be *seen* a
 > `db-design.md` (the `CM_WEBHOOK_DELIVERY` entry) gives the mechanic — "redelivery resets them to
 > PENDING", which is the at-least-once-again semantic claimed to be missing, stated exactly. Not implementing redelivery
 > is a fine scope decision; calling it unspecified was not. **The accurate statement is: redelivery
-> is fully specified and deliberately not implemented in this PoC.** Reinstating it is small — one
-> `UPDATE ... SET STATUS_ = 'PENDING', NEXT_ATTEMPT_AT_ = SYSTIMESTAMP WHERE WEBHOOK_ID_ = :id AND
-> STATUS_ = 'DEAD'` behind the documented endpoint — and it is worth noting that it would be
-> useless until the secret-durability problem above is solved, since a redelivered event would
-> fail signing again for exactly the same reason. That ordering, not the semantics, is the real
-> argument for deferring it.
+	> is fully specified and was deliberately not implemented in the earlier PoC.** It is now
+	> implemented by resetting DEAD deliveries to PENDING, resetting attempts, scheduling immediate
+	> retry, and clearing claim/failure fields. This became useful only after the secret-durability
+	> problem above was solved.
 >
 > This is the ninth mechanism a third time: the contract was never grepped. See the note added
 > to the vacuous-mechanisms section.
 
 ### Would this event stream support a cross-engine index? No — not as it stands
 
-This is the finding that matters most in this section, and it was **ruled DOCUMENT-DO-NOT-FIX by the
-human partner**. It is reproduced here in full because it invalidates a named design claim.
+This used to be the finding that invalidated the pull-recovery claim: `CM_EVENT.SEQ_` came from an
+Oracle sequence allocated before commit, so a higher sequence could commit and become visible before
+a lower one. A consumer could then advance past the lower event forever.
 
-**Cursor pagination can permanently skip events.** `CM_EVENT.SEQ_` comes from an Oracle sequence,
-taken at insert time, but visibility comes at commit time. Transaction T1 takes `SEQ_=5` and commits
-slowly; T2 takes `SEQ_=6` and commits first. A consumer polling `after=0` sees only 6 and advances
-its cursor to 6. When T1 finally commits, `SEQ_=5` is forever below the cursor, because
-`EventRepository.after` filters `WHERE SEQ_ > :cursor`. **The event is never delivered and the
-consumer cannot detect that it is missing.** Verified against real Oracle. Aborted transactions also
-leave permanent sequence holes that are indistinguishable from this case, so a consumer cannot even
-use gap detection to tell "lost" from "never existed".
-
-**This breaks a named design claim.** `design principles.md` Appendix A argues *"Push for speed,
-pull for correctness"* — the pull path is the designated recovery mechanism for consumers that
-missed webhooks, and it is precisely the half that silently loses events under concurrency. The
-webhook path is *not* affected in the same way: it derives its cursor from the delivery row's own
-`EVENT_SEQ_`, written in the same transaction, rather than from an advancing read cursor.
-
-Real fixes are production architecture decisions, not PoC improvisation: a commit-order watermark
-(only serve events older than the oldest in-flight transaction), a gap-tolerant cursor that revisits
-a trailing window, or serialised appends. All three have costs the PoC has no basis to choose
-between. The shape is documented in `EventRepository.after`'s Javadoc as well as here, including an
-explicit warning against the tempting `>` → `>=` mis-fix, which does nothing.
-
-**Consequence for R4's stated retirement criterion.** §1.1 says R4 is retired by *"webhook capture
-tests incl. forced failure to `DEAD`; a test consumer resuming from a cursor after simulated
-downtime."* The first half exists. The second half exists only in its sequential form
-(`CaseApiHttpTest` resumes from a returned cursor and gets the later events). **A cursor-recovery
-test under concurrent writers was not written, because the mechanism it would test is known to be
-wrong.** R4's federation half is therefore not retired; it is diagnosed.
+Fixed by serialized appends. `EventRepository.append` now takes the single
+`CM_EVENT_APPEND_LOCK` row `FOR UPDATE` before `CM_EVENT_SEQ.NEXTVAL`. The lock is held by the
+caller transaction until commit, so a second writer cannot allocate a higher event sequence until
+the first writer commits or rolls back. Aborted transactions may still leave harmless numeric holes;
+they no longer hide a later committed lower sequence. `EventRepositoryCursorSafetyTest` drives two
+real Oracle transactions and proves the second append blocks while the first lower sequence is
+uncommitted.
 
 ### Other R4 findings
 
@@ -811,52 +753,34 @@ spec's own (§11); the rest were found during the build.
 
 | Deviation | Why it exists | What production needs |
 |---|---|---|
-| Webhook secrets held in an in-memory map for signing (Task 25) | No secret store in the PoC | A secret store or reversible encryption. **This is the durability half of "restarting the application permanently dead-letters every pre-existing subscription" — see R4. Every subscription must be re-created after a restart.** |
+| Webhook secrets were held in an in-memory map for signing (Task 25) | Historical PoC shortcut | Fixed: `WebhookSecretStore` persists encrypted signing material and the starter wires a database-backed AES-GCM store. Production must manage `casemgmt.webhooks.secret-encryption-key` outside the database. |
 | `CM_ENGINE_COMMAND` and `ENGINE_SYNC_` columns (spec D3) | Remote mode cannot join the local transaction | Fine as a pattern; the columns are PoC-shaped, not target-design |
 | Direct writes in Operaton Tasklist bypass the state machine in remote mode (spec D4) | No outbound push channel from Operaton | Either an engine-side listener pushing back, or Tasklist access removed |
-| Basic auth on Operaton identity instead of OAuth2 (spec D2) | §7 — configuration, not design | Replace `PocSecurityConfig`; nothing else changes |
-| **The idempotency reclaim lease double-executes** | A 5-minute lease on an in-progress key, so a crash does not wedge it forever. Two later fixes narrowed it: `IdempotencySupport` releases the claim on a client error (the failure half, which fired on ordinary 400/404/422 responses and wedged the key for the full lease), and it now checks `complete()`'s affected-row count instead of discarding it — a caller whose claim was reclaimed mid-operation used to receive its own 201 while the STORED response, which every later retry replays, belonged to the other execution. It now gets a 409 naming the collision. The double-execute itself remains | An operation that legitimately runs longer than the lease **can be reclaimed by a duplicate, and both callers execute — the exact thing idempotency keys exist to prevent.** Standard lease-mutex trade-off (the Redis `SETNX`+TTL shape). Callers with long-running operations must know. Production needs a lease proportional to the operation, or a fencing token |
-| `PATCH` declares `application/merge-patch+json` but does not implement null-clearing | Behaviour change with its own test surface | Real merge-patch semantics |
-| `Page` carries no `totalItems`/`totalPages` | Needs a `COUNT` query `CaseRepository` does not have | Additive for every client when added |
-| Schedulers assume a single instance | PoC | Webhook and engine-command dispatch use claim-by-`UPDATE` with a lease. The SLA sweeper has no claim, but is no longer deadlock-prone: Task 27 added `ORDER BY ID_` and `FETCH FIRST 200` to `dueRecords`, so two sweepers take the same rows in the same sequence (the old unordered query could deadlock with `ORA-00060`, which surfaces as `DataAccessException`, escapes the per-record `OptimisticLockException` catch, and aborts the batch) and neither holds `CM_SLA_RECORD`+`CM_CASE` row locks across an unbounded backlog. Two sweepers still duplicate work on the same rows; a claim would be the production answer |
-| `ESCALATE` breach action is inert | §2.2 defers the SLA action surface | Only `EMIT_EVENT` is honoured; `BREACH_ACTIONS_JSON_` can name `ESCALATE` and nothing happens |
-| `PAUSED_STATES_JSON_` reinterpreted | `db-design.sql:294` documents it as a list of **states**; it is wired as a whitelist of pause **reasons** | Pick one and make the schema comment agree |
-| Identity groups are unioned with participant roles into one privilege check | `CallerResolver` | An identity group literally named `owner` or `handler` grants claim/complete on **every** task in **every** case, with no participant row. The Javadoc defers this to "namespace your groups in production" — a deployment convention standing in for a code invariant |
-| `GET /case-definitions/{key}/forms/{formKey}` is not tenant-scoped | `formSchema(key, formKey)` has no tenant parameter | Accepted residual **for this endpoint only**: it exposes a JSON-schema field list, not case data, and `GET /case-definitions` *is* scoped so keys are not enumerable. Closing it is a signature change. **See the correction immediately below — the earlier version of this row was wrong about the method.** |
-| `application-remote.yaml` is never exercised | The remote IT supplies properties directly | The one deliverable representing "remote mode configuration" has no test behind it, and its `base-url` points at nothing |
-| Six schema tables are created and never written to | `db-design.sql` is the full target schema; the PoC implements a subset of it | `CM_ATTACHMENT`, `CM_CASE_LINK`, `CM_CASE_TYPE_ROLE`, `CM_QUEUE`, `CM_SLA_CALENDAR_EXCEPTION`, `CM_TASK_DELEGATION_HISTORY` have DDL and no code path. **Deliberate scope, not oversight** — recorded here only so a reader does not mistake unused DDL for a missing implementation |
+| Basic auth on Operaton identity instead of OIDC (spec D2) | Local PoC convenience | Fixed for the platform API and remote engine client surface: `PocSecurityConfig` supports `casemgmt.security.mode=oidc` with JWT validation and tenant/group/Worker Permissions claim mapping, and `RemoteEngineAutoConfiguration` supports `auth-mode=bearer` through a `RemoteEngineBearerTokenProvider` or configured bearer token. The local PoC still defaults to Basic Auth only for runnable developer convenience. |
+| **Idempotency used to reclaim unfinished work** | Historical crash-recovery shortcut | Fixed by removing automatic duplicate reclaim. `begin` now returns an owner claim token; `complete` and `release` require that token. Duplicate requests against unfinished work receive `409` instead of executing business work. Client errors release their own claim; unknown server faults stay claimed until operational recovery or retention cleanup. |
+| `PATCH` declared `application/merge-patch+json` but did not implement null-clearing | Historical contract gap | Fixed: `title: null` clears the title, `variables: null` clears variables, object patches merge recursively, and null variable members remove keys. |
+| `Page` carried no `totalItems`/`totalPages` | Historical contract gap | Fixed: `GET /cases` now runs a matching `COUNT` query and returns totals in the `Page` envelope. |
+| Schedulers assumed a single instance for SLA sweeping | The SLA sweeper originally selected due rows without claiming them | Fixed: SLA records now use the same claim-by-`UPDATE` pattern as webhook and engine-command dispatch. `CM_SLA_RECORD` carries claim metadata, `claimDueRecords` stamps a bounded batch, and `updateClaimed` requires the claim token |
+| `ESCALATE` breach action was inert | Historical SLA action gap | Fixed: `SlaSweeper` emits `case.sla.escalated` and writes `sla.escalate` audit when a breached target declares `ESCALATE`. |
+| `PAUSED_STATES_JSON_` was reinterpreted | Legacy column name | Fixed in documentation: the database column remains for compatibility, but schema and API prose now define it as pause reasons. |
+| Identity groups were unioned with participant roles into one privilege check | Historical role/group namespace gap | Mitigated structurally: case definitions reject task candidate groups that reuse declared or reserved participant role names such as `owner`, `handler`, `reviewer`, or `watcher`. |
+| `GET /case-definitions/{key}/forms/{formKey}` was not tenant-scoped | The endpoint used a form-schema lookup with no tenant parameter | Fixed: the controller now derives the tenant from the authenticated principal and the repository lookup requires the tenant. Write paths continue to resolve schemas by pinned case-definition id |
+| `application-remote.yaml` was never exercised | Historical test gap | Fixed: `RemoteModeComplaintIT` now activates the `remote` profile and overrides the remote base URL/credentials through the same property path. |
+| Several target-schema tables are created and not yet written to | `db-design.sql` is the full target schema; the PoC implements a subset of it | Deliberate scope, not oversight. The unwritten tables are `CM_BULK_OPERATION`, `CM_BULK_OPERATION_ITEM`, `CM_CASE_LINK`, `CM_DEF_IDENTITY_LINK`, `CM_DOCUMENT`, `CM_QUEUE`, and `CM_SAVED_FILTER`. |
 
-### Correction: the `formSchema` row above was materially wrong (final whole-branch review, Important 1)
+### Resolved form-schema scoping finding
 
-This is the one place this document was not merely incomplete but **incorrect**, and it is worth
-stating separately rather than editing the row silently, because the shape of the error is the
-lesson.
+The original `formSchema(key, formKey)` method had two separate problems:
 
-"Accepted residual: it exposes a JSON-schema field list, not case data" is true of the **endpoint**.
-It was false of the **method**. `CaseDefinitionRepository.formSchema(key, formKey)` had a second
-caller the row never considered: `CaseTaskService.complete`, the server-side validator for task
-completion — a **write path**, deciding whether a mutation is legal. Both of the ambiguities the
-method's own Javadoc honestly documented were real defects there:
+- **Version drift.** A write path once validated task completion against the latest deployed
+  definition for a key rather than the in-flight case's pinned definition. That is fixed by
+  `formSchemaOfDefinition(caseDefId, formKey)`, which resolves one exact `CM_CASE_DEF` row.
+- **Cross-tenant discovery.** The form-rendering endpoint once resolved the latest schema for a key
+  across all tenants. That is fixed by `formSchema(key, formKey, tenantId)`, which the controller
+  calls only after deriving and validating the tenant from the authenticated principal.
 
-- **Version drift.** The method picks the highest `VERSION_NO_` at the moment of the call. Deploy v2
-  with a new `required` field and every already-running v1 case's task completion was validated
-  against v2 — the exact failure versioned definitions exist to prevent. Every *other* definition
-  lookup in the codebase already resolves the pinned row (`CaseService.snapshot` uses
-  `definitions.require(instance.caseDefId())`), and `CM_CASE.CASE_DEF_ID_` exists precisely to pin it.
-- **Cross-tenant.** The query carried no tenant predicate at all. Tenant `t1` at v3 and tenant `t2`
-  at v1 meant `t2`'s tasks were validated against `t1`'s schema.
-
-Fixed in Task 27: `formSchemaOfDefinition(caseDefId, formKey)` resolves one exact `CM_CASE_DEF` row
-by primary key — simultaneously version-pinned and tenant-scoped, since the id is minted per
-(tenant, key, version). Deliberately a distinct name rather than an overload, because both take two
-`String`s and an overload would be indistinguishable at the call site, which is how the defect
-happened in the first place.
-
-**The generalisable part.** The limitation was documented honestly at definition time (Task 5) and
-never revisited when a write-path caller appeared four tasks later. Nothing was hidden; the Javadoc
-said exactly what the method did. What was missing was the second step: **when you write a Javadoc
-documenting a known limitation, grep every caller of that method.** One grep, at any point in four
-tasks, would have found it. See the plan-level finding below.
+The generalisable lesson remains: when a method documents a known limitation, every new caller has
+to be checked against that limitation before the method is reused.
 
 ---
 
@@ -870,11 +794,11 @@ published document. The first run reported seven distinct mismatches across thre
 | Where | Defect | Fix applied |
 |---|---|---|
 | `AvailableAction.id` | The field is called `action` in the implementation, in design spec §8 obligation 2, and in every consumer. **A client written from this document would have found no `id` on any response** — and this is the single field a generic client switches on | Renamed to `action` in the spec |
-| `AvailableAction.name` | Declared; nothing emits it | Kept, marked NOT IMPLEMENTED. Recorded as R3 gap 3 — a renderer needs a label |
+| `AvailableAction.name` | Declared before the implementation emitted it | Fixed: actions now carry a human-readable `name` field. |
 | `Case.outcome`, `Case.version` | Both emitted on every case response, both undeclared. `version` is the **ETag value**, so a spec-driven client could not find the number it needs for the next `If-Match` | Added |
 | `Task.state`, `Task.engineSync`, `Task.version` | All three emitted, all undeclared. `engineSync` is a PoC-only addition (D3) and is what tells a client why `availableActions[]` is empty | Added, with `engineSync` marked as the deviation it is |
 | `Case.businessKey/assignee/queueId/initiator`, `Task.formKey`, `AvailableAction.formKey` | Declared `type: string`; the API emits explicit `null` | `nullable: true` added |
-| `Case.updatedAt` | Declared; `CaseResponse` carries `createdAt` and `closedAt` but no `updatedAt`, though `CM_CASE.UPDATED_AT_` exists and is maintained | Left declared, marked NOT IMPLEMENTED. A client cannot tell when a case last changed |
+| `Case.updatedAt` | Declared before the implementation emitted it | Fixed: `CaseResponse` now carries the maintained `CM_CASE.UPDATED_AT_` value. |
 | The `Page` envelope, all 7 usages | `allOf: [Page, {properties: {items}}]` **has no satisfiable instance under any validator that treats undeclared properties as errors** — subschema 0 rejects `items`, subschema 1 rejects `page`/`pageSize`. It *is* satisfiable under bare JSON Schema, where `additionalProperties` defaults to true, so this is a validator-strictness-dependent defect and not an unconditional one. It matters because strictness is what makes the rest of this table's findings detectable at all: relax it and the undeclared `outcome`, `version`, `state` and `engineSync` fields above go unnoticed. `allOf` and implicit `additionalProperties: false` are mutually hostile in OpenAPI 3.0 | `additionalProperties: true` on `Page` and on each inline subschema. Noted in the spec that a production document should declare concrete per-collection page components, which keeps strictness *and* typing |
 
 Two contract deviations were also resolved **towards** the spec during Task 24, on a controller
@@ -900,9 +824,9 @@ The defects that were found are narrow:
 | Where | Defect | Fix applied |
 |---|---|---|
 | `CM_CASE_DEF.ID_` | Derived as `{key}:{version}` — a primary key composed from a **strict subset** of the columns its own `UNIQUE(KEY_, VERSION_NO_, TENANT_ID_)` constraint spans, while `nextVersion` counts per tenant. Two tenants' first version of one key both minted `widget-review:1` and collided (`ORA-00001`). Net effect: a multi-tenant deployment could host a given case-definition key in exactly **one** tenant | Derivation changed to `{tenant}:{key}:{version}` on a human ruling, at one documented site; per-tenant version numbering kept. No changeset needed — the fix makes the PK **agree** with the pre-existing unique constraint, and `CM_PLAN_ITEM_DEF.CASE_DEF_ID_` / `CM_CASE.CASE_DEF_ID_` are opaque FK copies that are never parsed |
-| `db-design.sql:27` comment | Still reads `-- {key}:{version}`; the authoritative file now misdescribes its own primary key | **Deliberately not edited.** That file is executed by Liquibase as a `sqlFile` changeset whose checksum is computed over the file's bytes, comments included, so editing one comment invalidates the already-applied `cm-schema-v1` changeset on every existing database. The alternative, `validCheckSum: ANY`, permanently disables integrity checking on the schema's most important changeset in order to fix a comment. The correction of record is in `db-design.md` (a documentation file Liquibase never reads) and here |
-| `db-design.sql:513` | `CM_WEBHOOK_SUB.MAX_RETRIES_ DEFAULT 8` while `WebhookService.DEFAULT_MAX_RETRIES` is 5. Now that the column is actually read, any creation path omitting it retries 8 times against a 5-rung ladder — attempts 5–7 all wait the last rung's 10 hours | Not fixed (same changeset-checksum constraint). Recorded |
-| `db-design.sql:294` | `PAUSED_STATES_JSON_` documented as a list of **states**, wired as a whitelist of pause **reasons** | Not fixed. Recorded above under deviations |
+| `db-design.sql:27` comment | Originally read `-- {key}:{version}`; the authoritative file misdescribed its own primary key | Fixed in the SQL comments and tracked by schema tests. Existing environments need the normal Liquibase checksum policy decision for already-applied sqlFile changesets. |
+| `db-design.sql:513` | `CM_WEBHOOK_SUB.MAX_RETRIES_ DEFAULT 8` while `WebhookService.DEFAULT_MAX_RETRIES` is 5 | Fixed to default 5, with a schema test proving the DDL and runtime ladder agree. Existing environments need the normal Liquibase checksum policy decision for already-applied sqlFile changesets. |
+| `db-design.sql:294` | `PAUSED_STATES_JSON_` documented as a list of **states**, wired as a whitelist of pause **reasons** | Fixed in comments/specification: the legacy column stores pause reasons. |
 
 **The transferable shape:** *a primary key derived from a subset of the columns its own unique
 constraint spans is a latent multi-tenancy bug that stays invisible until cross-tenant writes become

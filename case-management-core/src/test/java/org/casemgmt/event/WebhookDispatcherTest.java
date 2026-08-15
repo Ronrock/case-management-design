@@ -39,9 +39,6 @@ class WebhookDispatcherTest extends OracleTestBase {
 
     @BeforeEach
     void setUp() throws Exception {
-        for (String t : List.of("CM_WEBHOOK_DELIVERY", "CM_WEBHOOK_SUB", "CM_EVENT")) {
-            jdbc().sql("DELETE FROM " + t).update();
-        }
         received.clear();
         responseCode = 200;
 
@@ -270,6 +267,40 @@ class WebhookDispatcherTest extends OracleTestBase {
                 .anySatisfy(d -> assertThat(d.lastStatusCode()).isEqualTo(500));
     }
 
+    @Test
+    void redeliveringDeadLettersResetsThemToDuePendingWorkWithAFreshRetryBudget() {
+        webhooks.insert("w-1", "t1", hookUrl(), List.of("*"), HmacSigner.hash("s3cret"), 5);
+        publishOne();
+        jdbc().sql("""
+                UPDATE CM_WEBHOOK_DELIVERY
+                SET STATUS_ = 'DEAD',
+                    ATTEMPTS_ = 5,
+                    LAST_STATUS_CODE_ = 500,
+                    LAST_ERROR_ = 'downstream failed',
+                    FAILED_AT_ = SYSTIMESTAMP
+                WHERE WEBHOOK_ID_ = 'w-1'""")
+            .update();
+
+        assertThat(webhooks.redeliverDeadLetters("w-1")).isEqualTo(1);
+
+        assertThat(jdbc().sql("""
+                SELECT STATUS_ || ':' || ATTEMPTS_ || ':' ||
+                       CASE WHEN NEXT_ATTEMPT_AT_ IS NULL THEN 'no-next' ELSE 'due' END || ':' ||
+                       CASE WHEN LAST_STATUS_CODE_ IS NULL THEN 'no-code' ELSE 'code' END || ':' ||
+                       CASE WHEN LAST_ERROR_ IS NULL THEN 'no-error' ELSE 'error' END || ':' ||
+                       CASE WHEN FAILED_AT_ IS NULL THEN 'no-failed' ELSE 'failed' END
+                FROM CM_WEBHOOK_DELIVERY
+                WHERE WEBHOOK_ID_ = 'w-1'""")
+                .query(String.class).single())
+                .isEqualTo("PENDING:0:due:no-code:no-error:no-failed");
+
+        assertThat(webhooks.claimDueDeliveries(10)).singleElement()
+                .satisfies(d -> {
+                    assertThat(d.webhookId()).isEqualTo("w-1");
+                    assertThat(d.attempts()).isZero();
+                });
+    }
+
     /**
      * Corrective round 2: {@code deadLetters} had no bound, and nothing downstream added one —
      * the endpoint has no pagination and {@code EventRepository.bySeqs} then built an Oracle
@@ -308,6 +339,10 @@ class WebhookDispatcherTest extends OracleTestBase {
         assertThat(dead).extracting(WebhookRepository.DeadLetter::eventSeq)
                 .containsExactlyElementsOf(
                         seqs.stream().sorted().limit(WebhookRepository.MAX_DEAD_LETTER_BATCH).toList());
+        assertThat(webhooks.deadLetters("w-1", WebhookRepository.MAX_DEAD_LETTER_BATCH, 10))
+                .extracting(WebhookRepository.DeadLetter::eventSeq)
+                .containsExactlyElementsOf(seqs.stream().sorted()
+                        .skip(WebhookRepository.MAX_DEAD_LETTER_BATCH).toList());
 
         // And the batched event lookup resolves every one of them.
         assertThat(new EventRepository(jdbc()).bySeqs(seqs))
@@ -425,13 +460,42 @@ class WebhookDispatcherTest extends OracleTestBase {
         }
         assertThat(statusOf("w-1")).isEqualTo("RETRYING");
         assertThat(attemptsOf("w-1")).isEqualTo(2);
+        assertThat(received).hasSize(2);
 
         makeDue();
         dispatcher.drainOnce();
 
         assertThat(statusOf("w-1")).isEqualTo("DEAD");   // would still be RETRYING on the ladder's 5
         assertThat(attemptsOf("w-1")).isEqualTo(3);
+        assertThat(received).hasSize(3);
         assertThat(webhooks.deadLetters("w-1")).hasSize(1);
+    }
+
+    @Test
+    void explicitZeroMaxRetriesDeadLettersOnTheFirstFailure() {
+        webhooks.insert("w-1", "t1", hookUrl(), List.of("*"), HmacSigner.hash("s3cret"), 0);
+        publishOne();
+        responseCode = 500;
+
+        dispatcher("s3cret").drainOnce();
+
+        assertThat(statusOf("w-1")).isEqualTo("DEAD");
+        assertThat(attemptsOf("w-1")).isEqualTo(1);
+        assertThat(webhooks.deadLetters("w-1")).hasSize(1);
+    }
+
+    @Test
+    void tenantWebhookListingIncludesGlobalSubscriptionsButOwnershipDoesNot() {
+        webhooks.insert("w-global", null, hookUrl(), List.of("*"), HmacSigner.hash("s3cret"), 5);
+        webhooks.insert("w-t1", "t1", hookUrl(), List.of("*"), HmacSigner.hash("s3cret"), 5);
+        webhooks.insert("w-t2", "t2", hookUrl(), List.of("*"), HmacSigner.hash("s3cret"), 5);
+
+        assertThat(webhooks.allForTenant("t1"))
+                .extracting(WebhookRepository.Subscription::id)
+                .containsExactlyInAnyOrder("w-global", "w-t1");
+        assertThat(webhooks.ownedByTenant("t1"))
+                .extracting(WebhookRepository.Subscription::id)
+                .containsExactly("w-t1");
     }
 
     /**

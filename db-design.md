@@ -106,7 +106,7 @@ erDiagram
         varchar POLICY_ID_ FK
         varchar TARGET_KEY_ "firstResponse, resolution"
         varchar DURATION_ISO_ "PT8H"
-        clob PAUSED_STATES_JSON_
+        clob PAUSED_STATES_JSON_ "pause reasons"
         clob BREACH_ACTIONS_JSON_
     }
     CM_SLA_RECORD {
@@ -324,7 +324,7 @@ Indexes match the `GET /cases` query patterns: `(TENANT_ID_, STATE_, ASSIGNEE_)`
 |---|---|
 | **`CM_BUSINESS_CALENDAR`** | Working hours, holidays, timezone as one JSON document. |
 | **`CM_SLA_POLICY`** | Named policy with `SELECTOR_` expression (priority/tier) and optional calendar FK. |
-| **`CM_SLA_TARGET`** | Per-policy target (`firstResponse`, `resolution`, …): ISO-8601 `DURATION_ISO_`/`WARNING_ISO_`, `PAUSED_STATES_JSON_` (e.g. `["WAITING_ON_CUSTOMER"]`), `BREACH_ACTIONS_JSON_` (`ESCALATE`, `EMIT_EVENT`, …). Unique per (policy, target key). |
+| **`CM_SLA_TARGET`** | Per-policy target (`firstResponse`, `resolution`, ...): ISO-8601 `DURATION_ISO_`/`WARNING_ISO_`, `PAUSED_STATES_JSON_` as a legacy column name for allowed pause reasons (e.g. `["WAITING_ON_CUSTOMER"]`), `BREACH_ACTIONS_JSON_` (`ESCALATE`, `EMIT_EVENT`, ...). Unique per (policy, target key). |
 | **`CM_SLA_RECORD`** | Runtime clock per case per target. `STATUS_`: RUNNING, PAUSED, MET, BREACHED. `PAUSED_AT_`, `PAUSED_REASON_`, `PAUSED_TOTAL_SECS_` implement pause/resume: resuming shifts `DUE_AT_`/`WARN_AT_` by the pause length. `VERSION_` for concurrent pause/resume. |
 
 The SLA scheduler scans `(STATUS_, DUE_AT_)` and `(STATUS_, WARN_AT_)` indexes for RUNNING records past their thresholds.

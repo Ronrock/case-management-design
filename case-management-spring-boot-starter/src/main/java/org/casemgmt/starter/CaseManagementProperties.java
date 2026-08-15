@@ -15,6 +15,7 @@ public class CaseManagementProperties {
 
     private final Engine engine = new Engine();
     private final Events events = new Events();
+    private final Webhooks webhooks = new Webhooks();
     private final Schedulers schedulers = new Schedulers();
 
     public static class Engine {
@@ -26,9 +27,13 @@ public class CaseManagementProperties {
         public Remote getRemote() { return remote; }
 
         public static class Remote {
+            public enum AuthMode { auto, none, basic, bearer }
+
             private String baseUrl;
+            private AuthMode authMode = AuthMode.auto;
             private String username;
             private String password;
+            private String bearerToken;
 
             /**
              * Connect and read timeouts for the production {@code RestClient} the remote
@@ -44,10 +49,14 @@ public class CaseManagementProperties {
 
             public String getBaseUrl() { return baseUrl; }
             public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+            public AuthMode getAuthMode() { return authMode; }
+            public void setAuthMode(AuthMode authMode) { this.authMode = authMode; }
             public String getUsername() { return username; }
             public void setUsername(String username) { this.username = username; }
             public String getPassword() { return password; }
             public void setPassword(String password) { this.password = password; }
+            public String getBearerToken() { return bearerToken; }
+            public void setBearerToken(String bearerToken) { this.bearerToken = bearerToken; }
             public long getConnectTimeoutMs() { return connectTimeoutMs; }
             public void setConnectTimeoutMs(long v) { this.connectTimeoutMs = v; }
             public long getReadTimeoutMs() { return readTimeoutMs; }
@@ -61,6 +70,23 @@ public class CaseManagementProperties {
 
         public String getTypePrefix() { return typePrefix; }
         public void setTypePrefix(String typePrefix) { this.typePrefix = typePrefix; }
+    }
+
+    public static class Webhooks {
+        /**
+         * Base64-encoded AES key used to encrypt per-subscription signing secrets in the
+         * database. Required when the starter is active because webhook subscriptions must
+         * survive process restarts.
+         */
+        private String secretEncryptionKey;
+        private String secretKeyId = "default";
+
+        public String getSecretEncryptionKey() { return secretEncryptionKey; }
+        public void setSecretEncryptionKey(String secretEncryptionKey) {
+            this.secretEncryptionKey = secretEncryptionKey;
+        }
+        public String getSecretKeyId() { return secretKeyId; }
+        public void setSecretKeyId(String secretKeyId) { this.secretKeyId = secretKeyId; }
     }
 
     public static class Schedulers {
@@ -104,5 +130,6 @@ public class CaseManagementProperties {
     public void setEngineId(String engineId) { this.engineId = engineId; }
     public Engine getEngine() { return engine; }
     public Events getEvents() { return events; }
+    public Webhooks getWebhooks() { return webhooks; }
     public Schedulers getSchedulers() { return schedulers; }
 }

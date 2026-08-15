@@ -1,11 +1,13 @@
 package org.casemgmt.engine;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -22,20 +24,39 @@ import static org.assertj.core.api.Assertions.*;
  */
 public abstract class EngineGatewayContract {
 
+    private String testPrefix;
+
     protected abstract EngineGateway gateway();
 
     /** Deploys the test BPMN process and returns its definition key. */
     protected abstract String deployTestProcess();
 
+    @BeforeEach
+    void isolateContractIds() {
+        testPrefix = UUID.randomUUID().toString();
+    }
+
+    private String caseId(String suffix) {
+        return "eng-a:" + testPrefix + ":" + suffix;
+    }
+
+    private String planItemId(String suffix) {
+        return "pi-" + testPrefix + "-" + suffix;
+    }
+
+    private String group(String suffix) {
+        return "group-" + testPrefix + "-" + suffix;
+    }
+
     @Test
     void createsAHumanTaskCarryingTheCaseId() {
         EngineTaskRef ref = gateway().createHumanTask(new HumanTaskRequest(
-                "eng-a:1", "pi-1", "Review", null, List.of("reviewers"), "reviewForm",
+                caseId("1"), planItemId("1"), "Review", null, List.of(group("reviewers")), "reviewForm",
                 Map.of("amount", 100)));
 
         assertThat(ref.engineTaskId()).isNotBlank();
         assertThat(ref.name()).isEqualTo("Review");
-        assertThat(ref.caseId()).isEqualTo("eng-a:1");
+        assertThat(ref.caseId()).isEqualTo(caseId("1"));
         // createdAt must be honestly populated on create, not silently dropped or left null
         // (e.g. by a remote gateway swallowing a timestamp-parse failure).
         assertThat(ref.createdAt()).isNotNull();
@@ -46,10 +67,10 @@ public abstract class EngineGatewayContract {
     @Test
     void findsCreatedTasksByCandidateGroup() {
         gateway().createHumanTask(new HumanTaskRequest(
-                "eng-a:2", "pi-2", "Grouped", null, List.of("special-group"), null, Map.of()));
+                caseId("2"), planItemId("2"), "Grouped", null, List.of(group("special")), null, Map.of()));
 
         List<EngineTaskRef> found = gateway().findTasks(
-                new EngineTaskQuery(null, List.of("special-group"), null, 10));
+                new EngineTaskQuery(null, List.of(group("special")), null, 10));
 
         assertThat(found).isNotEmpty();
         assertThat(found).allSatisfy(t -> {
@@ -62,27 +83,27 @@ public abstract class EngineGatewayContract {
             // "populated on create, dropped on read" failure mode this file's class javadoc
             // warns about, and exactly the query shape (candidateGroups only) that would
             // never notice it without this line.
-            assertThat(t.caseId()).isEqualTo("eng-a:2");
+            assertThat(t.caseId()).isEqualTo(caseId("2"));
         });
     }
 
     @Test
     void findsTasksByCandidateGroupAndCaseIdTogether() {
         gateway().createHumanTask(new HumanTaskRequest(
-                "eng-a:9", "pi-9", "DualMatch", null, List.of("dual-group"), null, Map.of()));
+                caseId("9"), planItemId("9"), "DualMatch", null, List.of(group("dual")), null, Map.of()));
         gateway().createHumanTask(new HumanTaskRequest(
-                "eng-a:10", "pi-10", "SameGroupOtherCase", null, List.of("dual-group"), null, Map.of()));
+                caseId("10"), planItemId("10"), "SameGroupOtherCase", null, List.of(group("dual")), null, Map.of()));
 
         // Both tasks share a candidate group; only one matches the caseId. A query combining
         // both filters must AND them, not let the caseId OR-scoping (task-variable vs.
         // process-variable, see findsTasksByCaseId / findsTheUserTaskSpawnedByAStartedProcess)
         // leak into widening the candidateGroups filter too.
         List<EngineTaskRef> found = gateway().findTasks(
-                new EngineTaskQuery(null, List.of("dual-group"), "eng-a:9", 10));
+                new EngineTaskQuery(null, List.of(group("dual")), caseId("9"), 10));
 
         assertThat(found).hasSize(1);
         assertThat(found).allSatisfy(t -> {
-            assertThat(t.caseId()).isEqualTo("eng-a:9");
+            assertThat(t.caseId()).isEqualTo(caseId("9"));
             assertThat(t.name()).isEqualTo("DualMatch");
         });
     }
@@ -90,12 +111,12 @@ public abstract class EngineGatewayContract {
     @Test
     void findsTasksByCaseId() {
         gateway().createHumanTask(new HumanTaskRequest(
-                "eng-a:3", "pi-3", "ByCase", null, List.of(), null, Map.of()));
+                caseId("3"), planItemId("3"), "ByCase", null, List.of(), null, Map.of()));
 
-        assertThat(gateway().findTasks(new EngineTaskQuery(null, null, "eng-a:3", 10)))
+        assertThat(gateway().findTasks(new EngineTaskQuery(null, null, caseId("3"), 10)))
                 .hasSize(1)
                 .allSatisfy(t -> {
-                    assertThat(t.caseId()).isEqualTo("eng-a:3");
+                    assertThat(t.caseId()).isEqualTo(caseId("3"));
                     assertThat(t.createdAt()).isNotNull();
                 });
     }
@@ -103,12 +124,12 @@ public abstract class EngineGatewayContract {
     @Test
     void claimAssignsTheTask() {
         EngineTaskRef ref = gateway().createHumanTask(new HumanTaskRequest(
-                "eng-a:4", "pi-4", "Claimable", null, List.of("reviewers"), null, Map.of()));
+                caseId("4"), planItemId("4"), "Claimable", null, List.of(group("reviewers")), null, Map.of()));
 
         gateway().claimTask(ref.engineTaskId(), "alice");
 
         List<EngineTaskRef> found = gateway().findTasks(
-                new EngineTaskQuery("alice", null, "eng-a:4", 10));
+                new EngineTaskQuery("alice", null, caseId("4"), 10));
 
         assertThat(found).extracting(EngineTaskRef::assignee).containsExactly("alice");
         // Claiming must not drop createdAt from the record read back afterward.
@@ -118,11 +139,11 @@ public abstract class EngineGatewayContract {
     @Test
     void completeRemovesTheTaskFromTheWorklist() {
         EngineTaskRef ref = gateway().createHumanTask(new HumanTaskRequest(
-                "eng-a:5", "pi-5", "Completable", "alice", List.of(), null, Map.of()));
+                caseId("5"), planItemId("5"), "Completable", "alice", List.of(), null, Map.of()));
 
         gateway().completeTask(ref.engineTaskId(), Map.of("outcome", "approve"));
 
-        assertThat(gateway().findTasks(new EngineTaskQuery(null, null, "eng-a:5", 10))).isEmpty();
+        assertThat(gateway().findTasks(new EngineTaskQuery(null, null, caseId("5"), 10))).isEmpty();
     }
 
     @Test
@@ -136,17 +157,18 @@ public abstract class EngineGatewayContract {
         String key = deployTestProcess();
 
         EngineProcessRef ref = gateway().startProcess(new StartProcessRequest(
-                "eng-a:6", "pi-6", key, Map.of("reason", "test")));
+                caseId("6"), planItemId("6"), key, Map.of("reason", "test")));
 
         assertThat(ref.processInstanceId()).isNotBlank();
         assertThat(ref.processDefinitionKey()).isEqualTo(key);
+        assertThat(ref.businessKey()).isEqualTo(caseId("6"));
     }
 
     @Test
     void findsTheUserTaskSpawnedByAStartedProcess() {
         String key = deployTestProcess();
 
-        gateway().startProcess(new StartProcessRequest("eng-a:8", "pi-8", key, Map.of()));
+        gateway().startProcess(new StartProcessRequest(caseId("8"), planItemId("8"), key, Map.of()));
 
         // test-process.bpmn's caseId lands as a *process* variable (it is passed to
         // startProcess, not createHumanTask), which is a different variable scope than a
@@ -154,12 +176,12 @@ public abstract class EngineGatewayContract {
         // scope silently returns nothing here — exactly the gap a first draft of an
         // EngineGateway can ship with while every other test in this file stays green.
         List<EngineTaskRef> found = gateway().findTasks(
-                new EngineTaskQuery(null, null, "eng-a:8", 10));
+                new EngineTaskQuery(null, null, caseId("8"), 10));
 
         assertThat(found).hasSize(1);
         assertThat(found).allSatisfy(t -> {
             assertThat(t.name()).isEqualTo("Wait");
-            assertThat(t.caseId()).isEqualTo("eng-a:8");
+            assertThat(t.caseId()).isEqualTo(caseId("8"));
             assertThat(t.createdAt()).isNotNull();
         });
     }
@@ -168,7 +190,7 @@ public abstract class EngineGatewayContract {
     void cancelsARunningProcess() {
         String key = deployTestProcess();
         EngineProcessRef ref = gateway().startProcess(new StartProcessRequest(
-                "eng-a:7", "pi-7", key, Map.of()));
+                caseId("7"), planItemId("7"), key, Map.of()));
 
         gateway().cancelProcess(ref.processInstanceId(), "no longer needed");
 

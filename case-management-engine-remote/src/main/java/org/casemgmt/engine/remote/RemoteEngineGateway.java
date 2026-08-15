@@ -100,7 +100,8 @@ public class RemoteEngineGateway implements EngineGateway {
                 "/process-definition/key/" + request.processDefinitionKey() + "/start",
                 Map.of("businessKey", request.caseId(), "variables", typed(variables)));
 
-        return new EngineProcessRef(String.valueOf(response.get("id")), request.processDefinitionKey());
+        return new EngineProcessRef(String.valueOf(response.get("id")),
+                request.processDefinitionKey(), request.caseId());
     }
 
     @Override

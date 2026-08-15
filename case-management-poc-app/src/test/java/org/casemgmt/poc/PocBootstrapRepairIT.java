@@ -27,9 +27,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * "doesn't exist yet" branch. This boots one real {@link PocApplication} context (letting {@link
  * PocBootstrap} seed normally), deliberately damages the seeded state directly against the same
  * Oracle schema — removes {@code alice}'s {@code tenant:t1} membership and the
- * {@code sla-resolution} SLA target — closes that context, then boots a SECOND, fresh context
- * against the SAME database and asserts both are repaired without a full re-seed being needed
- * for anything else.
+     * {@code sla-resolution} SLA target, after clearing only runtime SLA clock rows that may have
+     * been created by earlier tests against that target — closes that context, then boots a SECOND,
+     * fresh context against the SAME database and asserts both are repaired without a full re-seed
+     * being needed for anything else.
  *
  * <p><b>Damage containment (Task 27, carried Minor).</b> This class writes destructively to the
  * Oracle schema every other class in this module's single test JVM shares: with {@code alice}'s
@@ -73,6 +74,7 @@ class PocBootstrapRepairIT {
             // Confirm the damage actually lands on what a fresh boot seeded, not on nothing.
             assertThat(identity.createGroupQuery().groupMember(ALICE).list())
                     .extracting(g -> g.getId()).contains(TENANT_GROUP);
+            assertSeededSlaContract(sla);
             assertThat(sla.targetsFor("sla-complaint")).extracting(SlaRepository.TargetRow::id)
                     .contains(SLA_TARGET_ID);
 
@@ -101,6 +103,7 @@ class PocBootstrapRepairIT {
             assertThat(identity.createGroupQuery().groupMember(ALICE).list())
                     .as("alice's tenant:t1 membership is repaired by the next startup, not lost forever")
                     .extracting(g -> g.getId()).contains(TENANT_GROUP);
+            assertSeededSlaContract(sla);
             assertThat(sla.targetsFor("sla-complaint"))
                     .as("the missing SLA target is repaired by the next startup")
                     .extracting(SlaRepository.TargetRow::id).contains(SLA_TARGET_ID);
@@ -111,6 +114,55 @@ class PocBootstrapRepairIT {
         } finally {
             second.close();
         }
+    }
+
+    @Test
+    void restoreDamagePutsBackADeletedSlaTargetEvenWithoutASecondBootstrap() throws Exception {
+        ConfigurableApplicationContext context = bootPocApplication();
+        try {
+            deletedSlaTarget = captureSlaTarget(SLA_TARGET_ID);
+            assertThat(deletedSlaTarget).isNotEmpty();
+            deleteSlaTarget(SLA_TARGET_ID);
+            try (Connection connection = DriverManager.getConnection(
+                    PocOracleSupport.ORACLE.getJdbcUrl(),
+                    PocOracleSupport.ORACLE.getUsername(),
+                    PocOracleSupport.ORACLE.getPassword())) {
+                assertThat(rowExists(connection, SLA_TARGET_ID)).isFalse();
+            }
+
+            restoreDamage();
+
+            try (Connection connection = DriverManager.getConnection(
+                    PocOracleSupport.ORACLE.getJdbcUrl(),
+                    PocOracleSupport.ORACLE.getUsername(),
+                    PocOracleSupport.ORACLE.getPassword())) {
+                assertThat(rowExists(connection, SLA_TARGET_ID)).isTrue();
+            }
+        } finally {
+            context.close();
+        }
+    }
+
+    private static void assertSeededSlaContract(SlaRepository sla) {
+        Map<String, Object> calendar = sla.calendarDefinition("cal-nl");
+        assertThat(calendar).containsEntry("timezone", "Europe/Amsterdam");
+        List<String> holidays = ((List<?>) calendar.get("holidays")).stream()
+                .map(String::valueOf).toList();
+        assertThat(holidays).contains("2026-12-25", "2026-12-26");
+        assertThat(sla.calendarIdOf("sla-complaint")).isEqualTo("cal-nl");
+        assertThat(sla.targetsFor("sla-complaint"))
+                .anySatisfy(t -> {
+                    assertThat(t.id()).isEqualTo("sla-first-response");
+                    assertThat(t.durationIso()).isEqualTo("PT4H");
+                    assertThat(t.warningIso()).isEqualTo("PT3H");
+                    assertThat(t.breachActions()).containsExactly("EMIT_EVENT");
+                })
+                .anySatisfy(t -> {
+                    assertThat(t.id()).isEqualTo("sla-resolution");
+                    assertThat(t.durationIso()).isEqualTo("P5D");
+                    assertThat(t.warningIso()).isEqualTo("P4D");
+                    assertThat(t.breachActions()).containsExactly("EMIT_EVENT", "ESCALATE");
+                });
     }
 
     /**
@@ -152,8 +204,8 @@ class PocBootstrapRepairIT {
                 // a wrong column name, a wrong table or a bad bind would only ever surface on the
                 // failure path this restore exists for, which is the worst possible place to
                 // discover it. Issued unconditionally, it is parsed and executed by Oracle on every
-                // run and affects zero rows on the happy path. NOT a DELETE-then-INSERT: CM_SLA_RECORD
-                // has a foreign key onto this table (db-design.sql:324).
+                // run and affects zero rows on the happy path. This restore inserts only the catalog
+                // row this class deletes; runtime CM_SLA_RECORD rows are not seed data.
                 List<String> columns = new ArrayList<>(deletedSlaTarget.keySet());
                 String placeholders = String.join(", ", columns.stream().map(c -> "?").toList());
                 String sql = "INSERT INTO CM_SLA_TARGET (" + String.join(", ", columns) + ")"
@@ -228,11 +280,17 @@ class PocBootstrapRepairIT {
         try (Connection connection = DriverManager.getConnection(
                 PocOracleSupport.ORACLE.getJdbcUrl(),
                 PocOracleSupport.ORACLE.getUsername(),
-                PocOracleSupport.ORACLE.getPassword());
-             PreparedStatement statement =
-                     connection.prepareStatement("DELETE FROM CM_SLA_TARGET WHERE ID_ = ?")) {
-            statement.setString(1, targetId);
-            statement.executeUpdate();
+                PocOracleSupport.ORACLE.getPassword())) {
+            try (PreparedStatement statement =
+                         connection.prepareStatement("DELETE FROM CM_SLA_RECORD WHERE TARGET_ID_ = ?")) {
+                statement.setString(1, targetId);
+                statement.executeUpdate();
+            }
+            try (PreparedStatement statement =
+                         connection.prepareStatement("DELETE FROM CM_SLA_TARGET WHERE ID_ = ?")) {
+                statement.setString(1, targetId);
+                statement.executeUpdate();
+            }
         }
     }
 
@@ -252,6 +310,8 @@ class PocBootstrapRepairIT {
         properties.put("spring.datasource.url", PocOracleSupport.ORACLE.getJdbcUrl());
         properties.put("spring.datasource.username", PocOracleSupport.ORACLE.getUsername());
         properties.put("spring.datasource.password", PocOracleSupport.ORACLE.getPassword());
+        properties.put("casemgmt.webhooks.secret-encryption-key",
+                "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=");
 
         String[] args = properties.entrySet().stream()
                 .map(e -> "--" + e.getKey() + "=" + e.getValue())

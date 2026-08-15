@@ -61,6 +61,45 @@ class CaseServiceTest extends OracleTestBase {
     }
 
     @Test
+    void createActivatesProcessTaskAndStartsLinkedProcess() throws Exception {
+        String json = new String(getClass().getResourceAsStream("/definitions/process-task-definition.json")
+                .readAllBytes(), StandardCharsets.UTF_8);
+        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
+
+        CaseInstance created = cases.create("process-task-demo", "t1", null, "T",
+                CasePriority.MEDIUM, Map.of("customerId", "C-1"), alice);
+
+        PlanItem processTask = planItems.findByCase(created.id()).stream()
+                .filter(i -> i.name().equals("generate-letter"))
+                .findFirst().orElseThrow();
+        assertThat(processTask.state()).isEqualTo(PlanItemState.ACTIVE);
+
+        assertThat(gateway.startedProcesses).containsExactly("generic-process");
+
+        List<LinkedProcessRepository.LinkedProcessRow> linkedProcesses =
+                new LinkedProcessRepository(jdbc()).findByCase(created.id());
+        assertThat(linkedProcesses).singleElement().satisfies(row -> {
+            assertThat(row.planItemId()).isEqualTo(processTask.id());
+            assertThat(row.processDefinitionKey()).isEqualTo("generic-process");
+            assertThat(row.processInstanceId()).isEqualTo("proc-1");
+            assertThat(row.engineSync()).isEqualTo(CaseTask.EngineSync.SYNCED);
+        });
+
+        assertThat(jdbc().sql("""
+                SELECT DATA_JSON_ FROM CM_EVENT
+                WHERE SUBJECT_ = :caseId AND TYPE_ LIKE '%case.process.started'""")
+                .param("caseId", created.id())
+                .query(String.class)
+                .list()
+                .stream()
+                .map(JsonCodec::toMap))
+                .anySatisfy(data -> {
+                    assertThat(data.get("planItemId")).isEqualTo(processTask.id());
+                    assertThat(data.get("processDefinitionKey")).isEqualTo("generic-process");
+                });
+    }
+
+    @Test
     void createEmitsACaseCreatedEventAndAnAuditRow() {
         cases.create("widget-review", "t1", null, "T", CasePriority.MEDIUM, Map.of(), alice);
 
@@ -191,7 +230,7 @@ class CaseServiceTest extends OracleTestBase {
 
     /**
      * Companion to {@link #closeSweepsALeftoverActiveItemAndEmitsATransitionedEventForIt} for
-     * {@link CaseService#cancel}'s own (pre-existing) sweep. Straight after create(), "intake"
+     * {@link CaseService#cancel}'s own (pre-existing) sweep. Straight after create(), "setupStage"
      * and "review" are ACTIVE and "reviewed" is AVAILABLE — none ended — so cancel() sweeps all
      * three; every one of them must produce its own transitioned event with reason
      * "case cancelled", not just the single case-level case.cancelled event.
@@ -287,17 +326,22 @@ class CaseServiceTest extends OracleTestBase {
     }
 
     static class RecordingGateway implements EngineGateway {
+        record CompletedTask(String engineTaskId, Map<String, Object> variables) {}
+
         final List<HumanTaskRequest> created = new java.util.ArrayList<>();
         final List<String> startedProcesses = new java.util.ArrayList<>();
+        final List<CompletedTask> completedTasks = new java.util.ArrayList<>();
         public EngineTaskRef createHumanTask(HumanTaskRequest r) {
             created.add(r);
             return new EngineTaskRef("engine-" + created.size(), r.name(), r.assignee(), r.caseId(), null);
         }
         public void claimTask(String id, String user) {}
-        public void completeTask(String id, Map<String, Object> v) {}
+        public void completeTask(String id, Map<String, Object> v) {
+            completedTasks.add(new CompletedTask(id, v == null ? null : Map.copyOf(v)));
+        }
         public EngineProcessRef startProcess(StartProcessRequest r) {
             startedProcesses.add(r.processDefinitionKey());
-            return new EngineProcessRef("proc-1", r.processDefinitionKey());
+            return new EngineProcessRef("proc-1", r.processDefinitionKey(), r.caseId());
         }
         public void cancelProcess(String id, String reason) {}
         public List<EngineTaskRef> findTasks(EngineTaskQuery q) { return List.of(); }

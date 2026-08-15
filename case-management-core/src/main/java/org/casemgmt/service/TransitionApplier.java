@@ -2,12 +2,16 @@ package org.casemgmt.service;
 
 import org.casemgmt.domain.*;
 import org.casemgmt.engine.EngineGateway;
+import org.casemgmt.engine.EngineProcessRef;
 import org.casemgmt.engine.EngineTaskRef;
 import org.casemgmt.engine.HumanTaskRequest;
+import org.casemgmt.engine.StartProcessRequest;
+import org.casemgmt.error.InvalidCaseDefinitionException;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
 import org.casemgmt.repo.CaseTaskRepository;
+import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.MilestoneRepository;
 import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.rules.CaseSnapshot;
@@ -51,15 +55,17 @@ public class TransitionApplier {
 
     private final PlanItemRepository planItems;
     private final CaseTaskRepository tasks;
+    private final LinkedProcessRepository linkedProcesses;
     private final MilestoneRepository milestones;
     private final EngineGateway engine;
     private final EventPublisher publisher;
 
     public TransitionApplier(PlanItemRepository planItems, CaseTaskRepository tasks,
-                             MilestoneRepository milestones, EngineGateway engine,
-                             EventPublisher publisher) {
+                             LinkedProcessRepository linkedProcesses, MilestoneRepository milestones,
+                             EngineGateway engine, EventPublisher publisher) {
         this.planItems = planItems;
         this.tasks = tasks;
+        this.linkedProcesses = linkedProcesses;
         this.milestones = milestones;
         this.engine = engine;
         this.publisher = publisher;
@@ -86,6 +92,9 @@ public class TransitionApplier {
 
         if (t.to() == PlanItemState.ACTIVE && def.type() == PlanItemType.HUMAN_TASK) {
             createHumanTask(snapshot, updated, def, actor);
+        }
+        if (t.to() == PlanItemState.ACTIVE && def.type() == PlanItemType.PROCESS_TASK) {
+            startProcessTask(snapshot, updated, def, actor);
         }
         if (t.to() == PlanItemState.COMPLETED && def.type() == PlanItemType.MILESTONE) {
             achieveMilestone(snapshot, updated, actor);
@@ -116,6 +125,38 @@ public class TransitionApplier {
         publisher.publish(event(snapshot, EventTypes.TASK_CREATED, Map.of(
                 "taskId", taskId, "planItemId", item.id(), "name", def.name(),
                 "engineSync", sync.name())));
+    }
+
+    private void startProcessTask(CaseSnapshot snapshot, PlanItem item, PlanItemDefinition def,
+                                  Actor actor) {
+        if (def.processDefinitionKey() == null || def.processDefinitionKey().isBlank()) {
+            throw new InvalidCaseDefinitionException(snapshot.caseInstance().caseDefKey(),
+                    "PROCESS_TASK '" + def.defKey() + "' has no processDefinitionKey");
+        }
+
+        String id = CaseIds.newId();
+        EngineProcessRef ref = engine.startProcess(new StartProcessRequest(
+                snapshot.caseInstance().id(), item.id(), def.processDefinitionKey(),
+                snapshot.caseInstance().variables(), id));
+        String instanceId = ref.processInstanceId() == null ? id : ref.processInstanceId();
+        CaseTask.EngineSync sync = ref.processInstanceId() == null
+                ? CaseTask.EngineSync.PENDING
+                : CaseTask.EngineSync.SYNCED;
+
+        linkedProcesses.insert(id, snapshot.caseInstance().id(), item.id(), instanceId,
+                def.processDefinitionKey(), sync);
+
+        publisher.publish(event(snapshot, EventTypes.PROCESS_STARTED, Map.of(
+                "linkedProcessId", id,
+                "planItemId", item.id(),
+                "processInstanceId", instanceId,
+                "processDefinitionKey", def.processDefinitionKey(),
+                "engineSync", sync.name())));
+        publisher.audit(snapshot.caseInstance().id(), snapshot.caseInstance().tenantId(),
+                actor.userId(), "process.start", "LinkedProcess", id, null,
+                Map.of("planItemId", item.id(),
+                        "processDefinitionKey", def.processDefinitionKey(),
+                        "processInstanceId", instanceId));
     }
 
     private void achieveMilestone(CaseSnapshot snapshot, PlanItem item, Actor actor) {

@@ -17,6 +17,7 @@ public class WebhookRepository {
 
     public record Subscription(String id, String tenantId, String url, List<String> eventTypes,
                                String secretHash, int maxRetries, boolean active, long version) {}
+    public record StoredSecret(String keyId, String ciphertext) {}
 
     /**
      * A claimed (or dead-lettered) delivery row. {@code claimToken} is the token the claiming
@@ -75,6 +76,9 @@ public class WebhookRepository {
 
     public void insert(String id, String tenantId, String url, List<String> eventTypes,
                        String secretHash, int maxRetries) {
+        if (maxRetries < 0) {
+            throw new IllegalArgumentException("maxRetries must be zero or greater");
+        }
         jdbc.sql("""
                 INSERT INTO CM_WEBHOOK_SUB (ID_, TENANT_ID_, URL_, EVENT_TYPES_JSON_, ACTIVE_,
                     SECRET_HASH_, MAX_RETRIES_, VERSION_)
@@ -83,6 +87,26 @@ public class WebhookRepository {
             .param("types", JsonCodec.toJson(eventTypes)).param("hash", secretHash)
             .param("retries", maxRetries)
             .update();
+    }
+
+    public void storeSecret(String webhookId, String keyId, String ciphertext) {
+        jdbc.sql("""
+                UPDATE CM_WEBHOOK_SUB
+                SET SECRET_KEY_ID_ = :keyId, SECRET_CIPHERTEXT_ = :ciphertext
+                WHERE ID_ = :id""")
+            .param("id", webhookId).param("keyId", keyId).param("ciphertext", ciphertext)
+            .update();
+    }
+
+    public java.util.Optional<StoredSecret> secret(String webhookId) {
+        return jdbc.sql("""
+                SELECT SECRET_KEY_ID_, SECRET_CIPHERTEXT_
+                FROM CM_WEBHOOK_SUB
+                WHERE ID_ = :id AND SECRET_CIPHERTEXT_ IS NOT NULL""")
+            .param("id", webhookId)
+            .query((rs, n) -> new StoredSecret(
+                    rs.getString("SECRET_KEY_ID_"), rs.getString("SECRET_CIPHERTEXT_")))
+            .optional();
     }
 
     private static final String SUBSCRIPTION_COLUMNS = """
@@ -112,17 +136,29 @@ public class WebhookRepository {
     }
 
     /**
-     * Every subscription owned by one tenant, active or not.
+     * Every subscription visible to one tenant, active or not.
      *
      * <p>Distinct from {@link #active}, which is the dispatcher's fan-out query and therefore
      * also returns untenanted ({@code TENANT_ID_ IS NULL}) subscriptions that receive every
      * tenant's events. This one is the administrative listing behind
-     * {@code GET /case-api/v2/webhooks} and is strictly scoped: a tenant administrator must not
-     * see another tenant's endpoints, and must not see a global subscription they cannot own.
-     * Added by Task 24 fix round 1 (review finding, Critical) — {@link #all} was reachable over
-     * HTTP and listed every tenant's subscriptions.
+     * {@code GET /case-api/v2/webhooks}: a tenant administrator must not see another tenant's
+     * owned endpoints, but should see a global subscription that receives this tenant's events.
      */
     public List<Subscription> allForTenant(String tenantId) {
+        return jdbc.sql(SUBSCRIPTION_COLUMNS + """
+
+                WHERE TENANT_ID_ IS NULL OR TENANT_ID_ = :tenant ORDER BY CREATED_AT_""")
+            .param("tenant", tenantId)
+            .query(SUBSCRIPTION_MAPPER)
+            .list();
+    }
+
+    /**
+     * Subscriptions owned by exactly one tenant. Management operations use this stricter lookup:
+     * global subscriptions may be visible to all tenant administrators, but this repository has
+     * no platform-admin role that would make mutating them safe.
+     */
+    public List<Subscription> ownedByTenant(String tenantId) {
         return jdbc.sql(SUBSCRIPTION_COLUMNS + """
 
                 WHERE TENANT_ID_ = :tenant ORDER BY CREATED_AT_""")
@@ -313,12 +349,18 @@ public class WebhookRepository {
     public static final int MAX_DEAD_LETTER_BATCH = 200;
 
     public List<DeadLetter> deadLetters(String webhookId) {
+        return deadLetters(webhookId, 0, MAX_DEAD_LETTER_BATCH);
+    }
+
+    public List<DeadLetter> deadLetters(String webhookId, int offset, int limit) {
         return jdbc.sql("""
                 SELECT ID_, EVENT_SEQ_, ATTEMPTS_, LAST_STATUS_CODE_, LAST_ERROR_, FAILED_AT_
                 FROM CM_WEBHOOK_DELIVERY
                 WHERE WEBHOOK_ID_ = :id AND STATUS_ = 'DEAD' ORDER BY EVENT_SEQ_
-                FETCH FIRST :limit ROWS ONLY""")
-            .param("id", webhookId).param("limit", MAX_DEAD_LETTER_BATCH)
+                OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY""")
+            .param("id", webhookId)
+            .param("offset", Math.max(offset, 0))
+            .param("limit", Math.clamp(limit, 1, MAX_DEAD_LETTER_BATCH))
             .query((rs, n) -> new DeadLetter(
                     rs.getString("ID_"),
                     rs.getLong("EVENT_SEQ_"), rs.getInt("ATTEMPTS_"),
@@ -336,6 +378,35 @@ public class WebhookRepository {
                     rs.getString("LAST_ERROR_"),
                     rs.getObject("FAILED_AT_", OffsetDateTime.class)))
             .list();
+    }
+
+    /**
+     * Moves the subscription's dead-letter queue back onto the due-delivery path.
+     *
+     * <p>The reset is intentionally a full retry reset rather than simply flipping
+     * {@code STATUS_}: {@link org.casemgmt.event.WebhookDispatcher} dead-letters after
+     * {@code ATTEMPTS_ >= MAX_RETRIES_}, so preserving the old attempt count would cause a
+     * redelivered row to go straight back to {@code DEAD} after one further failure. Redelivery is
+     * an operator decision that the original failure has been remediated (endpoint fixed, signing
+     * key restored, downstream recovered), so it receives the subscription's normal retry budget
+     * again.
+     *
+     * @return number of rows scheduled for redelivery
+     */
+    public int redeliverDeadLetters(String webhookId) {
+        return jdbc.sql("""
+                UPDATE CM_WEBHOOK_DELIVERY
+                SET STATUS_ = 'PENDING',
+                    ATTEMPTS_ = 0,
+                    NEXT_ATTEMPT_AT_ = SYSTIMESTAMP,
+                    CLAIM_TOKEN_ = NULL,
+                    CLAIMED_AT_ = NULL,
+                    LAST_STATUS_CODE_ = NULL,
+                    LAST_ERROR_ = NULL,
+                    FAILED_AT_ = NULL
+                WHERE WEBHOOK_ID_ = :id AND STATUS_ = 'DEAD'""")
+            .param("id", webhookId)
+            .update();
     }
 
     /**

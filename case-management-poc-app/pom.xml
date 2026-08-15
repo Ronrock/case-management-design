@@ -44,6 +44,10 @@
       <groupId>org.operaton.bpm.springboot</groupId>
       <artifactId>operaton-bpm-spring-boot-starter-rest</artifactId>
     </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+    </dependency>
     <!-- Spring Boot 4 split Liquibase's auto-configuration out of spring-boot-autoconfigure
          into its own module (same relocation Task 25 found for DataSourceAutoConfiguration).
          liquibase-core itself is already a compile dependency of case-management-core (it runs

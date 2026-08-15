@@ -2,6 +2,7 @@ package org.casemgmt.rest;
 
 import org.casemgmt.error.*;
 import org.casemgmt.rest.error.MalformedETagException;
+import org.casemgmt.rest.error.PreconditionFailedException;
 import org.casemgmt.rest.error.ProblemDetailHandler;
 import org.casemgmt.rest.filter.ETagSupport;
 import org.junit.jupiter.api.Test;
@@ -87,6 +88,12 @@ class ErrorMappingTest {
                 .isInstanceOf(PreconditionRequiredException.class);
     }
 
+    @Test
+    void aBlankIfMatchHeaderIsRejectedRatherThanAssumed() {
+        assertThatThrownBy(() -> ETagSupport.parse(""))
+                .isInstanceOf(PreconditionRequiredException.class);
+    }
+
     // Review fix (Important, I4): RFC 7232 §3.1 defines If-Match: * as "matches any current
     // representation" — the request should proceed, not 400. parse() (kept narrow on
     // purpose, see its javadoc) still rejects "*"; parseIfMatch() is the RFC-complete entry
@@ -102,8 +109,27 @@ class ErrorMappingTest {
     }
 
     @Test
+    void expectedVersionAcceptsAnyMatchingTagFromAMultiValueIfMatch() {
+        assertThat(ETagSupport.expectedVersion("\"5\", \"7\"", "case c-1",
+                () -> java.util.OptionalLong.of(7L))).isEqualTo(7L);
+    }
+
+    @Test
+    void expectedVersionRejectsAMultiValueIfMatchWhenNoTagMatchesTheCurrentVersion() {
+        assertThatThrownBy(() -> ETagSupport.expectedVersion("\"5\", \"7\"", "case c-1",
+                () -> java.util.OptionalLong.of(9L)))
+                .isInstanceOf(PreconditionFailedException.class);
+    }
+
+    @Test
     void multiValueIfMatchStillRejectsAMalformedEntry() {
         assertThatThrownBy(() -> ETagSupport.parseIfMatch("\"5\", not-a-number"))
+                .isInstanceOf(MalformedETagException.class);
+    }
+
+    @Test
+    void embeddedQuotesDoNotGetStrippedIntoAValidVersion() {
+        assertThatThrownBy(() -> ETagSupport.parse("\"1\"7\""))
                 .isInstanceOf(MalformedETagException.class);
     }
 

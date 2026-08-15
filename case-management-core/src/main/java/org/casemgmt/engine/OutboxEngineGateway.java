@@ -76,7 +76,7 @@ public class OutboxEngineGateway implements EngineGateway {
                         "processDefinitionKey", request.processDefinitionKey(),
                         "variables", request.variables() == null ? Map.of() : request.variables(),
                         "correlationId", request.correlationId() == null ? "" : request.correlationId()));
-        return new EngineProcessRef(null, request.processDefinitionKey());
+        return new EngineProcessRef(null, request.processDefinitionKey(), request.caseId());
     }
 
     @Override

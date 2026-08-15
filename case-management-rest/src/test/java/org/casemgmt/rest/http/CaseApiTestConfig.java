@@ -2,12 +2,16 @@ package org.casemgmt.rest.http;
 
 import org.casemgmt.config.TransactionManagerConfig;
 import org.casemgmt.engine.EngineGateway;
+import org.casemgmt.event.AesGcmWebhookSecretCodec;
 import org.casemgmt.event.EventPublisher;
+import org.casemgmt.event.WebhookSecretCodec;
+import org.casemgmt.event.WebhookSecretStore;
 import org.casemgmt.repo.AuditRepository;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.CommentRepository;
+import org.casemgmt.repo.DatabaseWebhookSecretStore;
 import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.IdempotencyRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
@@ -130,9 +134,11 @@ public class CaseApiTestConfig {
 
     @Bean
     public TransitionApplier transitionApplier(PlanItemRepository planItems, CaseTaskRepository tasks,
-                                               MilestoneRepository milestones, EngineGateway engine,
-                                               EventPublisher publisher) {
-        return new TransitionApplier(planItems, tasks, milestones, engine, publisher);
+                                               LinkedProcessRepository linkedProcesses,
+                                               MilestoneRepository milestones,
+                                               EngineGateway engine, EventPublisher publisher) {
+        return new TransitionApplier(planItems, tasks, linkedProcesses, milestones, engine,
+                publisher);
     }
 
     @Bean
@@ -180,7 +186,23 @@ public class CaseApiTestConfig {
         return new LinkedProcessService(processes, cases, engine, publisher);
     }
 
-    @Bean public WebhookService webhookService(WebhookRepository webhooks) { return new WebhookService(webhooks); }
+    @Bean
+    public WebhookSecretCodec webhookSecretCodec() {
+        return new AesGcmWebhookSecretCodec("test",
+                "0123456789abcdef0123456789abcdef".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Bean
+    public WebhookSecretStore webhookSecretStore(WebhookRepository webhooks,
+                                                 WebhookSecretCodec codec) {
+        return new DatabaseWebhookSecretStore(webhooks, codec);
+    }
+
+    @Bean
+    public WebhookService webhookService(WebhookRepository webhooks, WebhookSecretStore secrets,
+                                         AuditRepository audit) {
+        return new WebhookService(webhooks, secrets, audit);
+    }
 
     @Bean
     public CaseDefinitionService caseDefinitionService(CaseDefinitionRepository repo) {

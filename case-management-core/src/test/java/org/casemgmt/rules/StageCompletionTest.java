@@ -210,6 +210,34 @@ class StageCompletionTest {
         });
     }
 
+    @Test
+    void stageThatJustEnteredLetsItsOptionalChildMaterialiseBeforeAutocomplete() {
+        CaseDefinition def = definition(
+                def("stage", PlanItemType.STAGE, null, false, false, false,
+                        List.of("${vars.ready == true}"), List.of(), 10),
+                def("child", PlanItemType.HUMAN_TASK, "stage", false, false, false,
+                        List.of(), List.of(), 20));
+        var snapshot = snapshot(def, List.of(
+                item("pi-stage", "stage", PlanItemType.STAGE, PlanItemState.AVAILABLE),
+                item("pi-child", "child", PlanItemType.HUMAN_TASK, PlanItemState.AVAILABLE, "pi-stage")),
+                Map.of("ready", true));
+
+        List<Transition> transitions = evaluator.evaluate(snapshot);
+
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-stage");
+            assertThat(t.to()).isEqualTo(PlanItemState.ACTIVE);
+        });
+        assertThat(transitions).anySatisfy(t -> {
+            assertThat(t.planItemId()).isEqualTo("pi-child");
+            assertThat(t.to()).isEqualTo(PlanItemState.ACTIVE);
+        });
+        assertThat(transitions).noneMatch(t ->
+                "pi-stage".equals(t.planItemId()) && t.to() == PlanItemState.COMPLETED);
+        assertThat(transitions).noneMatch(t ->
+                "pi-child".equals(t.planItemId()) && t.to() == PlanItemState.TERMINATED);
+    }
+
     // --- Task 9 review, Critical 2: a malformed parentStageKey must fail loudly. ---
 
     @Test

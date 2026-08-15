@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -58,18 +57,19 @@ class IdempotencySupportTest {
         final List<String> releasedKeys = new ArrayList<>();
         final Map<String, StoredResponse> stored = new HashMap<>();
         private final Map<String, String> inProgressHashes = new HashMap<>();
+        private final Map<String, String> inProgressTokens = new HashMap<>();
 
         FakeIdempotencyRepository() {
             super(null);
         }
 
         @Override
-        public Optional<StoredResponse> begin(String key, String scope, String requestHash) {
+        public BeginResult begin(String key, String scope, String requestHash) {
             beginCalls.add(new BeginCall(key, scope, requestHash));
             String row = key + "|" + scope;
             StoredResponse completed = stored.get(row);
             if (completed != null) {
-                return Optional.of(completed);
+                return BeginResult.replay(completed);
             }
             String claimedHash = inProgressHashes.get(row);
             if (claimedHash != null) {
@@ -78,21 +78,34 @@ class IdempotencySupportTest {
                         : "Idempotency key " + key + " was already used with a different payload");
             }
             inProgressHashes.put(row, requestHash);
-            return Optional.empty();
+            String token = "claim-" + (beginCalls.size());
+            inProgressTokens.put(row, token);
+            return BeginResult.claimed(token);
         }
 
         @Override
-        public boolean complete(String key, String scope, int status, String responseJson) {
+        public boolean complete(String key, String scope, String claimToken, int status,
+                                String responseJson) {
             completedKeys.add(key);
+            String row = key + "|" + scope;
+            if (!claimToken.equals(inProgressTokens.get(row))) {
+                return false;
+            }
             inProgressHashes.remove(key + "|" + scope);
+            inProgressTokens.remove(key + "|" + scope);
             stored.put(key + "|" + scope, new StoredResponse(status, responseJson));
             return true;
         }
 
         @Override
-        public boolean release(String key, String scope) {
+        public boolean release(String key, String scope, String claimToken) {
             releasedKeys.add(key);
-            return inProgressHashes.remove(key + "|" + scope) != null;
+            String row = key + "|" + scope;
+            if (!claimToken.equals(inProgressTokens.get(row))) {
+                return false;
+            }
+            inProgressTokens.remove(row);
+            return inProgressHashes.remove(row) != null;
         }
     }
 
@@ -144,6 +157,21 @@ class IdempotencySupportTest {
         assertThat(result.replayed()).isTrue();
         assertThat(result.status()).isEqualTo(201);
         assertThat(result.value()).isEqualTo("stored-body");
+    }
+
+    @Test
+    void replayOfANoBodyResponseDoesNotCallTheDeserializerWithNull() {
+        repo.stored.put("k1|DELETE /thing", new IdempotencyRepository.StoredResponse(204, null));
+
+        var result = support.execute("k1", "DELETE /thing", "",
+                () -> { throw new AssertionError("operation must not run on replay"); },
+                s -> { throw new AssertionError("no-body replay must not deserialize null"); },
+                v -> null,
+                204);
+
+        assertThat(result.replayed()).isTrue();
+        assertThat(result.status()).isEqualTo(204);
+        assertThat(result.value()).isNull();
     }
 
     @Test
@@ -268,28 +296,23 @@ class IdempotencySupportTest {
     }
 
     /**
-     * Corrective round: {@code execute} discarded {@code complete()}'s boolean, so the one moment
-     * the documented reclaim-lease double-execute becomes OBSERVABLE went unobserved. A caller
-     * whose lease expired mid-operation, and whose claim a duplicate request then reclaimed and
-     * finalised, would still be handed its own 201 and body — while the STORED response, which
-     * every later retry of that key replays, belonged to the other execution. Two callers, two
-     * results, one key, no signal.
+     * Corrective round: {@code execute} discarded {@code complete()}'s boolean, so a stale claim
+     * could look successful to the caller even though the response store refused it.
      *
      * <p>Attribution: the fake reports the lost race by returning false from {@code complete}
      * exactly as the guarded SQL does, and the assertion pins the message to this condition's own
      * wording — a generic {@code IdempotencyConflictException} could equally come from
      * {@code begin}, which is a different condition entirely.
      *
-     * <p>The message deliberately does not name a winner: {@code complete} guards on status, not
-     * on ownership, so the caller that loses may be either the original holder or the reclaimer.
      * See {@code IdempotencySupport}'s Javadoc.
      */
     @Test
-    void aClaimLostToAReclaimerIsReportedRatherThanSilentlyReturningOK() {
+    void aLostClaimIsReportedRatherThanSilentlyReturningOK() {
         FakeIdempotencyRepository reclaimed = new FakeIdempotencyRepository() {
             @Override
-            public boolean complete(String key, String scope, int status, String responseJson) {
-                super.complete(key, scope, status, responseJson);
+            public boolean complete(String key, String scope, String claimToken, int status,
+                                    String responseJson) {
+                super.complete(key, scope, claimToken, status, responseJson);
                 return false;   // someone else finalised this row first
             }
         };
@@ -297,7 +320,7 @@ class IdempotencySupportTest {
         assertThatThrownBy(() -> new IdempotencySupport(reclaimed)
                 .execute("k1", "POST /cases", "{}", () -> "created", s -> s, v -> v, 201))
                 .isInstanceOf(IdempotencyConflictException.class)
-                .hasMessageContaining("completed concurrently by another request");
+                .hasMessageContaining("is no longer owned by this request");
     }
 
     /**

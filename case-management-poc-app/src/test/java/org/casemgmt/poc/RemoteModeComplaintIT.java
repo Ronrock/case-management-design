@@ -1,8 +1,11 @@
 package org.casemgmt.poc;
 
 import org.casemgmt.poc.support.PocOracleSupport;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.operaton.bpm.engine.TaskService;
 import org.operaton.bpm.engine.task.Task;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -74,9 +77,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * </ol>
  */
 @SuppressWarnings({"rawtypes", "unchecked"})
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class RemoteModeComplaintIT {
 
     private final List<ConfigurableApplicationContext> contexts = new ArrayList<>();
+    private ConfigurableApplicationContext engine;
+    private int enginePort;
+
+    @BeforeAll
+    void bootSharedEngine() {
+        engine = bootPocApplication(Map.of(), false);
+        enginePort = portOf(engine);
+    }
 
     @AfterEach
     void closeContexts() {
@@ -86,13 +98,17 @@ class RemoteModeComplaintIT {
         contexts.clear();
     }
 
+    @AfterAll
+    void closeSharedEngine() {
+        if (engine != null) {
+            engine.close();
+        }
+    }
+
     @Test
     void theComplaintCasePathRunsEndToEndInRemoteModeAgainstARealSeparateEngine() throws Exception {
-        ConfigurableApplicationContext engine = bootPocApplication(Map.of());
-        int enginePort = portOf(engine);
-
         ConfigurableApplicationContext remote = bootPocApplication(Map.of(
-                "casemgmt.engine.mode", "remote",
+                "spring.profiles.active", "remote",
                 "casemgmt.engine.remote.base-url", "http://localhost:" + enginePort + "/engine-rest",
                 "casemgmt.engine.remote.username", "admin",
                 "casemgmt.engine.remote.password", "admin",
@@ -188,7 +204,7 @@ class RemoteModeComplaintIT {
         }
 
         ConfigurableApplicationContext remote = bootPocApplication(Map.of(
-                "casemgmt.engine.mode", "remote",
+                "spring.profiles.active", "remote",
                 "casemgmt.engine.remote.base-url", "http://localhost:" + deadPort + "/engine-rest",
                 "casemgmt.engine.remote.connect-timeout-ms", "500",
                 "casemgmt.engine.remote.read-timeout-ms", "500",
@@ -227,11 +243,8 @@ class RemoteModeComplaintIT {
      */
     @Test
     void wrongRemoteEngineCredentialsLeaveTheTaskPendingRatherThanSynced() throws Exception {
-        ConfigurableApplicationContext engine = bootPocApplication(Map.of());
-        int enginePort = portOf(engine);
-
         ConfigurableApplicationContext remote = bootPocApplication(Map.of(
-                "casemgmt.engine.mode", "remote",
+                "spring.profiles.active", "remote",
                 "casemgmt.engine.remote.base-url", "http://localhost:" + enginePort + "/engine-rest",
                 "casemgmt.engine.remote.username", "admin",
                 "casemgmt.engine.remote.password", "definitely-the-wrong-password",
@@ -267,11 +280,18 @@ class RemoteModeComplaintIT {
      * what actually lets these overrides win.
      */
     private ConfigurableApplicationContext bootPocApplication(Map<String, Object> overrides) {
+        return bootPocApplication(overrides, true);
+    }
+
+    private ConfigurableApplicationContext bootPocApplication(Map<String, Object> overrides,
+                                                             boolean closeAfterTest) {
         Map<String, Object> properties = new java.util.LinkedHashMap<>();
         properties.put("server.port", "0");
         properties.put("spring.datasource.url", PocOracleSupport.ORACLE.getJdbcUrl());
         properties.put("spring.datasource.username", PocOracleSupport.ORACLE.getUsername());
         properties.put("spring.datasource.password", PocOracleSupport.ORACLE.getPassword());
+        properties.put("casemgmt.webhooks.secret-encryption-key",
+                "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=");
         properties.putAll(overrides);
 
         String[] args = properties.entrySet().stream()
@@ -280,7 +300,9 @@ class RemoteModeComplaintIT {
 
         ConfigurableApplicationContext ctx = new SpringApplicationBuilder(PocApplication.class)
                 .run(args);
-        contexts.add(ctx);
+        if (closeAfterTest) {
+            contexts.add(ctx);
+        }
         return ctx;
     }
 

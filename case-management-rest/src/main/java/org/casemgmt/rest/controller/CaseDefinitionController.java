@@ -6,6 +6,7 @@ import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.JsonCodec;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
+import org.casemgmt.rest.policy.AvailableAction;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseDefinitionService;
 import org.springframework.http.HttpStatus;
@@ -92,6 +93,7 @@ public class CaseDefinitionController {
         body.put("version", deployed.versionNo());
         body.put("tenantId", deployed.tenantId());
         body.put("planItems", deployed.planItems().size());
+        body.put("availableActions", policy.listForAdministration(callers.groups(actor)));
         return ResponseEntity.status(HttpStatus.CREATED)
                 .location(URI.create("/case-api/v2/case-definitions/" + deployed.key()))
                 .body(body);
@@ -105,7 +107,9 @@ public class CaseDefinitionController {
     @GetMapping
     public List<Map<String, Object>> list(@RequestParam(required = false) String tenantId,
                                           Authentication authentication) {
-        String tenant = callers.requireTenant(callers.actor(authentication), tenantId);
+        Actor actor = callers.actor(authentication);
+        String tenant = callers.requireTenant(actor, tenantId);
+        List<AvailableAction> actions = policy.listForAdministration(callers.groups(actor));
         return repo.listLatest(tenant).stream().map(def -> {
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("id", def.id());
@@ -113,6 +117,7 @@ public class CaseDefinitionController {
             row.put("version", def.versionNo());
             row.put("name", def.name());
             row.put("tenantId", def.tenantId());
+            row.put("availableActions", actions);
             return row;
         }).toList();
     }
@@ -121,7 +126,8 @@ public class CaseDefinitionController {
     public Map<String, Object> get(@PathVariable String key,
                                    @RequestParam(required = false) String tenantId,
                                    Authentication authentication) {
-        String tenant = callers.requireTenant(callers.actor(authentication), tenantId);
+        Actor actor = callers.actor(authentication);
+        String tenant = callers.requireTenant(actor, tenantId);
         CaseDefinition def = repo.findLatest(key, tenant)
                 .orElseThrow(() -> new NotFoundException("CaseDefinition", key));
 
@@ -133,6 +139,7 @@ public class CaseDefinitionController {
         body.put("tenantId", def.tenantId());
         body.put("roles", def.roles());
         body.put("formKeys", List.copyOf(def.forms().keySet()));
+        body.put("availableActions", policy.listForAdministration(callers.groups(actor)));
         body.put("planItems", def.planItems().stream().map(p -> {
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("defKey", p.defKey());
@@ -149,18 +156,12 @@ public class CaseDefinitionController {
         return body;
     }
 
-    /**
-     * Known tenant-scoping gap, declared rather than papered over: {@code formSchema(key,
-     * formKey)} is deliberately tenant-agnostic in the repository (see its Javadoc — the
-     * interface has no tenant to disambiguate with, and picking the highest version across all
-     * tenants is the best available answer). A form schema is a rendering contract, not case
-     * data, so the exposure is a definition author's field list rather than anyone's records —
-     * but closing it properly means changing that repository signature, which is Task 5's shape
-     * of work, not a filter improvised here.
-     */
-    @GetMapping("/{key}/forms/{formKey}")
-    public Map<String, Object> form(@PathVariable String key, @PathVariable String formKey) {
-        return repo.formSchema(key, formKey)
+    @GetMapping(value = "/{key}/forms/{formKey}", produces = "application/schema+json")
+    public Map<String, Object> form(@PathVariable String key, @PathVariable String formKey,
+                                    @RequestParam(required = false) String tenantId,
+                                    Authentication authentication) {
+        String tenant = callers.requireTenant(callers.actor(authentication), tenantId);
+        return repo.formSchema(key, formKey, tenant)
                 .orElseThrow(() -> new NotFoundException("Form", key + "/" + formKey));
     }
 }

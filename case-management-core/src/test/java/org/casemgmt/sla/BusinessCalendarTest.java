@@ -135,6 +135,20 @@ class BusinessCalendarTest {
     }
 
     @Test
+    void parseErrorsNameTheSourceDefinition() {
+        Map<String, Object> day = Map.of("from", "9:00", "to", "17:00");
+        Map<String, Object> definition = Map.of(
+                "timezone", "Europe/Amsterdam",
+                "workingHours", Map.of("MONDAY", List.of(day)));
+
+        assertThatThrownBy(() -> BusinessCalendar.fromJson("Business calendar 'cal-bad'", definition))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Business calendar 'cal-bad'")
+                .hasMessageContaining("MONDAY")
+                .hasMessageContaining("9:00");
+    }
+
+    @Test
     void rejectsANegativeDuration() {
         assertThatThrownBy(() -> calendar().addDuration(at(2026, 8, 6, 6, 0), Duration.ofHours(-1)))
                 .isInstanceOf(IllegalArgumentException.class)

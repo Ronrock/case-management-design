@@ -102,4 +102,67 @@
       </column>
     </addColumn>
   </changeSet>
+
+  <!-- SLA sweepers are real scheduled jobs in the starter. Without a claim protocol two
+       application instances can select the same due CM_SLA_RECORD rows and race every warning or
+       breach through optimistic locking. This gives the SLA sweeper the same claim-by-UPDATE
+       coordination pattern used by engine commands and webhook deliveries. -->
+  <changeSet id="cm-poc-sla-record-claim" author="casemgmt">
+    <addColumn tableName="CM_SLA_RECORD">
+      <column name="CLAIM_TOKEN_" type="VARCHAR2(64)"/>
+      <column name="CLAIMED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <createIndex tableName="CM_SLA_RECORD" indexName="IX_CM_SLA_CLAIM">
+      <column name="CLAIM_TOKEN_"/>
+    </createIndex>
+  </changeSet>
+
+  <!-- Pull-event recovery depends on consumers being able to advance by SEQ_ without missing
+       a committed lower sequence later. Oracle sequences are allocated before commit, so the
+       append path takes this single row FOR UPDATE before NEXTVAL; the lock is held by the
+       caller's transaction and serializes sequence allocation to commit order. -->
+  <changeSet id="cm-poc-event-append-lock" author="casemgmt">
+    <createTable tableName="CM_EVENT_APPEND_LOCK">
+      <column name="LOCK_NAME_" type="VARCHAR2(64)">
+        <constraints primaryKey="true" nullable="false"/>
+      </column>
+    </createTable>
+    <insert tableName="CM_EVENT_APPEND_LOCK">
+      <column name="LOCK_NAME_" value="default"/>
+    </insert>
+  </changeSet>
+
+  <!-- Idempotency claims are now owner-tokened. A duplicate request may replay a completed
+       response or receive an in-progress conflict, but it cannot reclaim and execute business
+       work while the original request may still be running. -->
+  <changeSet id="cm-poc-idempotency-claim-token" author="casemgmt">
+    <addColumn tableName="CM_IDEMPOTENCY_KEY">
+      <column name="CLAIM_TOKEN_" type="VARCHAR2(64)"/>
+    </addColumn>
+  </changeSet>
+
+  <!-- Webhook signing material must survive restarts. SECRET_HASH_ remains one-way verification
+       material; these columns hold the encrypted signing secret and key identifier needed by a
+       configured WebhookSecretStore. -->
+  <changeSet id="cm-poc-webhook-secret-ciphertext" author="casemgmt">
+    <addColumn tableName="CM_WEBHOOK_SUB">
+      <column name="SECRET_KEY_ID_" type="VARCHAR2(128)"/>
+      <column name="SECRET_CIPHERTEXT_" type="CLOB"/>
+    </addColumn>
+  </changeSet>
+
+  <!-- Deployment-level actions such as webhook subscription are audit-worthy but are not
+       scoped to one case. Keep CASE_ID_ for case audit lookups, but allow NULL so platform
+       resources do not have to fake a case id. -->
+  <changeSet id="cm-poc-audit-platform-actions" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <sqlCheck expectedResult="N">
+        SELECT NULLABLE FROM USER_TAB_COLUMNS
+        WHERE TABLE_NAME = 'CM_AUDIT_LOG' AND COLUMN_NAME = 'CASE_ID_'
+      </sqlCheck>
+    </preConditions>
+    <dropNotNullConstraint tableName="CM_AUDIT_LOG"
+                           columnName="CASE_ID_"
+                           columnDataType="VARCHAR2(140)"/>
+  </changeSet>
 </databaseChangeLog>

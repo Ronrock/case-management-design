@@ -17,7 +17,6 @@ import org.springframework.web.ErrorResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
-import java.util.Optional;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -35,27 +34,18 @@ import java.util.function.Supplier;
  * {@code @Transactional} business logic in between (that is the expected shape).
  *
  * <p><b>Failure releases the claim, for client errors only</b> (final whole-branch review,
- * Important 4). The build recorded the double-execute half of the lease trade-off and not this
- * half, which is the more common one: with {@code begin}'s row already committed, an operation
+ * Important 4). With {@code begin}'s row already committed, an operation
  * that threw left the key claimed with nothing to clean it up, so an ordinary 400/404/422
  * wedged that {@code Idempotency-Key} for the whole {@code LEASE_MINUTES} window — a retry with
  * a corrected payload got 409 "already used with a different payload", and a retry with the
  * original got 409 "still in progress". See {@link #releasesClaim} for exactly which failures
  * release and — just as deliberately — which do not.
  *
- * <p><b>A losing race on {@code complete} is reported, not ignored</b> (corrective round).
+ * <p><b>A lost claim on {@code complete} is reported, not ignored</b> (corrective round).
  * {@code repo.complete} returns whether it was the call that actually stored the response;
- * discarding that boolean left the one moment the documented reclaim-lease double-execute becomes
- * OBSERVABLE silently unobserved — a caller would return its own 201 and body while the STORED
- * response, which every later retry of that key replays, came from a different execution.
- *
- * <p>Deliberately says the two executions raced, and does NOT name a winner (corrective round 2).
- * {@code IdempotencyRepository.complete} guards on {@code RESPONSE_STATUS_ = 0}, i.e. on the row
- * still being unfinished — it does not, and cannot, check WHO owns the claim, because reclaiming
- * leaves the row at status 0 rather than stamping a new owner. So when caller A's lease expires
- * and caller B reclaims it, whichever of them calls {@code complete} first wins and the other
- * gets the {@code false} — and that loser can perfectly well be B, the legitimate holder. A 409
- * is the right answer in both orderings; an attributed cause would be wrong in one of them.
+ * discarding that boolean left a stale owner-token or already-finalised row silently unobserved.
+ * A caller would return its own success while the replay store held a different outcome or no
+ * longer accepted that caller's claim.
  */
 public class IdempotencySupport {
 
@@ -93,42 +83,34 @@ public class IdempotencySupport {
             return new Result<>(operation.get(), successStatus, false);
         }
         String hash = sha256(rawBody);
-        Optional<IdempotencyRepository.StoredResponse> stored = repo.begin(key, scope, hash);
-        if (stored.isPresent()) {
-            return new Result<>(deserializer.apply(stored.get().body()), stored.get().status(), true);
+        IdempotencyRepository.BeginResult begin = repo.begin(key, scope, hash);
+        if (begin.isReplay()) {
+            IdempotencyRepository.StoredResponse stored = begin.replay().orElseThrow();
+            T replayed = stored.body() == null ? null : deserializer.apply(stored.body());
+            return new Result<>(replayed, stored.status(), true);
         }
+        String claimToken = begin.claim().token();
         T value;
         try {
             value = operation.get();
         } catch (RuntimeException e) {
             if (releasesClaim(e)) {
-                repo.release(key, scope);
+                repo.release(key, scope, claimToken);
             }
             throw e;
         }
-        if (!repo.complete(key, scope, successStatus, serializer.apply(value))) {
+        if (!repo.complete(key, scope, claimToken, successStatus, serializer.apply(value))) {
             // The guard on complete()'s UPDATE is only half the fix; this is the other half
             // (corrective round). A false here means the row was already finalised, so the stored
             // response — which every subsequent retry of this key replays — came from a different
             // execution than this one: two callers, two results, one key, and, before this, no
-            // signal anywhere. That is precisely the double-execute the reclaim lease is
-            // documented as risking, and the one moment it becomes observable.
-            //
-            // The message names the RACE and not a winner (corrective round 2). complete() guards
-            // on status, not on ownership — reclaiming leaves the row at status 0 — so the caller
-            // that loses this race may be either the original holder whose lease expired OR the
-            // reclaimer who legitimately took over. A 409 is correct either way; blaming "a
-            // concurrent request that reclaimed it", as the first version did, is backwards in
-            // one of the two orderings.
-            //
             // Reported as a conflict rather than swallowed: the work DID happen (the operation
             // returned), so this is not a failure the client can retry into a clean state — it is
             // a genuine collision the client has to know about, which is what 409 means here and
             // what it already means for every other idempotency conflict this class raises.
             throw new IdempotencyConflictException(
-                    "Idempotency key " + key + " was completed concurrently by another request; "
-                            + "the stored response is that request's, and this request's own work "
-                            + "may have been performed twice");
+                    "Idempotency key " + key + " is no longer owned by this request; "
+                            + "the operation returned but its response was not stored");
         }
         return new Result<>(value, successStatus, false);
     }
@@ -152,9 +134,8 @@ public class IdempotencySupport {
      * says nothing about whether the operation's side effects landed — an engine call may have
      * gone out, an outbox row may have committed. Releasing the claim there would let a retry
      * repeat those effects, which is the precise thing an idempotency key is for. Such a claim
-     * is instead left to expire on {@code IdempotencyRepository}'s existing lease
-     * ({@code LEASE_MINUTES}), which is the conservative recovery path already in place for a
-     * caller that crashed outright. This is a deliberate asymmetry, not an omission.
+     * is instead left claimed until operational recovery or retention cleanup. This is a
+     * deliberate asymmetry, not an omission.
      *
      * <p>Fails CLOSED by construction: an unrecognised exception keeps the claim. Adding a type
      * here is a decision that its throw site never leaves side effects behind.

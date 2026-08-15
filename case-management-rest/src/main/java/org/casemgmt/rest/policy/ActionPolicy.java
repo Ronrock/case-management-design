@@ -107,15 +107,10 @@ public class ActionPolicy {
         if (task.engineSync() != CaseTask.EngineSync.SYNCED) {
             return actions;
         }
-        // Role gate (review fix): a caller with no mutating role and no candidate-group
-        // membership gets nothing, same as the case- and plan-item-level surfaces. See
-        // mayActOnTask() for the rule and why it is OR, not the plain mayMutate() check
-        // the other two surfaces use.
-        if (!mayActOnTask(task, participantRoles, callerGroups)) {
-            return actions;
-        }
         if (task.state() == TaskState.OPEN) {
-            actions.add(AvailableAction.post("claim", base + "/claim"));
+            if (mayActOnTask(task, participantRoles, callerGroups)) {
+                actions.add(AvailableAction.post("claim", base + "/claim"));
+            }
         }
         if (task.state() == TaskState.CLAIMED && callerUserId.equals(task.assignee())) {
             actions.add(AvailableAction.post("complete", base + "/complete", task.formKey()));
@@ -247,6 +242,9 @@ public class ActionPolicy {
         }
         actions.add(AvailableAction.post("deploy-case-definition", "/case-definitions"));
         actions.add(AvailableAction.post("subscribe-webhook", "/webhooks"));
+        actions.add(AvailableAction.get("view-webhook-dead-letters", "/webhooks/{webhookId}/dead-letters"));
+        actions.add(AvailableAction.post("redeliver-webhook-dead-letters",
+                "/webhooks/{webhookId}/dead-letters/redeliver"));
         return actions;
     }
 
