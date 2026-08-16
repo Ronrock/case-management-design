@@ -7,7 +7,8 @@
 > Companion documents: [`FINDINGS.md`](../FINDINGS.md) (risk verdicts and known defects),
 > [`openapi-specs.md`](../openapi-specs.md) (the published API contract),
 > [`db-design.md`](../db-design.md) / [`db-design.sql`](../db-design.sql) (schema),
-> [`design principles.md`](../design%20principles.md) (design rationale).
+> [`design principles.md`](../design%20principles.md) (design rationale),
+> [`search-architecture.md`](search-architecture.md) (search provider architecture).
 
 ---
 
@@ -120,6 +121,21 @@ All four actions funnel through a single `act` method — the only route to `Pla
 | `GET` | `/webhooks/{webhookId}/dead-letters` | Admin-gated; capped at 200 rows, no pagination |
 
 **Specified but not implemented:** `POST /webhooks/{webhookId}/dead-letters/redeliver` (issue #7).
+
+### 3.8 Search — `SearchController`
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/search/cases` | Tenant-scoped case search over local projections |
+| `POST` | `/search/query` | Orchestrated search across requested scopes and registered providers |
+| `GET` | `/search/suggestions` | Tenant-scoped suggestions over visible provider results |
+| `GET` | `/search/facets` | Facet endpoint; returns warnings when no provider supplies facets |
+| `GET` | `/search/providers` | Provider capabilities, status and freshness |
+
+Search is provider-based rather than a direct dependency from the REST layer to every searchable
+module. The first provider searches the local case projection; task, document, timeline,
+enterprise-reference and semantic providers are extension points. See
+[`search-architecture.md`](search-architecture.md).
 
 ---
 

@@ -8,6 +8,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 
 public class CaseRepository {
@@ -206,6 +207,62 @@ public class CaseRepository {
                    .param("limit", q.limit() <= 0 ? 50 : q.limit())
                    .query(CaseRepository::map)
                    .list();
+    }
+
+    public List<CaseInstance> search(CaseSearchQuery q) {
+        StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_CASE WHERE 1 = 1");
+        List<Object[]> params = new ArrayList<>();
+        if (q.tenantId() != null)    { sql.append(" AND TENANT_ID_ = :tenantId");     params.add(new Object[]{"tenantId", q.tenantId()}); }
+        if (!q.states().isEmpty())   { sql.append(" AND STATE_ IN (:states)");
+                                       params.add(new Object[]{"states",
+                                               q.states().stream().map(CaseState::name).toList()}); }
+        if (q.assignee() != null)    { sql.append(" AND ASSIGNEE_ = :assignee");      params.add(new Object[]{"assignee", q.assignee()}); }
+        if (q.caseDefKey() != null)  { sql.append(" AND CASE_DEF_KEY_ = :defKey");    params.add(new Object[]{"defKey", q.caseDefKey()}); }
+        if (q.businessKey() != null) { sql.append(" AND BUSINESS_KEY_ = :bk");        params.add(new Object[]{"bk", q.businessKey()}); }
+        if (q.text() != null) {
+            sql.append("""
+                     AND (
+                        LOWER(ID_) = :searchExact
+                        OR LOWER(BUSINESS_KEY_) = :searchExact
+                        OR LOWER(TITLE_) LIKE :searchLike ESCAPE '~'
+                    )""");
+            String exact = q.text().toLowerCase(Locale.ROOT);
+            params.add(new Object[]{"searchExact", exact});
+            params.add(new Object[]{"searchLike", containsLike(exact)});
+        }
+
+        if (q.text() == null) {
+            sql.append(" ORDER BY UPDATED_AT_ DESC, CREATED_AT_ DESC, ID_ ASC");
+        } else {
+            sql.append("""
+                     ORDER BY
+                      CASE
+                        WHEN LOWER(ID_) = :rankingExact THEN 0
+                        WHEN LOWER(BUSINESS_KEY_) = :rankingExact THEN 1
+                        ELSE 2
+                      END,
+                      UPDATED_AT_ DESC, CREATED_AT_ DESC, ID_ ASC""");
+        }
+        sql.append(" OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY");
+
+        var spec = jdbc.sql(sql.toString());
+        if (q.text() != null) {
+            spec = spec.param("rankingExact", q.text().toLowerCase(Locale.ROOT));
+        }
+        for (Object[] p : params) {
+            spec = spec.param((String) p[0], p[1]);
+        }
+        return spec.param("offset", q.offset())
+                   .param("limit", q.limit() <= 0 ? 25 : q.limit())
+                   .query(CaseRepository::map)
+                   .list();
+    }
+
+    private static String containsLike(String value) {
+        return "%" + value
+                .replace("~", "~~")
+                .replace("%", "~%")
+                .replace("_", "~_") + "%";
     }
 
     private static CaseInstance map(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {

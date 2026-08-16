@@ -10,6 +10,9 @@ import org.casemgmt.rest.controller.*;
 import org.casemgmt.rest.error.ProblemDetailHandler;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.rules.*;
+import org.casemgmt.search.CaseProjectionSearchProvider;
+import org.casemgmt.search.SearchOrchestrator;
+import org.casemgmt.search.SearchProvider;
 import org.casemgmt.service.*;
 import org.casemgmt.sla.SlaService;
 import org.casemgmt.sla.SlaSweeper;
@@ -41,7 +44,7 @@ import java.util.concurrent.ConcurrentHashMap;
 // any transactional guarantee at all.
 @Import({TransactionManagerConfig.class, CaseController.class, PlanItemController.class,
         TaskController.class, CaseDefinitionController.class, CollaborationController.class,
-        EventController.class, SlaController.class, ProblemDetailHandler.class})
+        EventController.class, SlaController.class, SearchController.class, ProblemDetailHandler.class})
 public class CaseManagementAutoConfiguration {
 
     /**
@@ -78,6 +81,17 @@ public class CaseManagementAutoConfiguration {
     @Bean public IdempotencyRepository idempotencyRepository(JdbcClient c) { return new IdempotencyRepository(c); }
     @Bean public EngineCommandRepository engineCommandRepository(JdbcClient c) { return new EngineCommandRepository(c); }
     @Bean public SlaRepository slaRepository(JdbcClient c) { return new SlaRepository(c); }
+
+    @Bean
+    public CaseProjectionSearchProvider caseProjectionSearchProvider(CaseRepository cases) {
+        return new CaseProjectionSearchProvider(cases);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(SearchOrchestrator.class)
+    public SearchOrchestrator searchOrchestrator(java.util.List<SearchProvider> providers) {
+        return new SearchOrchestrator(providers);
+    }
 
     @Bean
     @ConditionalOnMissingBean(EventPublisher.class)

@@ -22,6 +22,9 @@ import org.casemgmt.rules.JuelCriterionEvaluator;
 import org.casemgmt.rules.PlanModelEvaluator;
 import org.casemgmt.rules.PlanModelInstantiator;
 import org.casemgmt.rules.StageCompletion;
+import org.casemgmt.search.CaseProjectionSearchProvider;
+import org.casemgmt.search.SearchOrchestrator;
+import org.casemgmt.search.SearchProvider;
 import org.casemgmt.service.CaseDefinitionService;
 import org.casemgmt.service.CaseService;
 import org.casemgmt.service.CaseTaskService;
@@ -106,6 +109,8 @@ public class CaseApiTestConfig {
     @Bean public WebhookRepository webhookRepository(JdbcClient j) { return new WebhookRepository(j); }
     @Bean public SlaRepository slaRepository(JdbcClient j) { return new SlaRepository(j); }
     @Bean public IdempotencyRepository idempotencyRepository(JdbcClient j) { return new IdempotencyRepository(j); }
+    @Bean public CaseProjectionSearchProvider caseProjectionSearchProvider(CaseRepository cases) { return new CaseProjectionSearchProvider(cases); }
+    @Bean public SearchOrchestrator searchOrchestrator(java.util.List<SearchProvider> providers) { return new SearchOrchestrator(providers); }
 
     @Bean
     public CaseDefinitionRepository caseDefinitionRepository(DataSource dataSource) {

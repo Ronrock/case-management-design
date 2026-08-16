@@ -15,7 +15,7 @@ info:
 servers:
   - url: /case-api/v2
 security:
-  - oauth2: [case:read, case:write]
+  - oauth2: ["case:read", "case:write"]
 
 tags:
   - name: Case Definitions
@@ -30,6 +30,7 @@ tags:
   - name: Queues & Routing
   - name: Saved Filters
   - name: Bulk Operations
+  - name: Search
   - name: Events & Webhooks
   - name: History & Audit
 
@@ -412,6 +413,136 @@ paths:
                     groupId: {type: string}
       responses:
         '200': {$ref: '#/components/responses/CaseResponse'}
+
+  # ---------- Search ----------
+  /search/cases:
+    get:
+      tags: [Search]
+      summary: Search visible cases through the local case projection
+      parameters:
+        - name: q
+          in: query
+          schema: {type: string}
+          description: Identifier or text query matched against visible case id, business key and title.
+        - name: state
+          in: query
+          schema: {$ref: '#/components/schemas/CaseState'}
+        - name: status
+          in: query
+          schema: {$ref: '#/components/schemas/CaseState'}
+          description: Alias for state.
+        - name: caseDefinitionKey
+          in: query
+          schema: {type: string}
+        - name: businessKey
+          in: query
+          schema: {type: string}
+        - name: assignee
+          in: query
+          schema: {type: string}
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
+      responses:
+        '200':
+          description: Search results with provider status metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SearchResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /search/query:
+    post:
+      tags: [Search]
+      summary: Execute orchestrated search across selected scopes and registered providers
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SearchRequest'}
+      responses:
+        '200':
+          description: Orchestrated search results
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SearchResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /search/suggestions:
+    get:
+      tags: [Search]
+      summary: Search suggestions over authorized visible results
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: {type: string, minLength: 2}
+        - name: scope
+          in: query
+          schema: {type: string, default: cases}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 25, default: 10}
+      responses:
+        '200':
+          description: Suggestions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/SearchSuggestion'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /search/facets:
+    get:
+      tags: [Search]
+      summary: Facets for an authorized search scope
+      parameters:
+        - name: scope
+          in: query
+          schema: {type: string, default: cases}
+        - name: q
+          in: query
+          schema: {type: string}
+        - name: caseDefinitionKey
+          in: query
+          schema: {type: string}
+      responses:
+        '200':
+          description: Facets or warnings when no provider supplies facets
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [facets]
+                properties:
+                  facets:
+                    type: array
+                    items: {$ref: '#/components/schemas/SearchFacetGroup'}
+                  warnings:
+                    type: array
+                    items: {$ref: '#/components/schemas/SearchWarning'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /search/providers:
+    get:
+      tags: [Search]
+      summary: List registered search provider capabilities and freshness
+      responses:
+        '200':
+          description: Provider statuses
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [providers]
+                properties:
+                  providers:
+                    type: array
+                    items: {$ref: '#/components/schemas/SearchProviderStatus'}
 
   # ---------- Plan Items ----------
   /cases/{caseId}/plan-items:
@@ -1516,6 +1647,139 @@ components:
         totalItems: {type: integer}
         totalPages: {type: integer}
 
+    SearchScope:
+      type: string
+      enum: [cases, tasks, worklists, documents, timeline, enterprise, semantic]
+
+    SearchRequest:
+      type: object
+      properties:
+        q:
+          type: string
+          description: Keyword or identifier query.
+        scopes:
+          type: array
+          default: [cases]
+          items: {$ref: '#/components/schemas/SearchScope'}
+        filters:
+          type: object
+          additionalProperties: true
+          description: Provider-specific structured filters. Tenant is always derived from the principal.
+        facets:
+          type: array
+          items: {type: string}
+        page: {type: integer, minimum: 0, default: 0}
+        pageSize: {type: integer, minimum: 1, maximum: 200, default: 25}
+        includeProviderStatus: {type: boolean, default: true}
+
+    SearchResponse:
+      type: object
+      required: [items, page]
+      properties:
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/SearchResultItem'}
+        page:
+          type: object
+          properties:
+            page: {type: integer}
+            pageSize: {type: integer}
+        facets:
+          type: array
+          items: {$ref: '#/components/schemas/SearchFacetGroup'}
+        warnings:
+          type: array
+          items: {$ref: '#/components/schemas/SearchWarning'}
+        providerStatuses:
+          type: array
+          items: {$ref: '#/components/schemas/SearchProviderStatus'}
+
+    SearchResultItem:
+      type: object
+      required: [id, resultType, title, sourceProvider]
+      properties:
+        id: {type: string}
+        resultType:
+          type: string
+          enum: [case, task, worklistItem, document, timelineEvent, enterpriseReference]
+        caseId: {type: string}
+        title: {type: string}
+        summary: {type: string}
+        sourceProvider: {type: string}
+        score: {type: number, format: double}
+        matchedFields:
+          type: array
+          items: {type: string}
+        highlights:
+          type: array
+          items: {type: string}
+        resource:
+          type: object
+          additionalProperties: true
+        freshness:
+          type: string
+          enum: [fresh, stale, unknown]
+
+    SearchFacetGroup:
+      type: object
+      required: [field, values]
+      properties:
+        field: {type: string}
+        label: {type: string}
+        values:
+          type: array
+          items: {$ref: '#/components/schemas/SearchFacetValue'}
+
+    SearchFacetValue:
+      type: object
+      required: [value]
+      properties:
+        value: {type: string}
+        label: {type: string}
+        count: {type: integer, minimum: 0}
+        countSuppressed: {type: boolean}
+
+    SearchWarning:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [no-provider, provider-timeout, provider-unavailable, stale-projection, partial-results, facet-unavailable]
+        message: {type: string}
+        provider: {type: string}
+
+    SearchProviderStatus:
+      type: object
+      required: [id, status, scopes]
+      properties:
+        id: {type: string}
+        status:
+          type: string
+          enum: [available, degraded, unavailable, disabled]
+        scopes:
+          type: array
+          items: {$ref: '#/components/schemas/SearchScope'}
+        supportsFacets: {type: boolean}
+        supportsSuggestions: {type: boolean}
+        maxProjectionLagSeconds: {type: integer}
+        currentProjectionLagSeconds: {type: integer}
+        partialResultsAllowed: {type: boolean}
+        warnings:
+          type: array
+          items: {$ref: '#/components/schemas/SearchWarning'}
+
+    SearchSuggestion:
+      type: object
+      required: [value, label, suggestionType]
+      properties:
+        value: {type: string}
+        label: {type: string}
+        suggestionType:
+          type: string
+          enum: [case, task, worklistItem, document, timelineEvent, enterpriseReference]
+        scope: {type: string}
+
     Variables:
       type: object
       additionalProperties: true
@@ -1536,7 +1800,7 @@ components:
         # needs one; recorded as an R3 gap in FINDINGS.md rather than quietly deleted.
         name: {type: string, example: Close case}
         method: {type: string, example: POST}
-        href: {type: string, example: /cases/eng-a:123/close}
+        href: {type: string, example: "/cases/eng-a:123/close"}
         formKey:
           type: string
           nullable: true
