@@ -423,7 +423,9 @@ paths:
         - name: q
           in: query
           schema: {type: string}
-          description: Identifier or text query matched against visible case id, business key and title.
+          description: >
+            Identifier or literal text query matched against visible case id, business key and
+            title. SQL wildcard characters in the query are treated as ordinary text.
         - name: state
           in: query
           schema: {$ref: '#/components/schemas/CaseState'}
@@ -1656,7 +1658,9 @@ components:
       properties:
         q:
           type: string
-          description: Keyword or identifier query.
+          description: >
+            Keyword or identifier query. The local case projection treats SQL wildcard characters
+            as ordinary text and supports partial business-key and title matching.
         scopes:
           type: array
           default: [cases]

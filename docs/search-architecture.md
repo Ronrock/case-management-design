@@ -147,8 +147,10 @@ optional highlights after masking, freshness and warning metadata. Providers mus
 resources or fields the caller cannot access.
 
 The current implementation starts with `CaseProjectionSearchProvider`, which searches the local
-case projection by tenant, state, assignee, case definition key, business key, case id and title.
-Task, document, timeline, enterprise reference and semantic providers are extension points.
+case projection by tenant, state, assignee, case definition key, exact case id, exact or partial
+business key and title. User input is treated as literal text: Oracle `LIKE` wildcard characters
+such as `%`, `_` and `~` are escaped before query execution. Task, document, timeline, enterprise
+reference and semantic providers are extension points.
 
 ## API Surface
 
@@ -198,7 +200,7 @@ Operational requirements:
 This repository currently implements the first slice:
 
 - `SearchProvider` and `SearchOrchestrator` in core.
-- Local case projection provider.
+- Local case projection provider with exact id, exact/partial business-key and title matching.
 - Search REST endpoints for cases, orchestrated queries, provider status, suggestions and facets.
 - Tenant scope derived from the principal.
 

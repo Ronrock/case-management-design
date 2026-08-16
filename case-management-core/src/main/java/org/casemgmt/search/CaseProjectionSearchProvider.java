@@ -106,7 +106,7 @@ public class CaseProjectionSearchProvider implements SearchProvider {
         if (c.id().equalsIgnoreCase(q)) {
             fields.add("caseId");
         }
-        if (c.businessKey() != null && c.businessKey().equalsIgnoreCase(q)) {
+        if (c.businessKey() != null && c.businessKey().toLowerCase(Locale.ROOT).contains(term)) {
             fields.add("businessKey");
         }
         if (c.title() != null && c.title().toLowerCase(Locale.ROOT).contains(term)) {
@@ -135,6 +135,10 @@ public class CaseProjectionSearchProvider implements SearchProvider {
         }
         if (c.businessKey() != null && c.businessKey().equalsIgnoreCase(q)) {
             return 90;
+        }
+        if (c.businessKey() != null && c.businessKey().toLowerCase(Locale.ROOT)
+                .contains(q.toLowerCase(Locale.ROOT))) {
+            return 70;
         }
         if (matchedFields.contains("title")) {
             return 50;

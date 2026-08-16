@@ -61,6 +61,23 @@ class SearchOrchestratorTest {
                 .containsExactly("provider-unavailable");
     }
 
+    @Test
+    void paginatesAfterMergingAndCanSuppressProviderStatus() {
+        SearchOrchestrator orchestrator = new SearchOrchestrator(List.of(
+                provider("cases-a", 10, List.of(
+                        item("eng-a:1", 100, "cases-a"),
+                        item("eng-a:2", 80, "cases-a"),
+                        item("eng-a:3", 60, "cases-a")))));
+
+        SearchResponse response = orchestrator.search(new SearchQuery("t1", "BK",
+                List.of(SearchScope.CASES), Map.of(), List.of(), 1, 1, false));
+
+        assertThat(response.items()).extracting(SearchResultItem::id)
+                .containsExactly("eng-a:2");
+        assertThat(response.page()).isEqualTo(new SearchPage(1, 1));
+        assertThat(response.providerStatuses()).isEmpty();
+    }
+
     private static SearchProvider provider(String id, int cost, List<SearchResultItem> items) {
         return new SearchProvider() {
             @Override public String providerId() { return id; }

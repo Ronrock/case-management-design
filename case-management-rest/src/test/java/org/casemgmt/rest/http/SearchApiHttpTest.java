@@ -47,6 +47,45 @@ class SearchApiHttpTest extends CaseApiHttpTestBase {
     }
 
     @Test
+    void casesEndpointTreatsFreeTextWildcardsAsLiteralOracleText() {
+        deployDefinition();
+        Map<String, Object> literal = createCase("BK-REST-100%_", "Literal 100%_ case");
+        createCase("BK-REST-100XA", "Literal 100XA case");
+
+        ResponseEntity<Map> response = alice().get()
+                .uri(builder -> builder.path("/search/cases")
+                        .queryParam("q", "100%_")
+                        .build())
+                .retrieve().toEntity(Map.class);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(searchItems(response)).extracting(item -> item.get("id"))
+                .containsExactly(literal.get("id"));
+        assertThat((List<String>) searchItems(response).get(0).get("matchedFields"))
+                .contains("businessKey", "title");
+    }
+
+    @Test
+    void queryEndpointSupportsStatusAliasAndProviderStatusSuppression() {
+        deployDefinition();
+        Map<String, Object> created = createCase("BK-STATUS-FILTER", "Filtered status case");
+
+        ResponseEntity<Map> response = alice().post().uri("/search/query")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of(
+                        "q", "status",
+                        "scopes", List.of("cases"),
+                        "filters", Map.of("status", created.get("state")),
+                        "includeProviderStatus", false))
+                .retrieve().toEntity(Map.class);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(searchItems(response)).extracting(item -> item.get("id"))
+                .containsExactly(created.get("id"));
+        assertThat((List<Map<String, Object>>) response.getBody().get("providerStatuses")).isEmpty();
+    }
+
+    @Test
     void exposesOrchestratedQueryProvidersSuggestionsAndFacetWarnings() {
         deployDefinition();
         createCase("BK-SUGGEST-1", "Suggestion target");
@@ -79,6 +118,17 @@ class SearchApiHttpTest extends CaseApiHttpTestBase {
         ResponseEntity<Map> response = alice().post().uri("/search/query")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("scopes", List.of("everything")))
+                .retrieve().toEntity(Map.class);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(response.getBody()).containsEntry("code", "invalid-request");
+    }
+
+    @Test
+    void invalidSearchStateIsAProblemJsonBadRequest() {
+        ResponseEntity<Map> response = alice().get()
+                .uri("/search/cases?state=UNKNOWN")
                 .retrieve().toEntity(Map.class);
 
         assertThat(response.getStatusCode().value()).isEqualTo(400);

@@ -29,14 +29,14 @@ class CaseProjectionSearchProviderTest extends OracleTestBase {
     }
 
     @Test
-    void searchesVisibleCasesByBusinessKeyAndTitleInsideTheCallerTenant() {
+    void searchesVisibleCasesByPartialBusinessKeyAndTitleInsideTheCallerTenant() {
         cases.insert(newCase("eng-a:1", "t1", "BK-100", "Broken payment widget", CaseState.ACTIVE));
         cases.insert(newCase("eng-a:2", "t2", "BK-100", "Broken payment widget", CaseState.ACTIVE));
         cases.insert(newCase("eng-a:3", "t1", "BK-200", "Card maintenance", CaseState.ACTIVE));
 
-        SearchProviderResult byBusinessKey = provider.search(new SearchQuery("t1", "BK-100",
+        SearchProviderResult byBusinessKey = provider.search(new SearchQuery("t1", "K-10",
                 List.of(SearchScope.CASES), Map.of(), List.of(), 0, 25, true));
-        SearchProviderResult byTitle = provider.search(new SearchQuery("t1", "payment",
+        SearchProviderResult byTitle = provider.search(new SearchQuery("t1", "PAYMENT",
                 List.of(SearchScope.CASES), Map.of(), List.of(), 0, 25, true));
 
         assertThat(byBusinessKey.items()).extracting(SearchResultItem::id)
@@ -45,6 +45,37 @@ class CaseProjectionSearchProviderTest extends OracleTestBase {
         assertThat(byTitle.items()).extracting(SearchResultItem::id)
                 .containsExactly("eng-a:1");
         assertThat(byTitle.items().get(0).matchedFields()).contains("title");
+    }
+
+    @Test
+    void escapesOracleLikeWildcardsInFreeText() {
+        cases.insert(newCase("eng-a:6", "t1", "BK-100%_SAFE",
+                "Literal 100%_ marker", CaseState.ACTIVE));
+        cases.insert(newCase("eng-a:7", "t1", "BK-100XA-SAFE",
+                "Literal 100XA marker", CaseState.ACTIVE));
+
+        SearchProviderResult response = provider.search(new SearchQuery("t1", "100%_",
+                List.of(SearchScope.CASES), Map.of(), List.of(), 0, 25, true));
+
+        assertThat(response.items()).extracting(SearchResultItem::id)
+                .containsExactly("eng-a:6");
+        assertThat(response.items().get(0).matchedFields())
+                .contains("businessKey", "title");
+    }
+
+    @Test
+    void ranksExactBusinessKeyBeforePartialBusinessKeyAndTitleMatches() {
+        cases.insert(newCase("eng-a:8", "t1", "BK-42", "Unrelated title", CaseState.ACTIVE));
+        cases.insert(newCase("eng-a:9", "t1", "BK-42-SUFFIX", "Unrelated title", CaseState.ACTIVE));
+        cases.insert(newCase("eng-a:10", "t1", "BK-999", "Contains BK-42 in title", CaseState.ACTIVE));
+
+        SearchProviderResult response = provider.search(new SearchQuery("t1", "BK-42",
+                List.of(SearchScope.CASES), Map.of(), List.of(), 0, 25, true));
+
+        assertThat(response.items()).extracting(SearchResultItem::id)
+                .containsExactly("eng-a:8", "eng-a:9", "eng-a:10");
+        assertThat(response.items()).extracting(SearchResultItem::score)
+                .containsExactly(90.0, 70.0, 50.0);
     }
 
     @Test

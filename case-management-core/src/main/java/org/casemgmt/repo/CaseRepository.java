@@ -224,6 +224,7 @@ public class CaseRepository {
                      AND (
                         LOWER(ID_) = :searchExact
                         OR LOWER(BUSINESS_KEY_) = :searchExact
+                        OR LOWER(BUSINESS_KEY_) LIKE :searchLike ESCAPE '~'
                         OR LOWER(TITLE_) LIKE :searchLike ESCAPE '~'
                     )""");
             String exact = q.text().toLowerCase(Locale.ROOT);
@@ -239,7 +240,9 @@ public class CaseRepository {
                       CASE
                         WHEN LOWER(ID_) = :rankingExact THEN 0
                         WHEN LOWER(BUSINESS_KEY_) = :rankingExact THEN 1
-                        ELSE 2
+                        WHEN LOWER(BUSINESS_KEY_) LIKE :rankingPrefix ESCAPE '~' THEN 2
+                        WHEN LOWER(TITLE_) LIKE :rankingPrefix ESCAPE '~' THEN 3
+                        ELSE 4
                       END,
                       UPDATED_AT_ DESC, CREATED_AT_ DESC, ID_ ASC""");
         }
@@ -247,7 +250,9 @@ public class CaseRepository {
 
         var spec = jdbc.sql(sql.toString());
         if (q.text() != null) {
-            spec = spec.param("rankingExact", q.text().toLowerCase(Locale.ROOT));
+            String exact = q.text().toLowerCase(Locale.ROOT);
+            spec = spec.param("rankingExact", exact)
+                       .param("rankingPrefix", startsWithLike(exact));
         }
         for (Object[] p : params) {
             spec = spec.param((String) p[0], p[1]);
@@ -260,6 +265,13 @@ public class CaseRepository {
 
     private static String containsLike(String value) {
         return "%" + value
+                .replace("~", "~~")
+                .replace("%", "~%")
+                .replace("_", "~_") + "%";
+    }
+
+    private static String startsWithLike(String value) {
+        return value
                 .replace("~", "~~")
                 .replace("%", "~%")
                 .replace("_", "~_") + "%";
