@@ -207,6 +207,7 @@ public class CaseRepository {
     public List<CaseInstance> search(CaseSearchQuery q) {
         StringBuilder sql = new StringBuilder("SELECT " + COLUMNS + " FROM CM_CASE WHERE 1 = 1");
         List<Object[]> params = new ArrayList<>();
+        String normalizedText = q.text() == null ? null : q.text().toLowerCase(Locale.ROOT);
         if (q.tenantId() != null)    { sql.append(" AND TENANT_ID_ = :tenantId");     params.add(new Object[]{"tenantId", q.tenantId()}); }
         if (!q.states().isEmpty())   { sql.append(" AND STATE_ IN (:states)");
                                        params.add(new Object[]{"states",
@@ -214,7 +215,7 @@ public class CaseRepository {
         if (q.assignee() != null)    { sql.append(" AND ASSIGNEE_ = :assignee");      params.add(new Object[]{"assignee", q.assignee()}); }
         if (q.caseDefKey() != null)  { sql.append(" AND CASE_DEF_KEY_ = :defKey");    params.add(new Object[]{"defKey", q.caseDefKey()}); }
         if (q.businessKey() != null) { sql.append(" AND BUSINESS_KEY_ = :bk");        params.add(new Object[]{"bk", q.businessKey()}); }
-        if (q.text() != null) {
+        if (normalizedText != null) {
             sql.append("""
                      AND (
                         LOWER(ID_) = :searchExact
@@ -222,12 +223,11 @@ public class CaseRepository {
                         OR LOWER(BUSINESS_KEY_) LIKE :searchLike ESCAPE '~'
                         OR LOWER(TITLE_) LIKE :searchLike ESCAPE '~'
                     )""");
-            String exact = q.text().toLowerCase(Locale.ROOT);
-            params.add(new Object[]{"searchExact", exact});
-            params.add(new Object[]{"searchLike", containsLike(exact)});
+            params.add(new Object[]{"searchExact", normalizedText});
+            params.add(new Object[]{"searchLike", containsLike(normalizedText)});
         }
 
-        if (q.text() == null) {
+        if (normalizedText == null) {
             sql.append(" ORDER BY UPDATED_AT_ DESC, CREATED_AT_ DESC, ID_ ASC");
         } else {
             sql.append("""
@@ -244,10 +244,9 @@ public class CaseRepository {
         sql.append(" OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY");
 
         var spec = jdbc.sql(sql.toString());
-        if (q.text() != null) {
-            String exact = q.text().toLowerCase(Locale.ROOT);
-            spec = spec.param("rankingExact", exact)
-                       .param("rankingPrefix", startsWithLike(exact));
+        if (normalizedText != null) {
+            spec = spec.param("rankingExact", normalizedText)
+                       .param("rankingPrefix", startsWithLike(normalizedText));
         }
         for (Object[] p : params) {
             spec = spec.param((String) p[0], p[1]);

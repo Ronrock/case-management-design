@@ -136,6 +136,31 @@ class SearchApiHttpTest extends CaseApiHttpTestBase {
         assertThat(response.getBody()).containsEntry("code", "invalid-request");
     }
 
+    @Test
+    void facetWarningIsAppendedWithoutDiscardingProviderWarnings() {
+        ResponseEntity<Map> response = alice().get()
+                .uri("/search/facets?scope=tasks")
+                .retrieve().toEntity(Map.class);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat((List<Map<String, Object>>) response.getBody().get("warnings"))
+                .extracting(warning -> warning.get("code"))
+                .containsExactly("no-provider", "facet-unavailable");
+    }
+
+    @Test
+    void excessiveSearchPageIsAProblemJsonBadRequestInsteadOfOverflowing() {
+        ResponseEntity<Map> response = alice().get()
+                .uri("/search/cases?page=2147483647&pageSize=200")
+                .retrieve().toEntity(Map.class);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(response.getBody())
+                .containsEntry("code", "invalid-request")
+                .containsEntry("detail", "Search result window exceeds 10,000 items");
+    }
+
     private Map<String, Object> createCase(String businessKey, String title) {
         ResponseEntity<Map> created = alice().post().uri("/cases")
                 .header("Idempotency-Key", UUID.randomUUID().toString())

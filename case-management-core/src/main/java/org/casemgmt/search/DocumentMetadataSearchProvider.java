@@ -59,7 +59,7 @@ public class DocumentMetadataSearchProvider implements SearchProvider {
 
         DocumentSearchQuery documentQuery = new DocumentSearchQuery(query.tenantId(), query.q(),
                 stringFilter(query, "caseId"), stringFilter(query, "category"),
-                stringFilter(query, "mimeType"), query.page() * query.pageSize(),
+                stringFilter(query, "mimeType"), query.offset(),
                 query.pageSize());
         List<DocumentRepository.DocumentRow> candidates = documents.search(documentQuery);
         if (candidates.isEmpty()) {
@@ -97,7 +97,7 @@ public class DocumentMetadataSearchProvider implements SearchProvider {
                 fieldAllowed(decision, "name") ? row.name() : "Document " + row.id(),
                 summary(row, decision), PROVIDER_ID, score(row, q, matchedFields),
                 matchedFields.stream().filter(field -> fieldAllowed(decision, field)).toList(),
-                highlights(row, q, decision), resource(row, decision), "fresh");
+                highlights(row, q, decision), resource(row, decision), row.uploadedAt(), "fresh");
     }
 
     private static Map<String, Object> permissionContext(DocumentRepository.DocumentRow row) {

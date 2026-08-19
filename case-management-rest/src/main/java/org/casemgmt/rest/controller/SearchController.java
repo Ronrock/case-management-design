@@ -1,6 +1,5 @@
 package org.casemgmt.rest.controller;
 
-import org.casemgmt.domain.CaseState;
 import org.casemgmt.permissions.PermissionActions;
 import org.casemgmt.permissions.ResourceTypes;
 import org.casemgmt.permissions.WorkerPermissionEvaluator;
@@ -29,7 +28,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -61,9 +59,8 @@ public class SearchController {
         Actor actor = callers.actor(authentication);
         Map<String, Object> filters = filters(state, status, caseDefinitionKey, businessKey, assignee);
         assertSearchAllowed(actor, List.of(SearchScope.CASES), q);
-        SearchQuery query = new SearchQuery(callers.tenantId(actor), actor.userId(),
-                actor.groups(), q, List.of(SearchScope.CASES),
-                filters, List.of(), page, pageSize, true);
+        SearchQuery query = searchQuery(actor, q, List.of(SearchScope.CASES), filters,
+                List.of(), page, pageSize, true);
         return SearchResponse.of(search.search(query));
     }
 
@@ -77,12 +74,10 @@ public class SearchController {
         Map<String, Object> filters = effective.filters() == null
                 ? Map.of()
                 : new LinkedHashMap<>(effective.filters());
-        validateCaseStateFilter(filters);
         List<SearchScope> requestedScopes = scopes(effective.scopes());
         assertSearchAllowed(actor, requestedScopes, effective.q());
 
-        SearchQuery query = new SearchQuery(callers.tenantId(actor), actor.userId(),
-                actor.groups(), effective.q(), requestedScopes, filters,
+        SearchQuery query = searchQuery(actor, effective.q(), requestedScopes, filters,
                 effective.facets(), valueOr(effective.page(), 0),
                 valueOr(effective.pageSize(), CaseController.DEFAULT_PAGE_SIZE),
                 effective.includeProviderStatus() == null || effective.includeProviderStatus());
@@ -103,15 +98,14 @@ public class SearchController {
                                                  @RequestParam(defaultValue = "cases") String scope,
                                                  @RequestParam(defaultValue = "10") int limit,
                                                  Authentication authentication) {
-        if (q == null || q.trim().length() < 2) {
+        if (q.trim().length() < 2) {
             throw new InvalidRequestException("Search suggestions require q with at least 2 characters");
         }
         Actor actor = callers.actor(authentication);
         SearchScope searchScope = scope(scope);
         assertSearchAllowed(actor, List.of(searchScope), q);
-        SearchQuery query = new SearchQuery(callers.tenantId(actor), actor.userId(),
-                actor.groups(), q, List.of(searchScope),
-                Map.of(), List.of(), 0, Math.clamp(limit, 1, 25), false);
+        SearchQuery query = searchQuery(actor, q, List.of(searchScope), Map.of(), List.of(),
+                0, Math.clamp(limit, 1, 25), false);
         return new SearchSuggestionsResponse(search.search(query).items().stream()
                 .map(item -> new SearchSuggestionResponse(item.id(), item.title(),
                         item.resultType().wireName(), searchScope.wireName()))
@@ -130,15 +124,14 @@ public class SearchController {
         if (caseDefinitionKey != null && !caseDefinitionKey.isBlank()) {
             filters.put("caseDefinitionKey", caseDefinitionKey.trim());
         }
-        SearchQuery query = new SearchQuery(callers.tenantId(actor), actor.userId(),
-                actor.groups(), q, List.of(searchScope),
-                filters, List.of(), 0, CaseController.DEFAULT_PAGE_SIZE, true);
+        SearchQuery query = searchQuery(actor, q, List.of(searchScope), filters, List.of(),
+                0, CaseController.DEFAULT_PAGE_SIZE, true);
         org.casemgmt.search.SearchResponse response = search.search(query);
-        List<SearchWarningResponse> warnings = response.warnings().stream()
+        List<SearchWarningResponse> warnings = new java.util.ArrayList<>(response.warnings().stream()
                 .map(SearchWarningResponse::of)
-                .toList();
+                .toList());
         if (response.facets().isEmpty()) {
-            warnings = List.of(SearchWarningResponse.of(new SearchWarning("facet-unavailable",
+            warnings.add(SearchWarningResponse.of(new SearchWarning("facet-unavailable",
                     "No registered provider returned facets for this query", searchScope.wireName())));
         }
         return new SearchFacetsResponse(response.facets().stream()
@@ -151,7 +144,7 @@ public class SearchController {
         Map<String, Object> filters = new LinkedHashMap<>();
         String stateFilter = state == null ? status : state;
         if (stateFilter != null && !stateFilter.isBlank()) {
-            filters.put("state", caseState(stateFilter).name());
+            filters.put("state", stateFilter);
         }
         if (caseDefinitionKey != null && !caseDefinitionKey.isBlank()) {
             filters.put("caseDefinitionKey", caseDefinitionKey.trim());
@@ -180,33 +173,17 @@ public class SearchController {
         }
     }
 
-    private static void validateCaseStateFilter(Map<String, Object> filters) {
-        Object value = filters.containsKey("state") ? filters.get("state") : filters.get("status");
-        if (value == null) {
-            return;
-        }
-        if (value instanceof List<?> list) {
-            List<String> states = list.stream().map(Object::toString)
-                    .map(SearchController::caseStateName)
-                    .toList();
-            filters.put("state", states);
-            filters.remove("status");
-            return;
-        }
-        filters.put("state", caseStateName(value.toString()));
-        filters.remove("status");
-    }
-
-    private static String caseStateName(String raw) {
-        return caseState(raw).name();
-    }
-
-    private static CaseState caseState(String raw) {
+    private SearchQuery searchQuery(Actor actor, String q, List<SearchScope> scopes,
+                                    Map<String, Object> filters, List<String> facets,
+                                    int page, int pageSize, boolean includeProviderStatus) {
+        int effectivePage = Math.max(page, 0);
+        int effectivePageSize = Math.clamp(pageSize, 1, SearchQuery.MAX_PAGE_SIZE);
         try {
-            return CaseState.valueOf(raw.trim().toUpperCase(Locale.ROOT));
-        } catch (RuntimeException e) {
-            throw new InvalidRequestException("Invalid value '" + raw
-                    + "' for state; legal values are CREATED, ACTIVE, SUSPENDED, CLOSED, CANCELLED");
+            return new SearchQuery(callers.tenantId(actor), actor.userId(), actor.groups(), q,
+                    scopes, filters, facets, effectivePage, effectivePageSize,
+                    includeProviderStatus);
+        } catch (IllegalArgumentException e) {
+            throw new InvalidRequestException(e.getMessage());
         }
     }
 

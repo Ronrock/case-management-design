@@ -34,5 +34,11 @@ public record CaseQuery(String tenantId, List<CaseState> states, String assignee
                 null, null, null, null, List.of(), offset, limit);
     }
 
+    public CaseQuery withWindow(int newOffset, int newLimit) {
+        return new CaseQuery(tenantId, states, assignee, caseDefKey, businessKey,
+                participantUser, queueId, slaStatus, priority, freeText, createdAfter,
+                createdBefore, sort, newOffset, newLimit);
+    }
+
     public record SortTerm(String field, boolean descending) {}
 }

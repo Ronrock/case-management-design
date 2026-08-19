@@ -15,9 +15,10 @@ public class SearchOrchestrator {
     }
 
     public SearchResponse search(SearchQuery query) {
-        List<SearchProvider> selected = providers.stream()
+        List<SelectedProvider> selected = providers.stream()
                 .filter(provider -> provider.supportsAny(query.scopes()))
-                .sorted(Comparator.comparingInt(provider -> provider.estimateCost(query)))
+                .map(provider -> new SelectedProvider(provider, provider.estimateCost(query)))
+                .sorted(Comparator.comparingInt(SelectedProvider::cost))
                 .toList();
 
         List<SearchWarning> warnings = new ArrayList<>();
@@ -32,9 +33,9 @@ public class SearchOrchestrator {
                     List.of(), warnings, List.of());
         }
 
-        int requested = Math.max((query.page() + 1) * query.pageSize(), query.pageSize());
-        SearchQuery providerQuery = query.withPage(0, requested);
-        for (SearchProvider provider : selected) {
+        SearchQuery providerQuery = query.forProviderWindow(query.resultWindowEnd());
+        for (SelectedProvider selectedProvider : selected) {
+            SearchProvider provider = selectedProvider.provider();
             SearchProviderStatus status = provider.status();
             statuses.add(status);
             if ("disabled".equals(status.status()) || "unavailable".equals(status.status())) {
@@ -58,11 +59,9 @@ public class SearchOrchestrator {
             }
         }
 
-        int offset = query.page() * query.pageSize();
+        int offset = query.offset();
         List<SearchResultItem> pageItems = deduplicated.values().stream()
-                .sorted(Comparator.comparingDouble(SearchResultItem::score).reversed()
-                        .thenComparing(SearchResultItem::title, Comparator.nullsLast(String::compareToIgnoreCase))
-                        .thenComparing(SearchResultItem::id))
+                .sorted(resultOrder())
                 .skip(offset)
                 .limit(query.pageSize())
                 .toList();
@@ -80,6 +79,17 @@ public class SearchOrchestrator {
     }
 
     private static SearchResultItem higherScored(SearchResultItem left, SearchResultItem right) {
-        return left.score() >= right.score() ? left : right;
+        return resultOrder().compare(left, right) <= 0 ? left : right;
     }
+
+    private static Comparator<SearchResultItem> resultOrder() {
+        return Comparator.comparingDouble(SearchResultItem::score).reversed()
+                .thenComparing(SearchResultItem::updatedAt,
+                        Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(SearchResultItem::title,
+                        Comparator.nullsLast(String::compareToIgnoreCase))
+                .thenComparing(SearchResultItem::id);
+    }
+
+    private record SelectedProvider(SearchProvider provider, int cost) {}
 }

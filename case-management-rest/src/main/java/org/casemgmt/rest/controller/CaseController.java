@@ -197,15 +197,15 @@ public class CaseController {
                 blankToNull(caseDefinitionKey), blankToNull(businessKey), blankToNull(participantUser),
                 blankToNull(queueId), parseSlaStatus(slaStatus), parsedPriority, blankToNull(freeText),
                 parseDateTime("createdAfter", createdAfter), parseDateTime("createdBefore", createdBefore),
-                parseSort(sort), effectivePage * effectiveSize, effectiveSize);
+                parseSort(sort), 0, effectiveSize);
 
-        List<CaseInstance> rows = caseRepo.query(query);
-        List<CaseInstance> readable = readableCases(rows, actor, tenant);
-        // Never expose the count of rows that Worker Permissions has hidden.
-        long totalItems = readable.size();
-        int totalPages = totalItems == 0 ? 0 : (int) Math.ceil((double) totalItems / effectiveSize);
+        AuthorizedPage authorized = authorizedPage(query, actor, tenant, effectivePage, effectiveSize);
+        long totalItems = authorized.totalItems();
+        int totalPages = totalItems == 0 ? 0
+                : (int) Math.min(Integer.MAX_VALUE,
+                        (totalItems + effectiveSize - 1L) / effectiveSize);
 
-        return new Page<>(withActions(readable, actor), effectivePage, effectiveSize,
+        return new Page<>(withActions(authorized.items(), actor), effectivePage, effectiveSize,
                 totalItems, totalPages);
     }
 
@@ -228,9 +228,9 @@ public class CaseController {
                                               @RequestBody(required = false) Map<String, Object> request,
                                               Authentication authentication) {
         Actor actor = callers.actor(authentication);
+        long version = expectedVersion(ifMatch, caseId, actor);
         CaseInstance c = visibleCase(caseId, actor);
         assertCasePermission(actor, c, PermissionActions.CASE_UPDATE);
-        long version = expectedVersion(ifMatch, caseId, actor);
         policy.assertAllowed(cases.snapshot(c), callers.roles(caseId, actor), "update");
 
         Map<String, Object> patch = validatePatch(request == null ? Map.of() : request);
@@ -246,9 +246,9 @@ public class CaseController {
                                               @RequestBody(required = false) CloseRequest request,
                                               Authentication authentication) {
         Actor actor = callers.actor(authentication);
+        long version = expectedVersion(ifMatch, caseId, actor);
         CaseInstance c = visibleCase(caseId, actor);
         assertCasePermission(actor, c, PermissionActions.CASE_CLOSE);
-        long version = expectedVersion(ifMatch, caseId, actor);
         policy.assertAllowed(cases.snapshot(c), callers.roles(caseId, actor), "close");
 
         CaseInstance closed = cases.close(caseId, version,
@@ -263,9 +263,9 @@ public class CaseController {
                                                @RequestBody(required = false) CancelRequest request,
                                                Authentication authentication) {
         Actor actor = callers.actor(authentication);
+        long version = expectedVersion(ifMatch, caseId, actor);
         CaseInstance c = visibleCase(caseId, actor);
         assertCasePermission(actor, c, PermissionActions.CASE_CANCEL);
-        long version = expectedVersion(ifMatch, caseId, actor);
         policy.assertAllowed(cases.snapshot(c), callers.roles(caseId, actor), "cancel");
 
         CaseInstance cancelled = cases.cancel(caseId, version,
@@ -447,6 +447,39 @@ public class CaseController {
                         PermissionDecision.deny(c.id())).allowed())
                 .toList();
     }
+
+    /**
+     * Worker Permissions is resource based, so authorization must happen before pagination and
+     * totals are exposed. Scan deterministic repository windows, evaluate each window in one
+     * permission request, and only then select the requested authorized page.
+     */
+    private AuthorizedPage authorizedPage(CaseQuery query, Actor actor, String tenant,
+                                          int page, int pageSize) {
+        final int scanSize = MAX_PAGE_SIZE;
+        long rawTotal = caseRepo.count(query);
+        long requestedStart = (long) page * pageSize;
+        long requestedEnd = requestedStart + pageSize;
+        long authorizedCount = 0;
+        int rawOffset = 0;
+        List<CaseInstance> pageItems = new ArrayList<>(pageSize);
+
+        while (rawOffset < rawTotal) {
+            List<CaseInstance> batch = caseRepo.query(query.withWindow(rawOffset, scanSize));
+            if (batch.isEmpty()) {
+                break;
+            }
+            for (CaseInstance readable : readableCases(batch, actor, tenant)) {
+                if (authorizedCount >= requestedStart && authorizedCount < requestedEnd) {
+                    pageItems.add(readable);
+                }
+                authorizedCount++;
+            }
+            rawOffset = Math.addExact(rawOffset, batch.size());
+        }
+        return new AuthorizedPage(List.copyOf(pageItems), authorizedCount);
+    }
+
+    private record AuthorizedPage(List<CaseInstance> items, long totalItems) {}
 
     private void assertCasePermission(Actor actor, CaseInstance c, String action) {
         permissions.assertAllowed(actor, c.tenantId(), action, ResourceTypes.CASE, c.id(),

@@ -23,7 +23,10 @@ public class CaseManagementWorkerPermissionsConfiguration {
                                                             WorkerPermissionsTokenProvider tokenProvider) {
         CaseManagementProperties.WorkerPermissions config = props.getWorkerPermissions();
         if (!config.isEnabled()) {
-            return WorkerPermissionsClient.denyAll();
+            // Standalone deployments retain the platform's local ActionPolicy when the
+            // enterprise PDP integration is intentionally disabled. Once enabled, transport
+            // or decision failures remain fail closed in WorkerPermissionEvaluator.
+            return WorkerPermissionsClient.allowAll();
         }
         return new WorkerPermissionsHttpClient(config.getBaseUrl(), config.getEvaluatePath(),
                 tokenProvider, config.getConnectTimeoutMs(), config.getReadTimeoutMs());

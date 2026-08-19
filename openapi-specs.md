@@ -1715,6 +1715,7 @@ components:
         resource:
           type: object
           additionalProperties: true
+        updatedAt: {type: string, format: date-time}
         freshness:
           type: string
           enum: [fresh, stale, unknown]
@@ -2105,6 +2106,7 @@ components:
       required: [text]
       properties:
         id: {type: string, readOnly: true}
+        caseId: {type: string, readOnly: true}
         author: {type: string, readOnly: true}
         text: {type: string}
         visibility:

@@ -36,6 +36,20 @@ class WorkerPermissionsAuthorizationHttpTest extends CaseApiHttpTestBase {
     }
 
     @Test
+    void caseListingDoesNotExposeDeniedItemsOrTotals() {
+        deployAndCreateCase();
+
+        ResponseEntity<Map> response = client("erin").get().uri("/cases")
+                .retrieve().toEntity(Map.class);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat((List<Map<String, Object>>) response.getBody().get("items")).isEmpty();
+        assertThat(response.getBody())
+                .containsEntry("totalItems", 0)
+                .containsEntry("totalPages", 0);
+    }
+
+    @Test
     void workerPermissionsDenialBlocksDocumentLinking() {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");

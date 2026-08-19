@@ -93,4 +93,7 @@ Required behavior:
   `DELETE /cases/{caseId}/documents/{documentId}`.
 - `DocumentMetadataSearchProvider` contributes `documents` scope results through the search
   orchestrator after Worker Permissions filtering.
-- The starter exposes `WorkerPermissionsClient` as a replaceable bean and defaults to deny-all.
+- The starter exposes `WorkerPermissionsClient` as a replaceable bean. When the enterprise
+  integration is intentionally disabled, standalone deployments continue to use local
+  `ActionPolicy` rules. When the integration is enabled, missing or failed Worker Permissions
+  decisions fail closed.

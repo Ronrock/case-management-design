@@ -270,6 +270,13 @@ This repository currently implements the first slice:
 - Search REST endpoints for cases, orchestrated queries, provider status, suggestions and facets.
 - Tenant scope derived from the principal.
 
+### Result ordering and paging
+
+Search results are ranked globally by provider score, then by `updatedAt` descending, and finally
+by stable title and identifier tie-breakers. Public requests are limited to 200 items per page and
+a 10,000-item result window; requests beyond that window receive `400 invalid-request`. Providers
+may receive a larger internal fetch window so orchestration can merge and paginate correctly.
+
 Still to implement:
 
 - Task/worklist provider.

@@ -1,7 +1,6 @@
 package org.casemgmt.search;
 
 import org.casemgmt.domain.CaseInstance;
-import org.casemgmt.domain.CaseState;
 import org.casemgmt.permissions.PermissionActions;
 import org.casemgmt.permissions.PermissionDecision;
 import org.casemgmt.permissions.ResourceTypes;
@@ -61,8 +60,9 @@ public class CaseProjectionSearchProvider implements SearchProvider {
                     degradedStatus(warning));
         }
         CaseSearchQuery caseQuery = new CaseSearchQuery(query.tenantId(), query.q(),
-                states(query), stringFilter(query, "assignee"), stringFilter(query, "caseDefinitionKey"),
-                stringFilter(query, "businessKey"), query.page() * query.pageSize(), query.pageSize());
+                CaseStateSearchFilter.states(query.filters()), stringFilter(query, "assignee"),
+                stringFilter(query, "caseDefinitionKey"), stringFilter(query, "businessKey"),
+                query.offset(), query.pageSize());
         List<CaseInstance> candidates = cases.search(caseQuery);
         if (candidates.isEmpty()) {
             return new SearchProviderResult(List.of(), List.of(), List.of(), status());
@@ -91,23 +91,6 @@ public class CaseProjectionSearchProvider implements SearchProvider {
         return new SearchProviderResult(items, List.of(), List.of(), status());
     }
 
-    private static List<CaseState> states(SearchQuery query) {
-        Object raw = query.filters().containsKey("state")
-                ? query.filters().get("state")
-                : query.filters().get("status");
-        if (raw == null) {
-            return List.of();
-        }
-        if (raw instanceof List<?> list) {
-            return list.stream().map(Object::toString).map(CaseProjectionSearchProvider::state).toList();
-        }
-        return List.of(state(raw.toString()));
-    }
-
-    private static CaseState state(String value) {
-        return CaseState.valueOf(value.trim().toUpperCase(Locale.ROOT));
-    }
-
     private static String stringFilter(SearchQuery query, String name) {
         Object value = query.filters().get(name);
         return value == null || value.toString().isBlank() ? null : value.toString().trim();
@@ -119,7 +102,7 @@ public class CaseProjectionSearchProvider implements SearchProvider {
                 fieldAllowed(decision, "title") ? c.title() : "Case " + c.id(),
                 summary(c, decision), PROVIDER_ID, score(c, q, matched),
                 matched.stream().filter(field -> fieldAllowed(decision, field)).toList(),
-                highlights(c, q, decision), resource(c, decision),
+                highlights(c, q, decision), resource(c, decision), c.updatedAt(),
                 "fresh");
     }
 

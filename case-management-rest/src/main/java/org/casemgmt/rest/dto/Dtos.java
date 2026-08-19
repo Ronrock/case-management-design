@@ -90,13 +90,13 @@ public final class Dtos {
                                            String title, String summary, String sourceProvider,
                                            double score, List<String> matchedFields,
                                            List<String> highlights, Map<String, Object> resource,
-                                           String freshness) {
+                                           OffsetDateTime updatedAt, String freshness) {
 
         public static SearchResultItemResponse of(SearchResultItem item) {
             return new SearchResultItemResponse(item.id(), item.resultType().wireName(),
                     item.caseId(), item.title(), item.summary(), item.sourceProvider(),
                     item.score(), item.matchedFields(), item.highlights(),
-                    item.resource(), item.freshness());
+                    item.resource(), item.updatedAt(), item.freshness());
         }
     }
 
