@@ -1,10 +1,14 @@
 package org.casemgmt.poc;
 
 import org.operaton.bpm.engine.IdentityService;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.authorization.AuthorizationDecision;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -15,14 +19,17 @@ import org.springframework.security.web.SecurityFilterChain;
 import java.util.List;
 
 /**
- * Identity comes from Operaton's own user/group tables over HTTP basic auth (spec §7),
- * so participant roles and candidate groups behave exactly as the engine sees them.
- * Swapping in OAuth2 replaces this class and nothing else.
+ * Local mode can still read identity from Operaton's own user/group tables over HTTP Basic.
+ * OIDC mode validates bearer JWTs and maps tenant, group and Worker Permissions claims onto
+ * the authorities the reusable case API already consumes.
  */
 @Configuration
+@EnableConfigurationProperties(PocSecurityProperties.class)
 public class PocSecurityConfig {
 
     @Bean
+    @ConditionalOnProperty(prefix = "casemgmt.security", name = "mode",
+            havingValue = "basic", matchIfMissing = true)
     public AuthenticationProvider operatonAuthenticationProvider(IdentityService identityService) {
         return new AuthenticationProvider() {
             @Override
@@ -56,17 +63,42 @@ public class PocSecurityConfig {
      * gateway's basic-auth credentials ({@code casemgmt.engine.remote.username/password}, sent by
      * {@code RemoteEngineAutoConfiguration.engineRestClient}) were never actually checked by
      * anything. Both {@code /case-api/v2/**} and {@code /engine-rest/**} now require
-     * authentication; {@code RemoteModeComplaintIT} was extended (see its own Javadoc) to prove
-     * the remote gateway's credentials are what let it through, not merely that the port answers.
+     * authentication; writes to {@code /engine-rest/**} are additionally reserved for the
+     * configured basic-mode integration identity or {@code engine:api}, which is mapped only from
+     * the dedicated OIDC {@code engine_permissions} claim. User names and ordinary group claims
+     * cannot grant this access.
      */
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-        return http
-                .csrf(csrf -> csrf.disable())          // no browser sessions: this is an API
+    public SecurityFilterChain securityFilterChain(HttpSecurity http,
+                                                   PocSecurityProperties properties) throws Exception {
+        http.csrf(csrf -> csrf.disable())          // no browser sessions: this is an API
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/case-api/v2/**", "/engine-rest/**").authenticated()
-                        .anyRequest().permitAll())
-                .httpBasic(basic -> { })
-                .build();
+                    .requestMatchers(HttpMethod.GET, "/engine-rest/**").authenticated()
+                    .requestMatchers("/engine-rest/**").access((authentication, context) -> {
+                        Authentication current = authentication.get();
+                        return new AuthorizationDecision(canWriteEngine(current, properties));
+                    })
+                    .requestMatchers("/case-api/v2/**").authenticated()
+                    .anyRequest().permitAll());
+
+        if (properties.getMode() == PocSecurityProperties.Mode.oidc) {
+            http.oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> jwt
+                    .jwtAuthenticationConverter(
+                            new PocJwtAuthenticationConverter(properties.getOidc()))));
+        } else {
+            http.httpBasic(basic -> { });
+        }
+        return http.build();
+    }
+
+    static boolean canWriteEngine(Authentication current, PocSecurityProperties properties) {
+        if (current == null || !current.isAuthenticated()) {
+            return false;
+        }
+        boolean localIntegration = properties.getMode() == PocSecurityProperties.Mode.basic
+                && properties.getEngineIntegrationPrincipal().equals(current.getName());
+        boolean claimedIntegration = current.getAuthorities().stream()
+                .anyMatch(a -> "engine:api".equals(a.getAuthority()));
+        return localIntegration || claimedIntegration;
     }
 }

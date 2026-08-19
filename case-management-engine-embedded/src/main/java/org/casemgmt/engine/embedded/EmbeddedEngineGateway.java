@@ -98,7 +98,7 @@ public class EmbeddedEngineGateway implements EngineGateway {
         try {
             var instance = runtimeService.startProcessInstanceByKey(
                     request.processDefinitionKey(), request.caseId(), variables);
-            return new EngineProcessRef(instance.getId(), request.processDefinitionKey());
+            return new EngineProcessRef(instance.getId(), request.processDefinitionKey(), request.caseId());
         } catch (ProcessEngineException e) {
             throw new EngineException(
                     "Could not start process " + request.processDefinitionKey(), e);

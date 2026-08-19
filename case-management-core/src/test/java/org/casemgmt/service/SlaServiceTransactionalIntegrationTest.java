@@ -18,6 +18,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -141,7 +142,8 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
     void sweepRollsBackTheRecordWriteWhenPublishingFails() {
         sla.startClocks(caseId, "pol-1", alice);
         SlaRecord record = slaRepo.findByCase(caseId).get(0);
-        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE WHERE ID_ = :id")
+        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = :due WHERE ID_ = :id")
+                .param("due", OffsetDateTime.now().minusMinutes(1))
                 .param("id", record.id()).update();
         int eventCountBefore = countAll("CM_EVENT");
 
@@ -159,38 +161,13 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
     }
 
     /**
-     * I2 proof: a genuine two-thread race (same technique as {@code
-     * CollaborationServicesTransactionalIntegrationTest.concurrentDoubleAchieveProducesExactlyOneEvent})
-     * where two REAL, separately-transactional {@code sweep()} calls contend for the SAME due
-     * records. Neither call may throw to its caller — a per-record version conflict must be
-     * absorbed internally, not abort that sweeper's whole batch — and every due record must end
-     * up processed exactly once (BREACHED, with exactly one breach event), never twice and never
-     * left behind.
-     *
-     * <p><b>Overlap is encouraged structurally, not fully guaranteed (fix round 2, honest
-     * limitation).</b> {@code sweep()} is one {@code @Transactional} method: nothing it writes is
-     * visible to the other thread until it COMMITS (returns). The isolation path is only actually
-     * exercised if thread B's {@code dueRecords()} SELECT runs — and sees the records as still
-     * due — before thread A's whole batch commits. Six due records (not one) widen that window:
-     * thread A's transaction now costs six UPDATE round trips instead of one before it can
-     * commit, giving thread B's SELECT — issued right after the same {@link CountDownLatch}
-     * releases both threads onto a warm connection pool — much more time to land inside that
-     * window. This is not a mathematical guarantee (a fully deterministic version would need
-     * either a raw pre-acquired row lock held across both threads' start, or a test-only
-     * synchronization hook inside {@code SlaSweeper} itself — both rejected as disproportionate
-     * for what the reviewer flagged as a cheap item, and the second would put test-only code in
-     * production). Empirically it has fired in 100% of runs performed during this fix round,
-     * including every run in fix round 1's own development — see the {@code WARN
-     * ... lost a concurrent version race} log line this test reliably produces.
-     *
-     * <p><b>Mutation-tested manually</b>: replacing the per-record {@code try/catch
-     * (OptimisticLockException)} in {@code SlaSweeper.processOne} with an unguarded call
-     * reproducibly makes one of the two {@code sweep()} futures fail with {@code
-     * OptimisticLockException} instead of returning normally — confirmed during development,
-     * restored afterward (see the task report for the exact failure).
+     * Two REAL, separately-transactional {@code sweep()} calls racing the same due records must
+     * still process every record exactly once. The claim-by-UPDATE protocol means the second
+     * sweeper either claims a disjoint subset or nothing at all; the status/event assertions prove
+     * no record was duplicated or left behind.
      */
     @Test
-    void concurrentSweepersIsolatePerRecordConflictsWithinABatch() throws Exception {
+    void concurrentSweepersProcessEachClaimedRecordOnce() throws Exception {
         List<String> caseIds = new ArrayList<>();
         caseIds.add(caseId);
         for (int i = 1; i < 6; i++) {
@@ -200,7 +177,8 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
         for (String id : caseIds) {
             sla.startClocks(id, "pol-1", alice);
         }
-        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE").update();
+        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = :due")
+                .param("due", OffsetDateTime.now().minusMinutes(1)).update();
 
         ExecutorService pool = Executors.newFixedThreadPool(2);
         CountDownLatch start = new CountDownLatch(1);
@@ -294,12 +272,12 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
         void failNextPublish() { failPublish = true; }
 
         @Override
-        public long publish(CaseEvent event) {
+        public void publish(CaseEvent event) {
             if (failPublish) {
                 failPublish = false;
                 throw new IllegalStateException("simulated publish failure for '" + event.type() + "'");
             }
-            return super.publish(event);
+            super.publish(event);
         }
 
         @Override

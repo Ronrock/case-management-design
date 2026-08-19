@@ -13,6 +13,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.web.client.RestClient;
 
+import java.util.Optional;
+
 @AutoConfiguration(before = CaseManagementAutoConfiguration.class)
 // Fix round 1, Important 1: the master switch guard. Without it, casemgmt.enabled=false with
 // casemgmt.engine.mode=remote still set (a plausible leftover config, not just a hypothetical)
@@ -25,8 +27,10 @@ import org.springframework.web.client.RestClient;
 public class RemoteEngineAutoConfiguration {
 
     @Bean
-    public RestClient engineRestClient(CaseManagementProperties props) {
-        String baseUrl = props.getEngine().getRemote().getBaseUrl();
+    public RestClient engineRestClient(CaseManagementProperties props,
+                                       Optional<RemoteEngineBearerTokenProvider> bearerTokenProvider) {
+        CaseManagementProperties.Engine.Remote remote = props.getEngine().getRemote();
+        String baseUrl = remote.getBaseUrl();
         if (baseUrl == null || baseUrl.isBlank()) {
             throw new IllegalStateException(
                     "casemgmt.engine.mode=remote requires casemgmt.engine.remote.base-url");
@@ -39,18 +43,83 @@ public class RemoteEngineAutoConfiguration {
         // read-timeout-ms) rather than hardcoded, defaulting to the same 5s/10s precedent
         // WebhookDispatcher already established in this codebase for exactly this failure mode.
         var requestFactory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout((int) props.getEngine().getRemote().getConnectTimeoutMs());
-        requestFactory.setReadTimeout((int) props.getEngine().getRemote().getReadTimeoutMs());
+        requestFactory.setConnectTimeout(timeoutMillis("connect-timeout-ms",
+                remote.getConnectTimeoutMs()));
+        requestFactory.setReadTimeout(timeoutMillis("read-timeout-ms", remote.getReadTimeoutMs()));
 
         RestClient.Builder builder = RestClient.builder()
                 .baseUrl(baseUrl)
                 .requestFactory(requestFactory);
-        if (props.getEngine().getRemote().getUsername() != null) {
-            builder = builder.defaultHeaders(h -> h.setBasicAuth(
-                    props.getEngine().getRemote().getUsername(),
-                    props.getEngine().getRemote().getPassword()));
-        }
+
+        builder = applyAuthentication(builder, remote, bearerTokenProvider);
         return builder.build();
+    }
+
+    private static RestClient.Builder applyAuthentication(
+            RestClient.Builder builder,
+            CaseManagementProperties.Engine.Remote remote,
+            Optional<RemoteEngineBearerTokenProvider> bearerTokenProvider) {
+
+        return switch (effectiveAuthMode(remote)) {
+            case none -> builder;
+            case auto -> throw new IllegalStateException("auth-mode auto should have been resolved");
+            case basic -> {
+                if (!hasText(remote.getUsername()) || remote.getPassword() == null) {
+                    throw new IllegalStateException("casemgmt.engine.remote.username/password "
+                            + "must be set when casemgmt.engine.remote.auth-mode=basic");
+                }
+                yield builder.defaultHeaders(h -> h.setBasicAuth(remote.getUsername(),
+                        remote.getPassword()));
+            }
+            case bearer -> {
+                RemoteEngineBearerTokenProvider provider = bearerTokenProvider.orElseGet(() -> {
+                    String configuredToken = remote.getBearerToken();
+                    if (!hasText(configuredToken)) {
+                        throw new IllegalStateException("casemgmt.engine.remote.auth-mode=bearer "
+                                + "requires a RemoteEngineBearerTokenProvider bean or "
+                                + "casemgmt.engine.remote.bearer-token");
+                    }
+                    return () -> configuredToken;
+                });
+                yield builder.requestInterceptor((request, body, execution) -> {
+                    String token = provider.bearerToken();
+                    if (!hasText(token)) {
+                        throw new IllegalStateException("RemoteEngineBearerTokenProvider returned "
+                                + "an empty bearer token");
+                    }
+                    request.getHeaders().setBearerAuth(token);
+                    return execution.execute(request, body);
+                });
+            }
+        };
+    }
+
+    private static CaseManagementProperties.Engine.Remote.AuthMode effectiveAuthMode(
+            CaseManagementProperties.Engine.Remote remote) {
+        CaseManagementProperties.Engine.Remote.AuthMode mode = remote.getAuthMode();
+        if (mode != CaseManagementProperties.Engine.Remote.AuthMode.auto) {
+            return mode;
+        }
+        return hasText(remote.getUsername())
+                ? CaseManagementProperties.Engine.Remote.AuthMode.basic
+                : CaseManagementProperties.Engine.Remote.AuthMode.none;
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private static int timeoutMillis(String property, long value) {
+        if (value < 0) {
+            throw new IllegalStateException("casemgmt.engine.remote." + property
+                    + " must be zero or greater; got " + value);
+        }
+        try {
+            return Math.toIntExact(value);
+        } catch (ArithmeticException e) {
+            throw new IllegalStateException("casemgmt.engine.remote." + property
+                    + " must fit in a 32-bit millisecond timeout; got " + value, e);
+        }
     }
 
     /** The real gateway, used only by the dispatcher — never by a request thread. */

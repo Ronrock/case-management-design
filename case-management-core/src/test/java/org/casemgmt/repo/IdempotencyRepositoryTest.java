@@ -20,25 +20,28 @@ class IdempotencyRepositoryTest extends OracleTestBase {
 
     @Test
     void firstCallProceeds() {
-        assertThat(repo.begin("k1", "POST /cases", "hash-a")).isEmpty();
+        IdempotencyRepository.BeginResult begin = repo.begin("k1", "POST /cases", "hash-a");
+
+        assertThat(begin.replay()).isEmpty();
+        assertThat(begin.claim().token()).isNotBlank();
     }
 
     @Test
     void replayWithTheSameHashReturnsTheStoredResponse() {
-        repo.begin("k1", "POST /cases", "hash-a");
-        repo.complete("k1", "POST /cases", 201, "{\"id\":\"eng-a:1\"}");
+        String token = repo.begin("k1", "POST /cases", "hash-a").claim().token();
+        repo.complete("k1", "POST /cases", token, 201, "{\"id\":\"eng-a:1\"}");
 
         var replay = repo.begin("k1", "POST /cases", "hash-a");
 
-        assertThat(replay).isPresent();
-        assertThat(replay.get().status()).isEqualTo(201);
-        assertThat(replay.get().body()).contains("eng-a:1");
+        assertThat(replay.replay()).isPresent();
+        assertThat(replay.replay().orElseThrow().status()).isEqualTo(201);
+        assertThat(replay.replay().orElseThrow().body()).contains("eng-a:1");
     }
 
     @Test
     void sameKeyWithADifferentPayloadConflicts() {
-        repo.begin("k1", "POST /cases", "hash-a");
-        repo.complete("k1", "POST /cases", 201, "{}");
+        String token = repo.begin("k1", "POST /cases", "hash-a").claim().token();
+        repo.complete("k1", "POST /cases", token, 201, "{}");
 
         assertThatThrownBy(() -> repo.begin("k1", "POST /cases", "hash-b"))
                 .isInstanceOf(IdempotencyConflictException.class);
@@ -56,23 +59,22 @@ class IdempotencyRepositoryTest extends OracleTestBase {
     @Test
     void keysAreScopedPerOperation() {
         repo.begin("k1", "POST /cases", "hash-a");
-        assertThat(repo.begin("k1", "POST /cases/bulk", "hash-a")).isEmpty();
+        IdempotencyRepository.BeginResult begin = repo.begin("k1", "POST /cases/bulk", "hash-a");
+        assertThat(begin.replay()).isEmpty();
+        assertThat(begin.claim().token()).isNotBlank();
     }
 
-    // Review fix (Important, I5): a caller that begin()s and then crashes or throws before
-    // calling complete() must not wedge every retry of that key for the full 48h purge
-    // window. Simulates an abandoned claim by backdating CREATED_AT_ past the reclaim
-    // lease directly (the public API has no way to create an old row instantly), then
-    // proves a same-key retry reclaims it rather than conflicting.
     @Test
-    void anAbandonedInProgressRowIsReclaimedAfterTheLeaseExpires() {
+    void anOldInProgressRowIsNotAutomaticallyReclaimedByADuplicateRequest() {
         repo.begin("k1", "POST /cases", "hash-a");   // never completed
         jdbc().sql("""
                 UPDATE CM_IDEMPOTENCY_KEY SET CREATED_AT_ = SYSTIMESTAMP - NUMTODSINTERVAL(10, 'MINUTE')
                 WHERE KEY_ = :key AND SCOPE_ = :scope""")
             .param("key", "k1").param("scope", "POST /cases").update();
 
-        assertThat(repo.begin("k1", "POST /cases", "hash-a")).isEmpty();
+        assertThatThrownBy(() -> repo.begin("k1", "POST /cases", "hash-a"))
+                .isInstanceOf(IdempotencyConflictException.class)
+                .hasMessageContaining("in progress");
     }
 
     /**
@@ -85,11 +87,11 @@ class IdempotencyRepositoryTest extends OracleTestBase {
      */
     @Test
     void aReleasedClaimLetsTheSameKeyBeRetriedWithACorrectedPayload() {
-        repo.begin("k1", "POST /cases", "hash-a");
+        String token = repo.begin("k1", "POST /cases", "hash-a").claim().token();
 
-        assertThat(repo.release("k1", "POST /cases")).isTrue();
+        assertThat(repo.release("k1", "POST /cases", token)).isTrue();
 
-        assertThat(repo.begin("k1", "POST /cases", "hash-b")).isEmpty();
+        assertThat(repo.begin("k1", "POST /cases", "hash-b").replay()).isEmpty();
     }
 
     /**
@@ -99,14 +101,14 @@ class IdempotencyRepositoryTest extends OracleTestBase {
      */
     @Test
     void releaseCannotDeleteAClaimThatAlreadyCarriesAStoredResponse() {
-        repo.begin("k1", "POST /cases", "hash-a");
-        repo.complete("k1", "POST /cases", 201, "{\"id\":\"eng-a:1\"}");
+        String token = repo.begin("k1", "POST /cases", "hash-a").claim().token();
+        repo.complete("k1", "POST /cases", token, 201, "{\"id\":\"eng-a:1\"}");
 
-        assertThat(repo.release("k1", "POST /cases")).isFalse();
+        assertThat(repo.release("k1", "POST /cases", token)).isFalse();
 
         var replay = repo.begin("k1", "POST /cases", "hash-a");
-        assertThat(replay).isPresent();
-        assertThat(replay.get().body()).contains("eng-a:1");
+        assertThat(replay.replay()).isPresent();
+        assertThat(replay.replay().orElseThrow().body()).contains("eng-a:1");
     }
 
     /**
@@ -121,14 +123,27 @@ class IdempotencyRepositoryTest extends OracleTestBase {
      */
     @Test
     void aLateCompleteCannotOverwriteAResponseSomeoneElseAlreadyStored() {
-        repo.begin("k1", "POST /cases", "hash-a");
-        assertThat(repo.complete("k1", "POST /cases", 201, "{\"id\":\"winner\"}")).isTrue();
+        String token = repo.begin("k1", "POST /cases", "hash-a").claim().token();
+        assertThat(repo.complete("k1", "POST /cases", token, 201, "{\"id\":\"winner\"}")).isTrue();
 
-        assertThat(repo.complete("k1", "POST /cases", 500, "{\"id\":\"latecomer\"}")).isFalse();
+        assertThat(repo.complete("k1", "POST /cases", token, 500, "{\"id\":\"latecomer\"}")).isFalse();
 
         var replay = repo.begin("k1", "POST /cases", "hash-a");
-        assertThat(replay).isPresent();
-        assertThat(replay.get().status()).isEqualTo(201);
-        assertThat(replay.get().body()).contains("winner").doesNotContain("latecomer");
+        assertThat(replay.replay()).isPresent();
+        assertThat(replay.replay().orElseThrow().status()).isEqualTo(201);
+        assertThat(replay.replay().orElseThrow().body()).contains("winner").doesNotContain("latecomer");
+    }
+
+    @Test
+    void staleClaimTokensCannotCompleteOrReleaseCurrentWork() {
+        String token = repo.begin("k1", "POST /cases", "hash-a").claim().token();
+        String stale = token + "-stale";
+
+        assertThat(repo.complete("k1", "POST /cases", stale, 201, "{\"id\":\"late\"}")).isFalse();
+        assertThat(repo.release("k1", "POST /cases", stale)).isFalse();
+
+        assertThat(repo.complete("k1", "POST /cases", token, 201, "{\"id\":\"winner\"}")).isTrue();
+        assertThat(repo.begin("k1", "POST /cases", "hash-a").replay().orElseThrow().body())
+                .contains("winner");
     }
 }

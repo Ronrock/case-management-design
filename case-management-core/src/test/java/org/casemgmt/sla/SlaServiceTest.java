@@ -215,7 +215,23 @@ class SlaServiceTest extends OracleTestBase {
         SlaRecord paused = sla.pause(caseId, record.id(), record.version(), "WAITING_ON_CUSTOMER", alice);
 
         assertThatThrownBy(() -> sla.pause(caseId, paused.id(), paused.version(), "WAITING_ON_CUSTOMER", alice))
-                .isInstanceOf(CaseConflictException.class);
+                .isInstanceOf(CaseConflictException.class)
+                .extracting(e -> ((CaseConflictException) e).code())
+                .isEqualTo("sla-not-running");
+    }
+
+    @Test
+    void resumingARunningClockConflictsWithPauseAsTheAvailableAction() {
+        sla.startClocks(caseId, "pol-1", alice);
+        SlaRecord record = slaRepo.findByCase(caseId).get(0);
+
+        assertThatThrownBy(() -> sla.resume(caseId, record.id(), record.version(), alice))
+                .isInstanceOf(CaseConflictException.class)
+                .satisfies(e -> {
+                    CaseConflictException conflict = (CaseConflictException) e;
+                    assertThat(conflict.code()).isEqualTo("sla-not-paused");
+                    assertThat(conflict.availableActions()).containsExactly("pause");
+                });
     }
 
     @Test
@@ -273,15 +289,15 @@ class SlaServiceTest extends OracleTestBase {
     @Test
     void sweeperEmitsWarningThenBreach() {
         sla.startClocks(caseId, "pol-1", alice);
-        jdbc().sql("UPDATE CM_SLA_RECORD SET WARN_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE").update();
+        forceWarnAtPast();
 
-        TestServices.slaSweeper(jdbc()).sweep();
+        assertThat(TestServices.slaSweeper(jdbc()).sweep()).isEqualTo(1);
 
         assertThat(eventTypes()).anySatisfy(t -> assertThat(t).endsWith("case.sla.warning"));
         assertThat(caseSlaStatus()).isEqualTo("WARNING");
 
-        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE").update();
-        TestServices.slaSweeper(jdbc()).sweep();
+        forceDueAtPast();
+        assertThat(TestServices.slaSweeper(jdbc()).sweep()).isEqualTo(1);
 
         assertThat(eventTypes()).anySatisfy(t -> assertThat(t).endsWith("case.sla.breached"));
         assertThat(slaRepo.findByCase(caseId).get(0).status()).isEqualTo("BREACHED");
@@ -297,7 +313,7 @@ class SlaServiceTest extends OracleTestBase {
     @Test
     void warningFiresExactlyOnceAcrossRepeatedSweeps() {
         sla.startClocks(caseId, "pol-1", alice);
-        jdbc().sql("UPDATE CM_SLA_RECORD SET WARN_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE").update();
+        forceWarnAtPast();
 
         TestServices.slaSweeper(jdbc()).sweep();
         TestServices.slaSweeper(jdbc()).sweep();
@@ -325,13 +341,11 @@ class SlaServiceTest extends OracleTestBase {
                 .filter(r -> slaRepo.target(r.targetId()).targetKey().equals("resolution"))
                 .findFirst().orElseThrow();
 
-        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE WHERE ID_ = :id")
-                .param("id", first.id()).update();
+        forceDueAtPast(first.id());
         TestServices.slaSweeper(jdbc()).sweep();
         assertThat(caseSlaStatus()).isEqualTo("BREACHED");
 
-        jdbc().sql("UPDATE CM_SLA_RECORD SET WARN_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE WHERE ID_ = :id")
-                .param("id", second.id()).update();
+        forceWarnAtPast(second.id());
         TestServices.slaSweeper(jdbc()).sweep();
 
         assertThat(caseSlaStatus()).isEqualTo("BREACHED");
@@ -347,8 +361,7 @@ class SlaServiceTest extends OracleTestBase {
                 .filter(r -> slaRepo.target(r.targetId()).targetKey().equals("silent"))
                 .findFirst().orElseThrow();
 
-        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE WHERE ID_ = :id")
-                .param("id", silentRecord.id()).update();
+        forceDueAtPast(silentRecord.id());
 
         TestServices.slaSweeper(jdbc()).sweep();
 
@@ -359,11 +372,30 @@ class SlaServiceTest extends OracleTestBase {
     }
 
     @Test
+    void escalateBreachActionEmitsEscalationEventAndAuditWithoutForcingBreachEvent() {
+        slaRepo.insertTarget("tgt-escalate", "pol-1", "escalate", "Escalating target",
+                "PT1H", null, List.of(), List.of("ESCALATE"));
+        sla.startClocks(caseId, "pol-1", alice);
+        SlaRecord escalatingRecord = slaRepo.findByCase(caseId).stream()
+                .filter(r -> slaRepo.target(r.targetId()).targetKey().equals("escalate"))
+                .findFirst().orElseThrow();
+
+        forceDueAtPast(escalatingRecord.id());
+
+        TestServices.slaSweeper(jdbc()).sweep();
+
+        assertThat(slaRepo.require(escalatingRecord.id()).status()).isEqualTo("BREACHED");
+        assertThat(eventTypes()).anySatisfy(t -> assertThat(t).endsWith("case.sla.escalated"));
+        assertThat(eventTypes()).noneSatisfy(t -> assertThat(t).endsWith("case.sla.breached"));
+        assertThat(auditActions()).contains("sla.escalate");
+    }
+
+    @Test
     void pausedClocksAreNeverSweptIntoBreach() {
         sla.startClocks(caseId, "pol-1", alice);
         SlaRecord record = slaRepo.findByCase(caseId).get(0);
         sla.pause(caseId, record.id(), record.version(), "WAITING_ON_CUSTOMER", alice);
-        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = SYSTIMESTAMP - INTERVAL '1' HOUR").update();
+        forceDueAtPast();
 
         TestServices.slaSweeper(jdbc()).sweep();
 
@@ -382,6 +414,28 @@ class SlaServiceTest extends OracleTestBase {
     private String caseSlaStatus() {
         return jdbc().sql("SELECT SLA_STATUS_ FROM CM_CASE WHERE ID_ = :id")
                 .param("id", caseId).query(String.class).single();
+    }
+
+    private void forceWarnAtPast() {
+        jdbc().sql("UPDATE CM_SLA_RECORD SET WARN_AT_ = :ts")
+                .param("ts", OffsetDateTime.now().minusMinutes(1)).update();
+    }
+
+    private void forceWarnAtPast(String recordId) {
+        jdbc().sql("UPDATE CM_SLA_RECORD SET WARN_AT_ = :ts WHERE ID_ = :id")
+                .param("ts", OffsetDateTime.now().minusMinutes(1))
+                .param("id", recordId).update();
+    }
+
+    private void forceDueAtPast() {
+        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = :ts")
+                .param("ts", OffsetDateTime.now().minusMinutes(1)).update();
+    }
+
+    private void forceDueAtPast(String recordId) {
+        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = :ts WHERE ID_ = :id")
+                .param("ts", OffsetDateTime.now().minusMinutes(1))
+                .param("id", recordId).update();
     }
 
     private BusinessCalendar calNl() {
@@ -443,6 +497,57 @@ class SlaServiceTest extends OracleTestBase {
                         .limit(SlaRepository.MAX_SWEEP_BATCH).toList());
     }
 
+    @Test
+    void claimedDueRecordsAreNotClaimedByASecondSweeperPass() {
+        OffsetDateTime overdue = OffsetDateTime.now().minusHours(1);
+        OffsetDateTime futureDue = OffsetDateTime.now().plusHours(1);
+        for (int i = 0; i < 3; i++) {
+            slaRepo.insertRecord(new SlaRecord("sla-claim-" + i, caseId, "tgt-first", "RUNNING",
+                    overdue.minusHours(1), futureDue, overdue, null, null, 0L, 0L));
+        }
+
+        List<SlaRepository.ClaimedRecord> firstClaim = slaRepo.claimDueRecords(OffsetDateTime.now());
+        List<SlaRepository.ClaimedRecord> secondClaim = slaRepo.claimDueRecords(OffsetDateTime.now());
+
+        assertThat(firstClaim).hasSize(3);
+        assertThat(secondClaim).isEmpty();
+        assertThat(firstClaim).extracting(SlaRepository.ClaimedRecord::claimToken)
+                .allSatisfy(token -> assertThat(token).isNotNull());
+
+        SlaRepository.ClaimedRecord claimed = firstClaim.get(0);
+        SlaRecord record = claimed.record();
+        SlaRecord warned = new SlaRecord(record.id(), record.caseId(), record.targetId(),
+                record.status(), record.startedAt(), record.dueAt(), null, record.pausedAt(),
+                record.pausedReason(), record.pausedTotalSeconds(), record.version());
+
+        assertThatThrownBy(() -> slaRepo.updateClaimed(warned, record.version(), "not-the-claim"))
+                .isInstanceOf(org.casemgmt.error.OptimisticLockException.class);
+
+        assertThat(slaRepo.updateClaimed(warned, record.version(), claimed.claimToken()).warnAt())
+                .isNull();
+        assertThat(slaRepo.claimDueRecords(OffsetDateTime.now()).stream()
+                .map(c -> c.record().id()).toList())
+                .doesNotContain(record.id());
+    }
+
+    @Test
+    void insertRecordPersistsPauseAndVersionFieldsItWasGiven() {
+        OffsetDateTime started = OffsetDateTime.now().minusHours(3);
+        OffsetDateTime due = OffsetDateTime.now().plusHours(1);
+        OffsetDateTime warn = OffsetDateTime.now().minusHours(1);
+        OffsetDateTime pausedAt = OffsetDateTime.now().minusMinutes(30);
+
+        slaRepo.insertRecord(new SlaRecord("sla-custom", caseId, "tgt-first", "PAUSED",
+                started, due, warn, pausedAt, "WAITING_ON_CUSTOMER", 123L, 7L));
+
+        SlaRecord restored = slaRepo.require("sla-custom");
+        assertThat(restored.status()).isEqualTo("PAUSED");
+        assertThat(restored.pausedAt()).isEqualTo(pausedAt);
+        assertThat(restored.pausedReason()).isEqualTo("WAITING_ON_CUSTOMER");
+        assertThat(restored.pausedTotalSeconds()).isEqualTo(123L);
+        assertThat(restored.version()).isEqualTo(7L);
+    }
+
     private Map<String, Object> officeCalendarJson() {
         Map<String, String> hours = Map.of("from", "09:00", "to", "17:00");
         return Map.of(
@@ -467,7 +572,7 @@ class SlaServiceTest extends OracleTestBase {
         public void claimTask(String engineTaskId, String userId) {}
         public void completeTask(String engineTaskId, Map<String, Object> variables) {}
         public EngineProcessRef startProcess(StartProcessRequest r) {
-            return new EngineProcessRef("proc-" + UUID.randomUUID(), r.processDefinitionKey());
+            return new EngineProcessRef("proc-" + UUID.randomUUID(), r.processDefinitionKey(), r.caseId());
         }
         public void cancelProcess(String processInstanceId, String reason) {}
         public List<EngineTaskRef> findTasks(EngineTaskQuery query) { return List.of(); }

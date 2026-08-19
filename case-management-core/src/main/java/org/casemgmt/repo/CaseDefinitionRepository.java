@@ -228,39 +228,25 @@ public class CaseDefinitionRepository {
     }
 
     /**
-     * Looks up a form schema by case-definition key without a tenant filter, because the
-     * interface this method implements (spec Task 5) intentionally has no tenantId parameter:
-     * callers such as the (Task 24) definition-listing endpoint and any future form-rendering
-     * client resolve a form purely by {@code (key, formKey)}. The brief's own repository sketch
-     * plugged this gap by hardcoding tenant {@code "t1"} and falling back to the untenanted
-     * definition — that happens to match this task's own fixture but is not a real
-     * implementation of a tenant-agnostic lookup; a definition deployed only under, say,
-     * tenant "t2" would never be found. This instead picks, across ALL tenants, the row with
-     * the highest VERSION_NO_ (ties broken by the most recent DEPLOYED_AT_), which is the best
-     * available answer given the interface has no tenant to disambiguate with. Multi-tenant
-     * deployments that reuse the same key across tenants remain genuinely ambiguous under this
-     * signature — that is a gap in the interface, not something this method can paper over.
+     * Looks up a form schema by case-definition key within one tenant.
      *
-     * <p><b>READ PATH ONLY — never a write path</b> (final whole-branch review, Important 1).
-     * The one legitimate caller is the form-rendering endpoint
-     * {@code GET /case-definitions/{key}/forms/{formKey}}, which serves a client a field list
-     * for a form it is about to draw. {@code CaseTaskService.complete} used to call this too,
-     * as the server-side validator for task completion, and both of the ambiguities documented
-     * above became real defects there: an in-flight case pinned to v1 had its payload validated
-     * against a v2 schema deployed after it started (the exact failure versioned definitions
-     * exist to prevent), and a case in tenant t2 had its payload validated against tenant t1's
-     * schema. Any caller that is deciding whether a WRITE is legal must resolve the case's own
-     * pinned definition instead — {@code CM_CASE.CASE_DEF_ID_} exists precisely to pin it — via
-     * {@link #formSchemaOfDefinition(String, String)}. Do not "reuse" this method there again.
+     * <p>This is the discovery/read-side counterpart to {@link #formSchemaOfDefinition}: a
+     * generic UI first resolves the caller's latest visible definition and then asks for the
+     * form schema named by that definition. The tenant parameter is mandatory because the same
+     * definition key may legitimately exist in multiple tenants with different form models; a
+     * cross-tenant "latest version wins" lookup would leak model metadata and could render the
+     * wrong fields for a portal user.
      */
     @SuppressWarnings("unchecked")
-    public Optional<Map<String, Object>> formSchema(String key, String formKey) {
+    public Optional<Map<String, Object>> formSchema(String key, String formKey, String tenantId) {
         return jdbc.sql("""
                 SELECT FORMS_JSON_ FROM CM_CASE_DEF
                 WHERE KEY_ = :key
-                ORDER BY VERSION_NO_ DESC, DEPLOYED_AT_ DESC
+                  AND (TENANT_ID_ = :tenant OR (:tenant IS NULL AND TENANT_ID_ IS NULL))
+                ORDER BY VERSION_NO_ DESC
                 FETCH FIRST 1 ROWS ONLY""")
                 .param("key", key)
+                .param("tenant", tenantId)
                 .query(String.class).optional()
                 .map(JsonCodec::toMap)
                 .map(forms -> forms.get(formKey))

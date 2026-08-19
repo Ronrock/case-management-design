@@ -45,52 +45,21 @@ import java.util.function.Function;
  * <p><b>Per-row failure isolation (review round 1):</b> everything a single delivery does —
  * subscription lookup, event read, signing, and the HTTP call — runs inside {@link #drainOnce}'s
  * per-row {@code try}, the same shape {@code EngineCommandDispatcher.drainOnce} uses. Previously
- * only the HTTP call was guarded, so e.g. a {@code secretResolver} that returns {@code null}
- * after a process restart (see the secret note below — the in-memory map does not survive one)
+ * only the HTTP call was guarded, so e.g. a misconfigured {@code secretResolver} returning
+ * {@code null}
  * threw out of {@code drainOnce}, marked NOTHING, and left the whole batch to be reclaimed and
  * re-thrown on the next pass forever: an unbounded claim/expire/throw loop in which the retry
  * ladder never advanced and no row ever dead-lettered. A bad row must cost itself an attempt,
  * not the batch.
  *
- * <p><b>Secret plaintext (known PoC shortcut, not a solved problem):</b> {@code SECRET_HASH_} on
- * {@code CM_WEBHOOK_SUB} deliberately stores only a one-way SHA-256 hash (see {@link
- * HmacSigner#hash}) — signing, however, needs the plaintext secret, which the hash cannot
- * recover. This class therefore takes a {@code secretResolver} (subscription id -&gt; plaintext)
- * supplied by the caller instead of reading a plaintext column that does not exist. The wiring
- * task (Task 26) is expected to populate an in-memory map from {@link
- * org.casemgmt.service.WebhookService#subscribe}, which is the only place the plaintext is ever
- * held — it is generated there, returned to the caller once, and never persisted. That in-memory
- * map does not survive a process restart, so every subscription would need to be re-created after
- * one; a real deployment needs either reversible encryption of the secret (with the decryption
- * key held outside the case-management database) or per-subscription signing keys held in an
- * external secret store (e.g. Vault, KMS) that this class's {@code secretResolver} would call
- * out to instead. Do not "solve" this by adding a plaintext column to {@code CM_WEBHOOK_SUB}.
- *
- * <p><b>What a restart actually costs, stated as one thing</b> (final whole-branch review,
- * Important 6). Three separately-recorded, individually-minor items compose into the single most
- * likely thing to bite a deployment, and the composition was written down nowhere:
- * <ol>
- *   <li>the starter holds webhook secrets in an in-memory {@code ConcurrentHashMap};</li>
- *   <li>after ANY restart {@code secretResolver.apply(sub.id())} returns {@code null} for every
- *       PRE-EXISTING subscription, so {@link HmacSigner#sign} throws, and that throw happens
- *       before the HTTP call — caught by {@link #drainOnce}'s generic handler;</li>
- *   <li>that handler used to call {@code fail(delivery, null, ...)}, so {@link #fail} fell back
- *       to {@code BACKOFF.size()} instead of reading the subscription's own
- *       {@code MAX_RETRIES_} — the exact dead config review round 1 had fixed for the HTTP
- *       path and left broken for this one.</li>
- * </ol>
- * Net effect: <b>restarting the application permanently dead-letters every pending delivery of
- * every pre-existing subscription, into a queue with no endpoint to read it and no way to
- * replay it.</b>
- *
- * <p>Fixed here as far as this class can reach: {@code drainOnce} now carries whatever
- * subscription {@link #deliver} managed to load into the catch, so the retry ladder is the
- * subscription's own on the pre-HTTP failure path too. That does NOT make the secret survive a
- * restart — it cannot; see above — it makes the failure honest, bounded by configured policy
- * rather than by an accident of which fallback fired. The observability half is closed by
- * {@code GET /webhooks/{id}/dead-letters} (Task 27), which exposes
- * {@code WebhookService.deadLetters} — until then reachable only from tests. The durability
- * half remains open and is recorded in FINDINGS.md as the thing to fix before any deployment.
+ * <p><b>Secret plaintext:</b> {@code SECRET_HASH_} on {@code CM_WEBHOOK_SUB} deliberately stores
+ * only a one-way SHA-256 hash (see {@link HmacSigner#hash}) — signing, however, needs the
+ * plaintext secret, which the hash cannot recover. This class therefore takes a
+ * {@code secretResolver} (subscription id -&gt; plaintext) supplied by the application assembly.
+ * The starter wires it to {@link WebhookSecretStore}, which persists encrypted signing material
+ * and can resolve the same subscription after a process restart. A resolver that still returns
+ * {@code null} is treated as a per-delivery failure and moves through retry/DLQ like any other
+ * pre-HTTP fault.
  */
 public class WebhookDispatcher {
 
@@ -168,8 +137,8 @@ public class WebhookDispatcher {
             try {
                 deliver(delivery, sub);
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
                 fail(delivery, sub.get(), null, describe(e));
+                Thread.currentThread().interrupt();
                 return due.size();
             } catch (Exception e) {
                 fail(delivery, sub.get(), null, describe(e));
@@ -234,7 +203,7 @@ public class WebhookDispatcher {
      */
     private void fail(WebhookRepository.Delivery delivery, WebhookRepository.Subscription sub,
                       Integer statusCode, String error) {
-        int maxRetries = sub != null && sub.maxRetries() > 0
+        int maxRetries = sub != null
                 ? sub.maxRetries()
                 : EngineCommand.BACKOFF.size();
 

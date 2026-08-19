@@ -42,21 +42,14 @@ paths:
       summary: List deployed case definitions (latest versions)
       parameters:
         - $ref: '#/components/parameters/tenantId'
-        - $ref: '#/components/parameters/page'
-        - $ref: '#/components/parameters/pageSize'
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/Page'
-                  - properties:
-                      items:
-                        type: array
-                        items: {$ref: '#/components/schemas/CaseDefinition'}
-                    additionalProperties: true
+                type: array
+                items: {$ref: '#/components/schemas/CaseDefinition'}
     post:
       tags: [Case Definitions]
       summary: Deploy a new case definition (new key or new version)
@@ -77,7 +70,9 @@ paths:
     get:
       tags: [Case Definitions]
       summary: Get latest version of a case definition
-      parameters: [{$ref: '#/components/parameters/definitionKey'}]
+      parameters:
+        - {$ref: '#/components/parameters/definitionKey'}
+        - {$ref: '#/components/parameters/tenantId'}
       responses:
         '200':
           description: OK
@@ -106,6 +101,7 @@ paths:
       summary: Get JSON Schema for a task/action form (model-driven frontends)
       parameters:
         - {$ref: '#/components/parameters/definitionKey'}
+        - {$ref: '#/components/parameters/tenantId'}
         - name: formKey
           in: path
           required: true
@@ -187,7 +183,7 @@ paths:
           schema: {type: string}
         - name: slaStatus
           in: query
-          schema: {type: string, enum: [ON_TRACK, WARNING, BREACHED]}
+          schema: {type: string, enum: [NONE, ON_TRACK, WARNING, BREACHED]}
         - name: priority
           in: query
           schema: {type: string}
@@ -659,21 +655,17 @@ paths:
         - name: dueBefore
           in: query
           schema: {type: string, format: date-time}
-        - $ref: '#/components/parameters/page'
-        - $ref: '#/components/parameters/pageSize'
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/Page'
-                  - properties:
-                      items:
-                        type: array
-                        items: {$ref: '#/components/schemas/Task'}
-                    additionalProperties: true
+                type: array
+                items: {$ref: '#/components/schemas/Task'}
 
   /cases/{caseId}/tasks:
     get:
@@ -1362,7 +1354,10 @@ paths:
     post:
       tags: [Events & Webhooks]
       summary: Send a test event to the subscriber endpoint
-      parameters: [{$ref: '#/components/parameters/webhookId'}]
+      parameters:
+        - {$ref: '#/components/parameters/webhookId'}
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/pageSize'
       responses:
         '200':
           description: Delivery attempt result
@@ -1800,8 +1795,8 @@ components:
         # document — it is what a generic client switches on — and a client written from the old
         # spec would have found no `id` on any response.
         action: {type: string, example: close}
-        # NOT IMPLEMENTED: nothing emits a human-readable label. Kept declared because a renderer
-        # needs one; recorded as an R3 gap in FINDINGS.md rather than quietly deleted.
+        # Emitted by the policy layer so generic Lit/Web Component renderers can show a stable
+        # human-readable command label without hardcoding case-type-specific text.
         name: {type: string, example: Close case}
         method: {type: string, example: POST}
         href: {type: string, example: "/cases/eng-a:123/close"}
@@ -1837,12 +1832,16 @@ components:
         version: {type: integer, format: int64}
         variables: {$ref: '#/components/schemas/Variables'}
         createdAt: {type: string, format: date-time}
-        # NOT IMPLEMENTED: CaseResponse carries createdAt and closedAt but no updatedAt, though
-        # CM_CASE.UPDATED_AT_ exists and is maintained. Recorded in FINDINGS.md.
         updatedAt: {type: string, format: date-time}
         closedAt: {type: string, format: date-time, nullable: true}
         availableActions:
           type: array
+          items: {$ref: '#/components/schemas/AvailableAction'}
+        collaborationActions:
+          type: array
+          description: >
+            Case-scoped collaboration commands, kept separate from lifecycle transitions so
+            generic clients do not treat comments or process starts as state changes.
           items: {$ref: '#/components/schemas/AvailableAction'}
 
     CaseCreateRequest:
@@ -1857,20 +1856,23 @@ components:
         title: {type: string}
         priority: {type: string}
         tenantId: {type: string}
-        variables: {$ref: '#/components/schemas/Variables'}
+        variables:
+          type: object
+          nullable: true
+          additionalProperties: true
 
     CasePatch:
       type: object
       properties:
-        title: {type: string}
-        priority: {type: string}
-        businessKey: {type: string}
+        title: {type: string, nullable: true}
         variables: {$ref: '#/components/schemas/Variables'}
 
     CaseDefinition:
       type: object
       required: [key, name]
+      additionalProperties: true
       properties:
+        id: {type: string, readOnly: true}
         key: {type: string}
         name: {type: string}
         version: {type: integer, readOnly: true}
@@ -1887,6 +1889,18 @@ components:
         planModel:
           type: array
           items: {$ref: '#/components/schemas/PlanItemDefinition'}
+        planItems:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        availableActions:
+          type: array
+          description: Deployment-wide administration actions available to the caller.
+          items: {$ref: '#/components/schemas/AvailableAction'}
+        formKeys:
+          type: array
+          items: {type: string}
         forms:
           type: object
           additionalProperties:
@@ -1933,6 +1947,7 @@ components:
       type: object
       properties:
         id: {type: string}
+        caseId: {type: string}
         definitionId: {type: string}
         type: {type: string, enum: [STAGE, HUMAN_TASK, PROCESS_TASK, MILESTONE]}
         name: {type: string}
@@ -1940,6 +1955,8 @@ components:
           type: string
           enum: [AVAILABLE, ENABLED, ACTIVE, COMPLETED, TERMINATED]
         parentStageId: {type: string, nullable: true}
+        repetitionNo: {type: integer}
+        version: {type: integer, format: int64}
         adHoc: {type: boolean}
         taskId: {type: string, nullable: true}
         processInstanceId: {type: string, nullable: true}
@@ -1993,10 +2010,12 @@ components:
     LinkedProcess:
       type: object
       properties:
+        id: {type: string}
         processInstanceId: {type: string}
         processDefinitionKey: {type: string}
         planItemId: {type: string, nullable: true}
         state: {type: string, enum: [ACTIVE, COMPLETED, TERMINATED, SUSPENDED]}
+        engineSync: {type: string, enum: [PENDING, SYNCED, FAILED]}
         startedAt: {type: string, format: date-time}
         endedAt: {type: string, format: date-time, nullable: true}
 
@@ -2008,6 +2027,9 @@ components:
         achieved: {type: boolean}
         achievedAt: {type: string, format: date-time, nullable: true}
         achievedBy: {type: string, nullable: true}
+        availableActions:
+          type: array
+          items: {$ref: '#/components/schemas/AvailableAction'}
 
     SlaPolicy:
       type: object
@@ -2030,10 +2052,11 @@ components:
                 type: string
                 example: PT6H
                 description: Emit sla.warning when elapsed time passes this
-              pausedInStates:
+              pauseReasons:
                 type: array
                 items: {type: string}
-                example: [WAITING_ON_CUSTOMER, SUSPENDED]
+                description: Optional whitelist of accepted pause reasons for this target.
+                example: [WAITING_ON_CUSTOMER, BANK_HOLIDAY]
               breachActions:
                 type: array
                 items:
@@ -2046,11 +2069,18 @@ components:
         id: {type: string}
         targetId: {type: string}
         status: {type: string, enum: [RUNNING, PAUSED, MET, BREACHED]}
+        startedAt: {type: string, format: date-time}
         dueAt: {type: string, format: date-time}
         warningAt: {type: string, format: date-time}
+        warnAt: {type: string, format: date-time, nullable: true}
         pausedAt: {type: string, format: date-time, nullable: true}
         pausedReason: {type: string, nullable: true}
+        pausedTotalSeconds: {type: integer, format: int64}
+        version: {type: integer, format: int64}
         elapsedBusinessTime: {type: string, description: ISO 8601 duration}
+        availableActions:
+          type: array
+          items: {$ref: '#/components/schemas/AvailableAction'}
 
     Participant:
       type: object
@@ -2223,6 +2253,11 @@ components:
       required: [url, eventTypes]
       properties:
         id: {type: string, readOnly: true}
+        tenantId:
+          type: string
+          nullable: true
+          readOnly: true
+          description: Tenant that owns this subscription; null indicates a global subscription.
         url: {type: string, format: uri}
         eventTypes:
           type: array
@@ -2233,9 +2268,13 @@ components:
           type: string
           writeOnly: true
           description: HMAC secret; deliveries signed via X-Case-Signature
-        maxRetries: {type: integer, default: 8}
+        maxRetries: {type: integer, default: 5}
         deadLetteredCount: {type: integer, readOnly: true}
         createdAt: {type: string, format: date-time, readOnly: true}
+        availableActions:
+          type: array
+          description: Webhook administration actions available to the caller.
+          items: {$ref: '#/components/schemas/AvailableAction'}
 
     AuditEntry:
       type: object

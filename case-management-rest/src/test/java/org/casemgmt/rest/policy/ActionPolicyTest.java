@@ -145,14 +145,14 @@ class ActionPolicyTest {
                 .isInstanceOf(CaseConflictException.class)
                 .hasMessageContaining("complete");
 
-        // Non-mutating role: alice IS the assignee here, so identity alone would pass --
-        // this is exactly the hole the review found (Critical): listForTask must also
-        // require a mutating role or candidate-group membership, not caller identity
-        // alone. A watcher-roled alice must get nothing and must not be enforceable.
+        // Production-hardening decision: claim is role/group-authorised at claim time, but a
+        // task already claimed by alice must remain completable by alice even if her current
+        // role/group membership later changes. Otherwise legitimate claims become orphaned.
         Set<String> watcher = Set.of("watcher");
-        assertThat(policy.listForTask(claimed, "alice", watcher, NO_GROUPS)).isEmpty();
-        assertThatThrownBy(() -> policy.assertAllowedOnTask(claimed, "alice", watcher, NO_GROUPS, "complete"))
-                .isInstanceOf(CaseConflictException.class);
+        assertThat(policy.listForTask(claimed, "alice", watcher, NO_GROUPS))
+                .extracting(AvailableAction::action).containsExactly("complete");
+        assertThatNoException().isThrownBy(() ->
+                policy.assertAllowedOnTask(claimed, "alice", watcher, NO_GROUPS, "complete"));
     }
 
     @Test

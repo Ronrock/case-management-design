@@ -9,16 +9,23 @@ import java.util.List;
 /**
  * Append-only log backing CM_EVENT (spec §6.1/§6.2). SEQ_ (from CM_EVENT_SEQ) is the
  * monotonic cursor {@link #after} and {@link #forCase} paginate on.
+ *
+ * <p>Sequence assignment is serialized through {@code CM_EVENT_APPEND_LOCK}. The lock is held
+ * by the caller's transaction until commit, so two transactions cannot assign event sequence
+ * numbers and then commit them in the opposite order. That makes the pull cursor safe for
+ * recovery consumers while keeping the public cursor shape unchanged.
  */
 public class EventRepository {
 
     public record StoredEvent(long seq, CaseEvent event) {}
 
     private final JdbcClient jdbc;
+    private static final String APPEND_LOCK_NAME = "default";
 
     public EventRepository(JdbcClient jdbc) { this.jdbc = jdbc; }
 
     public long append(CaseEvent e) {
+        lockAppendOrder();
         long seq = jdbc.sql("SELECT CM_EVENT_SEQ.NEXTVAL FROM DUAL").query(Long.class).single();
         jdbc.sql("""
                 INSERT INTO CM_EVENT (SEQ_, ID_, SOURCE_, TYPE_, SUBJECT_, TENANT_ID_, TIME_, DATA_JSON_)
@@ -30,44 +37,19 @@ public class EventRepository {
         return seq;
     }
 
+    private void lockAppendOrder() {
+        jdbc.sql("""
+                SELECT LOCK_NAME_ FROM CM_EVENT_APPEND_LOCK
+                WHERE LOCK_NAME_ = :name FOR UPDATE""")
+            .param("name", APPEND_LOCK_NAME)
+            .query(String.class)
+            .single();
+    }
+
     /**
-     * KNOWN, ACCEPTED LIMITATION (Task 14 review, human-ruled DOCUMENT-DON'T-FIX): under
-     * concurrent writers, this cursor can permanently skip events, and a consumer polling it
-     * has no way to detect that a gap occurred.
-     *
-     * <p>{@code SEQ_} comes from {@code CM_EVENT_SEQ.NEXTVAL} (see {@link #append}), which hands
-     * out numbers the instant it is called — <em>before</em> the row's INSERT commits. Two
-     * concurrent transactions can therefore commit their {@code CM_EVENT} rows in the opposite
-     * order to the sequence values they were assigned. Concrete interleaving, verified against
-     * real Oracle:
-     * <pre>
-     *   T1: NEXTVAL -&gt; 5, INSERT SEQ_=5 ... (slow: still uncommitted)
-     *   T2: NEXTVAL -&gt; 6, INSERT SEQ_=6 ..., COMMIT                 (6 now visible)
-     *   Consumer: after(cursor=0, ...) sees only SEQ_=6 (5 not yet committed), advances cursor to 6
-     *   T1: COMMIT                                                  (5 now visible, but too late)
-     *   Consumer: after(cursor=6, ...) -&gt; WHERE SEQ_ &gt; 6 -&gt; never returns 5, ever
-     * </pre>
-     * Event 5 is not late — it is gone. There is no gap marker, no missing-sequence exception, no
-     * signal of any kind in the result set the consumer can check; {@code after(6, ...)} returning
-     * zero or more rows all {@code > 6} is indistinguishable from "nothing new happened yet."
-     * {@code CM_EVENT_SEQ} values also never roll back on an aborted transaction, so an ABORTed
-     * T1 above leaves the exact same permanent, unobservable hole in the sequence — a consumer
-     * cannot tell a lost-commit gap from a rolled-back-transaction gap from "no event was ever
-     * assigned that number," because all three look identical from here.
-     *
-     * <p>This directly undermines design-principles.md Appendix A's "push for speed, pull for
-     * correctness" argument: the pull path (this method) is supposed to be the reliable recovery
-     * mechanism for a consumer that missed a webhook delivery, precisely because polling is
-     * assumed to eventually see everything a push might have dropped. Under concurrent writers it
-     * does not — it can drop events itself, silently, with no way for the consumer to know.
-     *
-     * <p>Deliberately NOT fixed in this PoC (human-ruled): the real fix — a commit-order
-     * watermark (e.g. poll {@code WHERE TIME_ < now() - safety_margin} instead of/alongside
-     * {@code SEQ_}), a gap-tolerant cursor design, or serializing appends so assignment order
-     * matches commit order — is an architectural decision for the production design, not
-     * something to improvise inside a repository method. Surfacing this precisely is the PoC
-     * doing its job; do not silently "fix" the symptom (e.g. by widening the WHERE clause) without
-     * first understanding this whole shape of the problem.
+     * Pull recovery cursor over commit-ordered event sequence numbers. {@link #append} serializes
+     * sequence assignment with a transaction-held append lock, so a committed event with a lower
+     * {@code SEQ_} cannot appear after a consumer has already advanced past a higher one.
      */
     public List<StoredEvent> after(long cursor, int limit) {
         return jdbc.sql("""
@@ -86,16 +68,16 @@ public class EventRepository {
      * controller — filtering after the fetch would still read other tenants' rows and would
      * silently under-fill each page.
      *
-     * <p>Same cursor-gap limitation as {@link #after}: see its Javadoc. A null {@code tenantId}
-     * is not "all tenants" here — it matches only the untenanted rows, the same way every other
-     * tenant predicate in this schema treats NULL.
+     * <p>Global events ({@code TENANT_ID_ IS NULL}) are included for every tenant-scoped feed:
+     * those rows are intentionally not owned by one tenant, and hiding them from every caller
+     * would make pull recovery impossible for platform-level events.
      */
     public List<StoredEvent> afterForTenant(String tenantId, long cursor, int limit) {
         return jdbc.sql("""
                 SELECT SEQ_, ID_, SOURCE_, TYPE_, SUBJECT_, TENANT_ID_, TIME_, DATA_JSON_
                 FROM CM_EVENT
                 WHERE SEQ_ > :cursor
-                  AND (TENANT_ID_ = :tenant OR (:tenant IS NULL AND TENANT_ID_ IS NULL))
+                  AND (TENANT_ID_ IS NULL OR TENANT_ID_ = :tenant)
                 ORDER BY SEQ_ FETCH FIRST :limit ROWS ONLY""")
             .param("tenant", tenantId).param("cursor", cursor).param("limit", limit)
             .query(EventRepository::map).list();
@@ -127,7 +109,7 @@ public class EventRepository {
      * figure from memory, and the test written to prove the chunking used 1,500 ids — which
      * passes with the chunking stripped out. That test proved nothing until it was resized to
      * cross the real threshold. See
-     * {@code WebhookDispatcherTest.bySeqsChunksSoAnOverLongInListCannotHitOra01795}.
+     * {@code WebhookDispatcherTest.bySeqsChunksSoAnOverLongInListCannotOverflowTheStatement}.
      */
     private static final int MAX_IN_LIST = 500;
 
@@ -173,7 +155,9 @@ public class EventRepository {
                 .param("seqs", all.subList(from, Math.min(from + MAX_IN_LIST, all.size())))
                 .query(EventRepository::map).list());
         }
-        return found;
+        return found.stream()
+                .sorted(java.util.Comparator.comparingLong(StoredEvent::seq))
+                .toList();
     }
 
     private static StoredEvent map(java.sql.ResultSet rs, int n) throws java.sql.SQLException {

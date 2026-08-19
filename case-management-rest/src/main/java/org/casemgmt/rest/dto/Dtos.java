@@ -28,14 +28,10 @@ public final class Dtos {
 
     /**
      * The spec's {@code Page} envelope (fix round 1, review finding I6). A bare array has nowhere
-     * to put a total or a next cursor and adding one later is a breaking change; event pagination
-     * already carries a known cursor-gap flaw that will eventually need exactly that space.
-     *
-     * <p>{@code totalItems}/{@code totalPages} are declared by the spec but not emitted yet —
-     * they need a COUNT query {@code CaseRepository} does not have. Adding them to this record
-     * later is additive for every client.
+     * to put totals or a next cursor and adding one later is a breaking change; the envelope keeps
+     * pagination metadata stable across all list responses.
      */
-    public record Page<T>(List<T> items, int page, int pageSize) {}
+    public record Page<T>(List<T> items, int page, int pageSize, long totalItems, int totalPages) {}
 
     public record CreateCaseRequest(String caseDefinitionKey, String tenantId, String businessKey,
                                     String title, String priority, Map<String, Object> variables) {}
@@ -160,14 +156,18 @@ public final class Dtos {
                                int caseDefinitionVersion, String businessKey, String title,
                                String state, String priority, String assignee, String slaStatus,
                                String outcome, Map<String, Object> variables, long version,
-                               OffsetDateTime createdAt, OffsetDateTime closedAt,
-                               List<AvailableAction> availableActions) {
+                               OffsetDateTime createdAt, OffsetDateTime updatedAt,
+                               OffsetDateTime closedAt,
+                               List<AvailableAction> availableActions,
+                               List<AvailableAction> collaborationActions) {
 
-        public static CaseResponse of(CaseInstance c, List<AvailableAction> actions) {
+        public static CaseResponse of(CaseInstance c, List<AvailableAction> actions,
+                                      List<AvailableAction> collaborationActions) {
             return new CaseResponse(c.id(), c.engineId(), c.tenantId(), c.caseDefKey(),
                     c.caseDefVersion(), c.businessKey(), c.title(), c.state().name(),
                     c.priority().name(), c.assignee(), c.slaStatus(), c.outcome(), c.variables(),
-                    c.version(), c.createdAt(), c.closedAt(), actions);
+                    c.version(), c.createdAt(), c.updatedAt(), c.closedAt(), actions,
+                    collaborationActions);
         }
     }
 

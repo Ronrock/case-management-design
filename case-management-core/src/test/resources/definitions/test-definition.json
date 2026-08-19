@@ -15,8 +15,8 @@
     }
   },
   "planItems": [
-    { "defKey": "intake", "type": "STAGE", "name": "Intake", "manualActivation": false, "sortOrder": 10 },
-    { "defKey": "review", "type": "HUMAN_TASK", "name": "Review", "parentStageKey": "intake",
+    { "defKey": "setupStage", "type": "STAGE", "name": "Setup", "manualActivation": false, "sortOrder": 10 },
+    { "defKey": "review", "type": "HUMAN_TASK", "name": "Review", "parentStageKey": "setupStage",
       "manualActivation": false, "required": true, "formKey": "reviewForm",
       "candidateGroups": ["reviewers"], "sortOrder": 20 },
     { "defKey": "reviewed", "type": "MILESTONE", "name": "Reviewed",

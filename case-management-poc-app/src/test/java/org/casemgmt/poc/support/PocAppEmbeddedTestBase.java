@@ -39,6 +39,8 @@ public abstract class PocAppEmbeddedTestBase {
         registry.add("casemgmt.schedulers.webhook-interval-ms", () -> "2000");
         registry.add("casemgmt.schedulers.engine-command-interval-ms", () -> "2000");
         registry.add("casemgmt.schedulers.sla-sweep-interval-ms", () -> "3600000");
+        registry.add("casemgmt.webhooks.secret-encryption-key",
+                () -> "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=");
     }
 
     @LocalServerPort

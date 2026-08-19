@@ -1,5 +1,8 @@
 package org.casemgmt.rest.http;
 
+import org.casemgmt.domain.CaseIds;
+import org.casemgmt.event.CaseEvent;
+import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.MilestoneRepository;
 import org.casemgmt.repo.SlaRepository;
 import org.casemgmt.service.Actor;
@@ -10,6 +13,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.RestClient;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -348,6 +352,9 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
                 .uri("/case-definitions/{k}?tenantId={t}", DEFINITION_KEY, TENANT)
                 .retrieve().toEntity(Map.class);
         assertThat(definition.getBody()).containsEntry("version", 1);
+        assertThat((List<Map<String, Object>>) definition.getBody().get("availableActions"))
+                .extracting(a -> a.get("action"))
+                .contains("deploy-case-definition", "subscribe-webhook");
 
         ResponseEntity<Map> subscribe = client("carol").post().uri("/webhooks")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -402,6 +409,7 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         assertThat(carol.getStatusCode().value()).isEqualTo(409);
         assertThat(carol.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
         assertThat(carol.getBody()).contains("\"code\":\"action-not-available\"");
+        assertThat(carol.getBody()).contains("view-webhook-dead-letters");
 
         // dave IS an administrator — of tenant t2. Administration is not a cross-tenant licence,
         // and alice's subscription must be as invisible to him as an id that was never minted.
@@ -430,6 +438,38 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
                 .uri("/webhooks/{id}/dead-letters", webhookId).retrieve().toEntity(List.class);
         assertThat(owner.getStatusCode().value()).isEqualTo(200);
         assertThat(owner.getBody()).isEmpty();
+    }
+
+    @Test
+    void anOwningAdministratorCanRedeliverDeadLettersButOtherCallersCannot() {
+        ResponseEntity<Map> subscribed = alice().post().uri("/webhooks")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("url", "https://alice.test/hook", "eventTypes", List.of("case.created")))
+                .retrieve().toEntity(Map.class);
+        assertThat(subscribed.getStatusCode().value()).isEqualTo(201);
+        String webhookId = (String) subscribed.getBody().get("id");
+        seedDeadWebhookDelivery(webhookId);
+
+        ResponseEntity<String> carol = client("carol").post()
+                .uri("/webhooks/{id}/dead-letters/redeliver", webhookId)
+                .retrieve().toEntity(String.class);
+        assertThat(carol.getStatusCode().value()).isEqualTo(409);
+        assertThat(carol.getBody()).contains("\"code\":\"action-not-available\"");
+        assertThat(carol.getBody()).contains("redeliver-webhook-dead-letters");
+        assertThat(webhookDeliveryStatus(webhookId)).isEqualTo("DEAD:5");
+
+        ResponseEntity<String> foreign = client("dave").post()
+                .uri("/webhooks/{id}/dead-letters/redeliver", webhookId)
+                .retrieve().toEntity(String.class);
+        assertThat(foreign.getStatusCode().value()).isEqualTo(404);
+        assertThat(foreign.getBody()).contains("\"code\":\"not-found\"");
+        assertThat(webhookDeliveryStatus(webhookId)).isEqualTo("DEAD:5");
+
+        ResponseEntity<Void> owner = alice().post()
+                .uri("/webhooks/{id}/dead-letters/redeliver", webhookId)
+                .retrieve().toEntity(Void.class);
+        assertThat(owner.getStatusCode().value()).isEqualTo(202);
+        assertThat(webhookDeliveryStatus(webhookId)).isEqualTo("PENDING:0");
     }
 
     /**
@@ -555,6 +595,30 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         return ((List<Map<String, Object>>) alice().get().uri("/cases/{id}/milestones", caseId)
                 .retrieve().toEntity(List.class).getBody()).stream()
                 .filter(m -> milestoneId.equals(m.get("id"))).findFirst().orElseThrow();
+    }
+
+    private void seedDeadWebhookDelivery(String webhookId) {
+        long seq = new EventRepository(jdbc()).append(new CaseEvent(CaseIds.newId(),
+                "/engines/eng-test/cases", "org.example.cm.case.created", "eng-test:redeliver",
+                TENANT, OffsetDateTime.now(), Map.of("state", "ACTIVE")));
+        jdbc().sql("""
+                INSERT INTO CM_WEBHOOK_DELIVERY (ID_, WEBHOOK_ID_, EVENT_SEQ_, STATUS_,
+                    ATTEMPTS_, LAST_STATUS_CODE_, LAST_ERROR_, FAILED_AT_)
+                VALUES (:id, :webhookId, :seq, 'DEAD', 5, 500, 'downstream failed', SYSTIMESTAMP)""")
+            .param("id", CaseIds.newId())
+            .param("webhookId", webhookId)
+            .param("seq", seq)
+            .update();
+    }
+
+    private String webhookDeliveryStatus(String webhookId) {
+        return jdbc().sql("""
+                SELECT STATUS_ || ':' || ATTEMPTS_
+                FROM CM_WEBHOOK_DELIVERY
+                WHERE WEBHOOK_ID_ = :webhookId""")
+            .param("webhookId", webhookId)
+            .query(String.class)
+            .single();
     }
 
     private RestClient anonymous() {

@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -54,6 +55,9 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         assertThat(actions).isNotEmpty();
         assertThat(actions).extracting(a -> a.get("action")).contains("update", "cancel");
         assertThat(actions).allSatisfy(a -> assertThat(a).containsKeys("action", "href", "method"));
+        assertThat((List<Map<String, Object>>) response.getBody().get("collaborationActions"))
+                .extracting(a -> a.get("action"))
+                .contains("comment", "start-process");
     }
 
     @Test
@@ -84,6 +88,34 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
     }
 
     @Test
+    void caseListingReturnsTotalsAndHonoursSortAndCreatedDateFilters() {
+        deployDefinition();
+        createCase("C case");
+        createCase("A case");
+        createCase("B case");
+
+        ResponseEntity<Map> firstPage = alice().get()
+                .uri("/cases?sort=title&page=0&pageSize=2&createdAfter={after}",
+                        OffsetDateTime.now().minusDays(1).toString())
+                .retrieve().toEntity(Map.class);
+
+        assertThat(firstPage.getStatusCode().value()).isEqualTo(200);
+        assertThat(firstPage.getBody()).containsEntry("page", 0)
+                .containsEntry("pageSize", 2)
+                .containsEntry("totalItems", 3)
+                .containsEntry("totalPages", 2);
+        assertThat(items(firstPage)).extracting(i -> i.get("title"))
+                .containsExactly("A case", "B case");
+
+        ResponseEntity<Map> empty = alice().get()
+                .uri("/cases?createdBefore={before}", OffsetDateTime.now().minusDays(1).toString())
+                .retrieve().toEntity(Map.class);
+        assertThat(empty.getBody()).containsEntry("totalItems", 0)
+                .containsEntry("totalPages", 0);
+        assertThat(items(empty)).isEmpty();
+    }
+
+    @Test
     void theETagFromAMutationIsTheOneTheNextMutationMustPresent() {
         Map<String, Object> created = deployAndCreateCase();
         String id = (String) created.get("id");
@@ -108,6 +140,46 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
                 .retrieve().toEntity(Map.class);
         assertThat(again.getStatusCode().value()).isEqualTo(200);
         assertThat(again.getHeaders().getETag()).isEqualTo("\"2\"");
+    }
+
+    @Test
+    void mergePatchNullsClearTitleAndVariables() {
+        deployDefinition();
+        ResponseEntity<Map> created = alice().post().uri("/cases")
+                .header("Idempotency-Key", "merge-patch-" + UUID.randomUUID())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("caseDefinitionKey", DEFINITION_KEY, "tenantId", TENANT,
+                        "title", "Clear me",
+                        "variables", Map.of("keep", "yes", "remove", "no",
+                                "nested", Map.of("keepNested", "yes", "removeNested", "no"))))
+                .retrieve().toEntity(Map.class);
+        String id = (String) created.getBody().get("id");
+
+        Map<String, Object> variablesPatch = new java.util.LinkedHashMap<>();
+        variablesPatch.put("remove", null);
+        variablesPatch.put("add", "new");
+        variablesPatch.put("nested", new java.util.LinkedHashMap<>(Map.of("addNested", "new")));
+        ((Map<String, Object>) variablesPatch.get("nested")).put("removeNested", null);
+        Map<String, Object> patch = new java.util.LinkedHashMap<>();
+        patch.put("title", null);
+        patch.put("variables", variablesPatch);
+
+        ResponseEntity<Map> updated = alice().patch().uri("/cases/{id}", id)
+                .header("If-Match", created.getHeaders().getETag())
+                .contentType(MERGE_PATCH)
+                .body(patch)
+                .retrieve().toEntity(Map.class);
+
+        assertThat(updated.getStatusCode().value()).isEqualTo(200);
+        assertThat(updated.getBody()).containsEntry("title", null);
+        Map<String, Object> variables = (Map<String, Object>) updated.getBody().get("variables");
+        assertThat(variables).containsEntry("keep", "yes")
+                .containsEntry("add", "new")
+                .doesNotContainKey("remove");
+        assertThat((Map<String, Object>) variables.get("nested"))
+                .containsEntry("keepNested", "yes")
+                .containsEntry("addNested", "new")
+                .doesNotContainKey("removeNested");
     }
 
     /**
@@ -467,6 +539,8 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         assertThat(created.getStatusCode().value()).isEqualTo(201);
         assertThat((String) created.getBody().get("secret")).isNotBlank();
         assertThat(created.getBody()).containsEntry("tenantId", TENANT);
+        assertThat(auditActionFor((String) created.getBody().get("id")))
+                .isEqualTo("alice:t1:webhook.subscribe");
 
         ResponseEntity<List> listed = alice().get().uri("/webhooks").retrieve().toEntity(List.class);
         assertThat((List<Map<String, Object>>) listed.getBody()).singleElement()
@@ -475,7 +549,21 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
                     assertThat(s).containsEntry("active", true);
                     assertThat(s).doesNotContainKey("secret");
                     assertThat(s).doesNotContainKey("secretHash");
+                    assertThat((List<Map<String, Object>>) s.get("availableActions"))
+                            .extracting(a -> a.get("action"))
+                            .contains("view-webhook-dead-letters", "redeliver-webhook-dead-letters");
                 });
+    }
+
+    private String auditActionFor(String resourceId) {
+        return jdbc().sql("""
+                SELECT ACTOR_ || ':' || TENANT_ID_ || ':' || ACTION_
+                FROM CM_AUDIT_LOG
+                WHERE RESOURCE_TYPE_ = 'WebhookSubscription' AND RESOURCE_ID_ = :id
+                  AND CASE_ID_ IS NULL""")
+                .param("id", resourceId)
+                .query(String.class)
+                .single();
     }
 
     @Test
@@ -484,16 +572,18 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         createCase("first");
         createCase("second");
 
-        ResponseEntity<List> firstPage = alice().get().uri("/events?after=0&limit=1")
-                .retrieve().toEntity(List.class);
+        ResponseEntity<Map> firstPage = alice().get().uri("/events?after=0&limit=1")
+                .retrieve().toEntity(Map.class);
         assertThat(firstPage.getStatusCode().value()).isEqualTo(200);
-        assertThat((List<?>) firstPage.getBody()).hasSize(1);
+        List<Map<String, Object>> firstItems = (List<Map<String, Object>>) firstPage.getBody().get("items");
+        assertThat(firstItems).hasSize(1);
+        assertThat(firstPage.getBody().get("nextCursor")).isNotNull();
 
-        long cursor = ((Number) ((Map<String, Object>) firstPage.getBody().get(0)).get("cursor")).longValue();
-        ResponseEntity<List> secondPage = alice().get()
+        long cursor = ((Number) firstItems.get(0).get("cursor")).longValue();
+        ResponseEntity<Map> secondPage = alice().get()
                 .uri("/events?after={cursor}&limit=1", cursor)
-                .retrieve().toEntity(List.class);
-        assertThat((List<Map<String, Object>>) secondPage.getBody()).singleElement()
+                .retrieve().toEntity(Map.class);
+        assertThat((List<Map<String, Object>>) secondPage.getBody().get("items")).singleElement()
                 .satisfies(e -> assertThat(((Number) e.get("cursor")).longValue()).isGreaterThan(cursor));
     }
 

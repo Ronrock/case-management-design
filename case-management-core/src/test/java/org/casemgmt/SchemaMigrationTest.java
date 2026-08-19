@@ -11,12 +11,12 @@ class SchemaMigrationTest extends OracleTestBase {
     // extending class automatically (see its class-level @BeforeEach/@AfterAll).
 
     @Test
-    void createsAll25TablesFromTheDesignDdl() {
+    void createsAllDesignAndPocInfrastructureTables() {
         Integer tables = jdbc().sql("SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME LIKE 'CM!_%' ESCAPE '!'")
                 .query(Integer.class).single();
-        // 25 from db-design.sql + CM_ENGINE_COMMAND from the PoC changeset,
-        // minus none. DATABASECHANGELOG* do not match the CM_ prefix.
-        assertThat(tables).isEqualTo(26);
+        // 25 from db-design.sql + CM_ENGINE_COMMAND + CM_EVENT_APPEND_LOCK from PoC changesets.
+        // DATABASECHANGELOG* do not match the CM_ prefix.
+        assertThat(tables).isEqualTo(27);
     }
 
     @Test
@@ -39,5 +39,17 @@ class SchemaMigrationTest extends OracleTestBase {
                 WHERE TABLE_NAME = 'CM_TASK' AND COLUMN_NAME = 'ENGINE_SYNC_'""")
                 .query(Integer.class).single();
         assertThat(count).isEqualTo(1);
+    }
+
+    @Test
+    void webhookRetryDefaultMatchesTheRuntimeBackoffLadder() {
+        String defaultValue = jdbc().sql("""
+                SELECT DATA_DEFAULT
+                FROM USER_TAB_COLUMNS
+                WHERE TABLE_NAME = 'CM_WEBHOOK_SUB' AND COLUMN_NAME = 'MAX_RETRIES_'""")
+            .query(String.class)
+            .single();
+
+        assertThat(defaultValue.trim()).isEqualTo("5");
     }
 }

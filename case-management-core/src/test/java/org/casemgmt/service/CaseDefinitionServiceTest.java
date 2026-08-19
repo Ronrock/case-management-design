@@ -2,11 +2,15 @@ package org.casemgmt.service;
 
 import org.casemgmt.OracleTestBase;
 import org.casemgmt.domain.*;
+import org.casemgmt.error.InvalidCaseDefinitionException;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DuplicateKeyException;
 
+import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -59,10 +63,11 @@ class CaseDefinitionServiceTest extends OracleTestBase {
     }
 
     @Test
-    void servesFormSchemasByKey() {
+    void servesFormSchemasByKeyAndTenant() {
         service.deploy(json, "alice", "t1");
 
-        var schema = new CaseDefinitionRepository(dataSource()).formSchema("widget-review", "reviewForm");
+        var schema = new CaseDefinitionRepository(dataSource())
+                .formSchema("widget-review", "reviewForm", "t1");
 
         assertThat(schema).isPresent();
         assertThat(schema.get()).containsKey("properties");
@@ -98,12 +103,12 @@ class CaseDefinitionServiceTest extends OracleTestBase {
 
     @Test
     void rejectsADefinitionWhosePlanItemNamesAnUnknownParentStageKey() {
-        String badJson = json.replace("\"defKey\": \"intake\"", "\"defKey\": \"intake-renamed\"");
+        String badJson = json.replace("\"defKey\": \"setupStage\"", "\"defKey\": \"setupStageRenamed\"");
 
         assertThatThrownBy(() -> service.deploy(badJson, "alice", "t1"))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("review")
-                .hasMessageContaining("intake");
+                .hasMessageContaining("setupStage");
     }
 
     @Test
@@ -115,12 +120,69 @@ class CaseDefinitionServiceTest extends OracleTestBase {
         String badJson = json.replace("\"defKey\": \"reviewed\"", "\"defKey\": \"review\"");
 
         assertThatThrownBy(() -> service.deploy(badJson, "alice", "t1"))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("duplicate")
                 .hasMessageContaining("review");
 
         // And nothing was written: no CM_CASE_DEF row for this key at all.
         var repo = new CaseDefinitionRepository(dataSource());
         assertThat(repo.findLatest("widget-review", "t1")).isEmpty();
+    }
+
+    @Test
+    void rejectsCandidateGroupsThatReuseCaseRoleNames() {
+        String badJson = json.replace("\"candidateGroups\": [\"reviewers\"]",
+                "\"candidateGroups\": [\"owner\"]");
+
+        assertThatThrownBy(() -> service.deploy(badJson, "alice", "t1"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("candidateGroup")
+                .hasMessageContaining("owner")
+                .hasMessageContaining("role");
+    }
+
+    @Test
+    void rejectsCriteriaThatReferenceUnknownPlanItemDefKeys() {
+        String badJson = json.replace("items.review.state", "items.reveiw.state");
+
+        assertThatThrownBy(() -> service.deploy(badJson, "alice", "t1"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("entryCriteria")
+                .hasMessageContaining("reveiw");
+    }
+
+    @Test
+    void retriesVersionAllocationWhenAConcurrentDeployWinsTheInsertRace() {
+        CaseDefinitionService racing = new CaseDefinitionService(new OneDuplicateThenInsertRepository(dataSource()));
+
+        CaseDefinition deployed = racing.deploy(json, "alice", "t1");
+
+        assertThat(deployed.versionNo()).isEqualTo(2);
+        assertThat(deployed.id()).isEqualTo("t1:widget-review:2");
+        CaseDefinition latest = new CaseDefinitionRepository(dataSource())
+                .findLatest("widget-review", "t1").orElseThrow();
+        assertThat(latest.versionNo()).isEqualTo(2);
+    }
+
+    private static final class OneDuplicateThenInsertRepository extends CaseDefinitionRepository {
+        private final AtomicInteger nextVersionCalls = new AtomicInteger();
+        private final AtomicInteger insertCalls = new AtomicInteger();
+
+        private OneDuplicateThenInsertRepository(DataSource dataSource) {
+            super(dataSource);
+        }
+
+        @Override
+        public int nextVersion(String key, String tenantId) {
+            return nextVersionCalls.incrementAndGet();
+        }
+
+        @Override
+        public void insert(CaseDefinition d) {
+            if (insertCalls.incrementAndGet() == 1) {
+                throw new DuplicateKeyException("simulated concurrent deploy");
+            }
+            super.insert(d);
+        }
     }
 }

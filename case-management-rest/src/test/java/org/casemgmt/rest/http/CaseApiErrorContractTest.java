@@ -392,6 +392,24 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
                 .containsKey("detail");
     }
 
+    @Test
+    void aMalformedCaseDefinitionIsRejectedAtDeployTimeAsAClientError() {
+        ResponseEntity<Map> response = alice().post().uri("/case-definitions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body("""
+                        {"key":"bad-criteria","name":"Bad Criteria","tenantId":"%s",
+                         "planItems":[
+                           {"defKey":"done","type":"MILESTONE","name":"Done",
+                            "entryCriteria":["${items.missing.state == 'COMPLETED'}"],
+                            "sortOrder":10}]}""".formatted(TENANT))
+                .retrieve().toEntity(Map.class);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        assertThat(response.getBody())
+                .containsEntry("code", "case-definition-invalid")
+                .containsEntry("caseDefinitionKey", "bad-criteria");
+    }
+
     /**
      * Final whole-branch review, Minor: the 500 {@code model-error} path copied
      * {@code e.getMessage()} straight into the client-visible {@code detail}. Exception messages

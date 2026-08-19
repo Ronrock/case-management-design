@@ -107,6 +107,11 @@ class CaseTaskServiceTest extends OracleTestBase {
         assertThat(completed.outcome()).isEqualTo("approve");
         assertThat(new PlanItemRepository(jdbc()).require(completed.planItemId()).state())
                 .isEqualTo(PlanItemState.COMPLETED);
+        assertThat(gateway.completedTasks).singleElement()
+                .satisfies(call -> {
+                    assertThat(call.engineTaskId()).isEqualTo(claimed.engineTaskId());
+                    assertThat(call.variables()).containsEntry("outcome", "approve");
+                });
     }
 
     @Test
@@ -152,11 +157,11 @@ class CaseTaskServiceTest extends OracleTestBase {
      * Final whole-branch review, Important 1, half one: <b>version drift</b>.
      *
      * <p>{@code complete} used to resolve the form schema through
-     * {@code CaseDefinitionRepository.formSchema(caseDefKey, formKey)}, which picks the highest
-     * {@code VERSION_NO_} row for the key at the moment of the call. So deploying v2 with a new
-     * {@code required} field silently re-validated every ALREADY-RUNNING v1 case's task
-     * completion against v2 — the exact failure versioned case definitions exist to prevent.
-     * The case row pins its definition in {@code CASE_DEF_ID_}; the fix resolves through it.
+     * the latest form-schema lookup for the key, which picks the highest {@code VERSION_NO_}
+     * row at the moment of the call. So deploying v2 with a new {@code required} field silently
+     * re-validated every ALREADY-RUNNING v1 case's task completion against v2 — the exact
+     * failure versioned case definitions exist to prevent. The case row pins its definition in
+     * {@code CASE_DEF_ID_}; the fix resolves through it.
      *
      * <p>Attribution, not just outcome: the v2 schema requires a field name that appears
      * NOWHERE in the payload or in v1, so the only way this completion can fail on the form

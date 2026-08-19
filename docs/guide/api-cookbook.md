@@ -154,10 +154,9 @@ whether your decision still holds.
 - Same key + different body → `409 idempotency-conflict`.
 - Keys are scoped per caller, so two users choosing `"key-1"` don't collide.
 
-> An in-progress key is reclaimable after 5 minutes so a crashed caller can't wedge it forever. The
-> trade-off: an operation running longer than that *can* be reclaimed and executed twice
-> ([issue #5](https://github.com/Ronrock/case-management-design/issues/5)). Keep guarded operations
-> short.
+An unfinished key returns `409 idempotency-conflict` to duplicates instead of letting a retry
+execute the work again. Client-side validation failures release their own claim; unknown server
+failures remain claimed until operational recovery or retention cleanup.
 
 ---
 

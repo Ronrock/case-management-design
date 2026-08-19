@@ -25,7 +25,4 @@ public record CaseEvent(String id, String source, String type, String subject,
         return envelope;
     }
 
-    public CaseEvent withType(String fullType) {
-        return new CaseEvent(id, source, fullType, subject, tenantId, time, data);
-    }
 }

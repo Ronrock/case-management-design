@@ -5,9 +5,14 @@ import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.sla.SlaRecord;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
+import java.util.Collection;
+import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
 
 /** Persistence for {@code CM_BUSINESS_CALENDAR}, {@code CM_SLA_POLICY}, {@code CM_SLA_TARGET}
  * and {@code CM_SLA_RECORD} (spec §7). Policy/target/calendar writers here are test-and-PoC-seeding
@@ -15,8 +20,10 @@ import java.util.Map;
 public class SlaRepository {
 
     public record TargetRow(String id, String policyId, String targetKey, String name,
-                            String durationIso, String warningIso, List<String> pausedStates,
+                            String durationIso, String warningIso, List<String> pauseReasons,
                             List<String> breachActions) {}
+
+    public record ClaimedRecord(SlaRecord record, String claimToken) {}
 
     private static final String RECORD_COLUMNS = """
             ID_, CASE_ID_, TARGET_ID_, STATUS_, STARTED_AT_, DUE_AT_, WARN_AT_, PAUSED_AT_,
@@ -25,6 +32,8 @@ public class SlaRepository {
     private static final String TARGET_COLUMNS = """
             ID_, POLICY_ID_, TARGET_KEY_, NAME_, DURATION_ISO_, WARNING_ISO_,
             PAUSED_STATES_JSON_, BREACH_ACTIONS_JSON_""";
+
+    private static final int MAX_TARGET_LOOKUP_IN_LIST = 500;
 
     private final JdbcClient jdbc;
 
@@ -45,14 +54,14 @@ public class SlaRepository {
 
     public void insertTarget(String id, String policyId, String targetKey, String name,
                              String durationIso, String warningIso,
-                             List<String> pausedStates, List<String> breachActions) {
+                             List<String> pauseReasons, List<String> breachActions) {
         jdbc.sql("""
                 INSERT INTO CM_SLA_TARGET (ID_, POLICY_ID_, TARGET_KEY_, NAME_, DURATION_ISO_,
                     WARNING_ISO_, PAUSED_STATES_JSON_, BREACH_ACTIONS_JSON_)
                 VALUES (:id, :policyId, :key, :name, :duration, :warning, :paused, :actions)""")
             .param("id", id).param("policyId", policyId).param("key", targetKey).param("name", name)
             .param("duration", durationIso).param("warning", warningIso)
-            .param("paused", JsonCodec.toJson(pausedStates))
+            .param("paused", JsonCodec.toJson(pauseReasons))
             .param("actions", JsonCodec.toJson(breachActions))
             .update();
     }
@@ -78,14 +87,36 @@ public class SlaRepository {
     /**
      * Single-target lookup by id — added for pause/resume/sweep (Task 21 fix round 1): those
      * only know a {@code CM_SLA_RECORD}'s {@code TARGET_ID_}, not its policy, and need the
-     * target's own {@code PAUSED_STATES_JSON_}/{@code BREACH_ACTIONS_JSON_} to make {@code
-     * SlaService.pause}'s reason and {@code SlaSweeper}'s breach-event emission actually mean
-     * something (review findings S3) instead of being read from the database and never consulted.
+     * target's own legacy {@code PAUSED_STATES_JSON_} column (interpreted as pause reasons) and
+     * {@code BREACH_ACTIONS_JSON_} to make {@code SlaService.pause}'s reason and
+     * {@code SlaSweeper}'s breach-event emission actually mean something (review findings S3)
+     * instead of being read from the database and never consulted.
      */
     public TargetRow target(String id) {
         return jdbc.sql("SELECT " + TARGET_COLUMNS + " FROM CM_SLA_TARGET WHERE ID_ = :id")
                 .param("id", id).query(SlaRepository::mapTarget).optional()
                 .orElseThrow(() -> new NotFoundException("SlaTarget", id));
+    }
+
+    /**
+     * Batch target lookup for the SLA sweeper. A sweep can claim many records for the same
+     * target, and fetching the target row per record turns every backlog into an avoidable N+1.
+     */
+    public Map<String, TargetRow> targetsById(Collection<String> ids) {
+        List<String> all = ids.stream().filter(Objects::nonNull).distinct().toList();
+        if (all.isEmpty()) {
+            return Map.of();
+        }
+
+        Map<String, TargetRow> found = new LinkedHashMap<>();
+        for (int from = 0; from < all.size(); from += MAX_TARGET_LOOKUP_IN_LIST) {
+            jdbc.sql("SELECT " + TARGET_COLUMNS + " FROM CM_SLA_TARGET WHERE ID_ IN (:ids)")
+                    .param("ids", all.subList(from, Math.min(from + MAX_TARGET_LOOKUP_IN_LIST, all.size())))
+                    .query(SlaRepository::mapTarget)
+                    .list()
+                    .forEach(t -> found.put(t.id(), t));
+        }
+        return found;
     }
 
     private static TargetRow mapTarget(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
@@ -99,11 +130,14 @@ public class SlaRepository {
     public void insertRecord(SlaRecord r) {
         jdbc.sql("""
                 INSERT INTO CM_SLA_RECORD (ID_, CASE_ID_, TARGET_ID_, STATUS_, STARTED_AT_, DUE_AT_,
-                    WARN_AT_, PAUSED_TOTAL_SECS_, VERSION_)
-                VALUES (:id, :caseId, :targetId, :status, :startedAt, :dueAt, :warnAt, 0, 0)""")
+                    WARN_AT_, PAUSED_AT_, PAUSED_REASON_, PAUSED_TOTAL_SECS_, VERSION_)
+                VALUES (:id, :caseId, :targetId, :status, :startedAt, :dueAt, :warnAt,
+                    :pausedAt, :reason, :pausedTotal, :version)""")
             .param("id", r.id()).param("caseId", r.caseId()).param("targetId", r.targetId())
             .param("status", r.status()).param("startedAt", r.startedAt())
             .param("dueAt", r.dueAt()).param("warnAt", r.warnAt())
+            .param("pausedAt", r.pausedAt()).param("reason", r.pausedReason())
+            .param("pausedTotal", r.pausedTotalSeconds()).param("version", r.version())
             .update();
     }
 
@@ -136,8 +170,8 @@ public class SlaRepository {
                 UPDATE CM_SLA_RECORD SET STATUS_ = :status, DUE_AT_ = :dueAt, WARN_AT_ = :warnAt,
                     PAUSED_AT_ = :pausedAt, PAUSED_REASON_ = :reason,
                     PAUSED_TOTAL_SECS_ = :pausedTotal,
-                    MET_AT_ = CASE WHEN :status = 'MET' THEN SYSTIMESTAMP ELSE MET_AT_ END,
                     BREACHED_AT_ = CASE WHEN :status = 'BREACHED' THEN SYSTIMESTAMP ELSE BREACHED_AT_ END,
+                    CLAIM_TOKEN_ = NULL, CLAIMED_AT_ = NULL,
                     VERSION_ = VERSION_ + 1
                 WHERE ID_ = :id AND VERSION_ = :expected""")
             .param("status", r.status()).param("dueAt", r.dueAt()).param("warnAt", r.warnAt())
@@ -150,8 +184,28 @@ public class SlaRepository {
                 r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), expectedVersion + 1);
     }
 
+    public SlaRecord updateClaimed(SlaRecord r, long expectedVersion, String claimToken) {
+        int rows = jdbc.sql("""
+                UPDATE CM_SLA_RECORD SET STATUS_ = :status, DUE_AT_ = :dueAt, WARN_AT_ = :warnAt,
+                    PAUSED_AT_ = :pausedAt, PAUSED_REASON_ = :reason,
+                    PAUSED_TOTAL_SECS_ = :pausedTotal,
+                    BREACHED_AT_ = CASE WHEN :status = 'BREACHED' THEN SYSTIMESTAMP ELSE BREACHED_AT_ END,
+                    CLAIM_TOKEN_ = NULL, CLAIMED_AT_ = NULL,
+                    VERSION_ = VERSION_ + 1
+                WHERE ID_ = :id AND VERSION_ = :expected AND CLAIM_TOKEN_ = :claimToken""")
+            .param("status", r.status()).param("dueAt", r.dueAt()).param("warnAt", r.warnAt())
+            .param("pausedAt", r.pausedAt()).param("reason", r.pausedReason())
+            .param("pausedTotal", r.pausedTotalSeconds())
+            .param("id", r.id()).param("expected", expectedVersion)
+            .param("claimToken", claimToken)
+            .update();
+        if (rows == 0) throw new OptimisticLockException("SlaRecord", r.id(), expectedVersion);
+        return new SlaRecord(r.id(), r.caseId(), r.targetId(), r.status(), r.startedAt(), r.dueAt(),
+                r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), expectedVersion + 1);
+    }
+
     /**
-     * Largest work list one {@link #dueRecords} call will hand back — the bounded-batch
+     * Largest work list one {@link #claimDueRecords} call will hand back — the bounded-batch
      * invariant {@link WebhookRepository#MAX_CLAIM_BATCH} already establishes for the webhook
      * outbox, applied here for the same reason (final whole-branch review, Important 8).
      *
@@ -166,15 +220,53 @@ public class SlaRepository {
      * <p>200 rather than the webhook outbox's 20 because the two batches cost entirely different
      * things: a webhook delivery makes an outbound HTTP call bounded by a claim lease, while one
      * SLA record is a handful of local statements. The bound that matters here is transaction
-     * duration and lock-hold time, not a lease. Leftover records are simply picked up by the next
-     * sweep — the query is a "what is due" predicate, not a claim, so nothing is lost by
-     * returning a prefix of it.
+     * duration and lock-hold time. Leftover records are simply picked up by the next sweep.
      */
     public static final int MAX_SWEEP_BATCH = 200;
 
+    public static final Duration CLAIM_LEASE = Duration.ofMinutes(5);
+
+    public List<ClaimedRecord> claimDueRecords(OffsetDateTime now) {
+        String token = UUID.randomUUID().toString();
+        OffsetDateTime staleBefore = now.minus(CLAIM_LEASE);
+
+        int claimed = jdbc.sql("""
+                UPDATE CM_SLA_RECORD
+                SET CLAIM_TOKEN_ = :token, CLAIMED_AT_ = SYSTIMESTAMP
+                WHERE STATUS_ = 'RUNNING'
+                  AND (DUE_AT_ <= :now OR WARN_AT_ <= :now)
+                  AND (CLAIM_TOKEN_ IS NULL OR CLAIMED_AT_ <= :staleBefore)
+                  AND ID_ IN (
+                      SELECT ID_ FROM (
+                          SELECT ID_ FROM CM_SLA_RECORD
+                          WHERE STATUS_ = 'RUNNING'
+                            AND (DUE_AT_ <= :now OR WARN_AT_ <= :now)
+                            AND (CLAIM_TOKEN_ IS NULL OR CLAIMED_AT_ <= :staleBefore)
+                          ORDER BY ID_
+                      )
+                      WHERE ROWNUM <= :batch
+                  )""")
+            .param("token", token)
+            .param("now", now)
+            .param("staleBefore", staleBefore)
+            .param("batch", MAX_SWEEP_BATCH)
+            .update();
+
+        if (claimed == 0) {
+            return List.of();
+        }
+
+        return jdbc.sql("SELECT " + RECORD_COLUMNS + ", CLAIM_TOKEN_ FROM CM_SLA_RECORD "
+                + "WHERE CLAIM_TOKEN_ = :token ORDER BY ID_")
+            .param("token", token)
+            .query((rs, n) -> new ClaimedRecord(mapRecord(rs, n), rs.getString("CLAIM_TOKEN_")))
+            .list();
+    }
+
     /**
-     * Running clocks past their warning or breach threshold — the sweeper's work list, oldest
-     * first and bounded to {@link #MAX_SWEEP_BATCH}.
+     * Running clocks past their warning or breach threshold, oldest first and bounded to
+     * {@link #MAX_SWEEP_BATCH}. This is an unclaimed diagnostic/test lookup; production sweeping
+     * uses {@link #claimDueRecords} so multiple application instances do not process the same row.
      *
      * <p><b>{@code ORDER BY ID_} is not cosmetic</b> (final whole-branch review, Important 8).
      * Without it two concurrent sweepers can walk the same due records in different orders and

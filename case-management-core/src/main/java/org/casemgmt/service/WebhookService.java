@@ -3,19 +3,21 @@ package org.casemgmt.service;
 import org.casemgmt.domain.CaseIds;
 import org.casemgmt.engine.EngineCommand;
 import org.casemgmt.event.HmacSigner;
+import org.casemgmt.event.WebhookSecretStore;
+import org.casemgmt.repo.AuditRepository;
 import org.casemgmt.repo.WebhookRepository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.security.SecureRandom;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 
 /**
- * Creates and lists webhook subscriptions (spec §6.1). {@code CM_WEBHOOK_SUB.SECRET_HASH_} is a
- * one-way hash (see {@link HmacSigner#hash}); the plaintext secret this class generates is
- * returned to the caller exactly once, in {@link CreatedSubscription}, and is never written to
- * the database — see {@link org.casemgmt.event.WebhookDispatcher}'s Javadoc for how (and how
- * incompletely, for this PoC) the plaintext gets from here to the dispatcher that needs it again.
+ * Creates and lists webhook subscriptions (spec §6.1). {@code CM_WEBHOOK_SUB.SECRET_HASH_} stays
+ * a one-way hash for verification/audit, while the signing material the dispatcher needs after a
+ * restart is persisted through {@link WebhookSecretStore}. The plaintext is returned to the API
+ * caller exactly once.
  */
 public class WebhookService {
 
@@ -23,10 +25,14 @@ public class WebhookService {
     public record CreatedSubscription(String id, String url, List<String> eventTypes, String secret) {}
 
     private final WebhookRepository webhooks;
+    private final WebhookSecretStore secrets;
+    private final AuditRepository audit;
     private final SecureRandom random = new SecureRandom();
 
-    public WebhookService(WebhookRepository webhooks) {
+    public WebhookService(WebhookRepository webhooks, WebhookSecretStore secrets, AuditRepository audit) {
         this.webhooks = webhooks;
+        this.secrets = secrets;
+        this.audit = audit;
     }
 
     /**
@@ -45,6 +51,10 @@ public class WebhookService {
 
         String id = CaseIds.newId();
         webhooks.insert(id, tenantId, url, eventTypes, HmacSigner.hash(secret), DEFAULT_MAX_RETRIES);
+        secrets.save(id, secret);
+        audit.record(null, tenantId, actor.userId(), "webhook.subscribe", "WebhookSubscription",
+                id, null, Map.of("url", url, "eventTypes", eventTypes,
+                        "maxRetries", DEFAULT_MAX_RETRIES));
         return new CreatedSubscription(id, url, eventTypes, secret);
     }
 
@@ -61,6 +71,10 @@ public class WebhookService {
         return webhooks.allForTenant(tenantId);
     }
 
+    public List<WebhookRepository.Subscription> ownedByTenant(String tenantId) {
+        return webhooks.ownedByTenant(tenantId);
+    }
+
     /**
      * The dead-letter queue for one subscription. Until Task 27 this was reachable only from
      * tests — see {@code WebhookDispatcher}'s Javadoc on what a restart costs, and why a
@@ -73,5 +87,16 @@ public class WebhookService {
      */
     public List<WebhookRepository.DeadLetter> deadLetters(String webhookId) {
         return webhooks.deadLetters(webhookId);
+    }
+
+    public List<WebhookRepository.DeadLetter> deadLetters(String webhookId, int page, int pageSize) {
+        int effectiveSize = Math.clamp(pageSize, 1, WebhookRepository.MAX_DEAD_LETTER_BATCH);
+        int effectivePage = Math.max(page, 0);
+        return webhooks.deadLetters(webhookId, effectivePage * effectiveSize, effectiveSize);
+    }
+
+    @Transactional
+    public int redeliverDeadLetters(String webhookId) {
+        return webhooks.redeliverDeadLetters(webhookId);
     }
 }

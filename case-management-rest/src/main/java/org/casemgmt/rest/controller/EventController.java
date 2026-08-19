@@ -8,6 +8,7 @@ import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.dto.Dtos.WebhookRequest;
 import org.casemgmt.rest.policy.ActionPolicy;
+import org.casemgmt.rest.policy.AvailableAction;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.WebhookService;
 import org.springframework.http.HttpStatus;
@@ -43,8 +44,8 @@ import java.util.stream.Collectors;
  * builds them, with one extension property added: {@code cursor}, the row's {@code SEQ_}, which
  * is what a consumer feeds back as {@code ?after=} to resume. Note the limitation
  * {@code EventRepository.after} documents and this endpoint inherits verbatim: {@code SEQ_} is
- * assigned at insert, not at commit, so a concurrent writer can leave a gap that a cursor walks
- * straight past. That is a known PoC finding, deliberately surfaced rather than papered over.
+ * is assigned under the append-order lock documented by {@code EventRepository.after}, so the
+ * cursor can be used for pull recovery without skipping a lower sequence that commits later.
  */
 @RestController
 @RequestMapping("/case-api/v2")
@@ -73,13 +74,19 @@ public class EventController {
     }
 
     @GetMapping("/events")
-    public List<Map<String, Object>> allEvents(@RequestParam(defaultValue = "0") long after,
-                                               @RequestParam(defaultValue = "100") int limit,
-                                               Authentication authentication) {
+    public Map<String, Object> allEvents(@RequestParam(defaultValue = "0") long after,
+                                         @RequestParam(defaultValue = "100") int limit,
+                                         Authentication authentication) {
         String tenantId = callers.tenantId(callers.actor(authentication));
-        return events.afterForTenant(tenantId, after, clamp(limit)).stream()
+        List<Map<String, Object>> items = events.afterForTenant(tenantId, after, clamp(limit)).stream()
                 .map(e -> withCursor(e.event().toCloudEvent(), e.seq()))
                 .toList();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("items", items);
+        body.put("nextCursor", items.isEmpty()
+                ? String.valueOf(after)
+                : String.valueOf(items.get(items.size() - 1).get("cursor")));
+        return body;
     }
 
     @GetMapping("/cases/{caseId}/events")
@@ -98,8 +105,12 @@ public class EventController {
 
     @GetMapping("/webhooks")
     public List<Map<String, Object>> listWebhooks(Authentication authentication) {
-        String tenantId = callers.tenantId(callers.actor(authentication));
-        return webhooks.list(tenantId).stream().map(EventController::subscriptionBody).toList();
+        Actor actor = callers.actor(authentication);
+        String tenantId = callers.tenantId(actor);
+        List<AvailableAction> actions = policy.listForAdministration(callers.groups(actor));
+        return webhooks.list(tenantId).stream()
+                .map(s -> subscriptionBody(s, actions))
+                .toList();
     }
 
     /**
@@ -125,6 +136,7 @@ public class EventController {
         body.put("eventTypes", created.eventTypes());
         // The plaintext secret is returned once and never again — only its HMAC key is stored.
         body.put("secret", created.secret());
+        body.put("availableActions", policy.listForAdministration(callers.groups(actor)));
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
 
@@ -148,17 +160,13 @@ public class EventController {
      */
     @GetMapping("/webhooks/{webhookId}/dead-letters")
     public List<Map<String, Object>> deadLetters(@PathVariable String webhookId,
+                                                 @RequestParam(defaultValue = "0") int page,
+                                                 @RequestParam(defaultValue = "" + WebhookRepository.MAX_DEAD_LETTER_BATCH)
+                                                 int pageSize,
                                                  Authentication authentication) {
-        Actor actor = callers.actor(authentication);
-        policy.assertMayAdminister(callers.groups(actor), "subscribe-webhook");
-        String tenantId = callers.tenantId(actor);
+        requireOwnWebhook(webhookId, authentication, "view-webhook-dead-letters");
 
-        webhooks.list(tenantId).stream()
-                .filter(s -> s.id().equals(webhookId))
-                .findFirst()
-                .orElseThrow(() -> new NotFoundException("WebhookSubscription", webhookId));
-
-        List<WebhookRepository.DeadLetter> dead = webhooks.deadLetters(webhookId);
+        List<WebhookRepository.DeadLetter> dead = webhooks.deadLetters(webhookId, page, pageSize);
         // The contract embeds each undeliverable event's full CloudEvent, so the events are
         // resolved here rather than in WebhookService: which REPRESENTATION of an event to embed
         // is a response-shaping decision, and this class already owns the EventRepository for the
@@ -169,6 +177,25 @@ public class EventController {
                         .collect(Collectors.toMap(EventRepository.StoredEvent::seq, e -> e));
 
         return dead.stream().map(d -> deadLetterBody(d, bySeq.get(d.eventSeq()))).toList();
+    }
+
+    @PostMapping("/webhooks/{webhookId}/dead-letters/redeliver")
+    public ResponseEntity<Void> redeliverDeadLetters(@PathVariable String webhookId,
+                                                     Authentication authentication) {
+        requireOwnWebhook(webhookId, authentication, "redeliver-webhook-dead-letters");
+        webhooks.redeliverDeadLetters(webhookId);
+        return ResponseEntity.accepted().build();
+    }
+
+    private void requireOwnWebhook(String webhookId, Authentication authentication, String action) {
+        Actor actor = callers.actor(authentication);
+        policy.assertMayAdminister(callers.groups(actor), action);
+        String tenantId = callers.tenantId(actor);
+
+        webhooks.ownedByTenant(tenantId).stream()
+                .filter(s -> s.id().equals(webhookId))
+                .findFirst()
+                .orElseThrow(() -> new NotFoundException("WebhookSubscription", webhookId));
     }
 
     /**
@@ -225,13 +252,15 @@ public class EventController {
         return Math.clamp(limit, 1, MAX_LIMIT);
     }
 
-    private static Map<String, Object> subscriptionBody(WebhookRepository.Subscription s) {
+    private static Map<String, Object> subscriptionBody(WebhookRepository.Subscription s,
+                                                        List<AvailableAction> availableActions) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", s.id());
         body.put("tenantId", s.tenantId());
         body.put("url", s.url());
         body.put("eventTypes", s.eventTypes());
         body.put("active", s.active());
+        body.put("availableActions", availableActions);
         return body;
     }
 

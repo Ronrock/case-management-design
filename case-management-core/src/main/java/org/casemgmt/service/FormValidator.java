@@ -3,6 +3,8 @@ package org.casemgmt.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.JsonMetaSchema;
+import com.networknt.schema.NonValidationKeyword;
 import com.networknt.schema.PathType;
 import com.networknt.schema.SchemaValidatorsConfig;
 import com.networknt.schema.SpecVersion;
@@ -26,8 +28,12 @@ public class FormValidator {
 
     private final com.fasterxml.jackson.databind.ObjectMapper mapper =
             new com.fasterxml.jackson.databind.ObjectMapper();
+    private static final JsonMetaSchema FORM_META_SCHEMA = JsonMetaSchema.builder(JsonMetaSchema.getV202012())
+            .keyword(new NonValidationKeyword("ui:widget"))
+            .build();
     private final JsonSchemaFactory factory =
-            JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
+            JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012,
+                    builder -> builder.addMetaSchema(FORM_META_SCHEMA));
 
     /**
      * Forces RFC 6901 JSON Pointer output ({@code "/outcome"}) for {@code

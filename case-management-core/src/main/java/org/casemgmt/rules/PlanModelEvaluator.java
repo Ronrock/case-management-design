@@ -39,13 +39,15 @@ public class PlanModelEvaluator {
     public List<Transition> evaluate(CaseSnapshot snapshot) {
         List<Transition> all = new ArrayList<>();
         CaseSnapshot current = snapshot;
+        Set<String> stagesActivatedPreviousRound = Set.of();
 
         for (int iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
-            List<Transition> round = singlePass(current);
+            List<Transition> round = singlePass(current, stagesActivatedPreviousRound);
             if (round.isEmpty()) {
                 return all;
             }
             all.addAll(round);
+            stagesActivatedPreviousRound = stagesActivatedBy(current, round);
             current = apply(current, round);
         }
         throw new PlanModelLoopException(snapshot.caseInstance().id(), MAX_ITERATIONS);
@@ -56,6 +58,10 @@ public class PlanModelEvaluator {
     // needing a model that genuinely never settles — with today's monotone state machine and
     // fixed item set, none does.
     List<Transition> singlePass(CaseSnapshot snapshot) {
+        return singlePass(snapshot, Set.of());
+    }
+
+    List<Transition> singlePass(CaseSnapshot snapshot, Set<String> stagesActivatedPreviousRound) {
         List<Transition> transitions = new ArrayList<>();
         EvaluationContext context = contextOf(snapshot);
 
@@ -103,7 +109,12 @@ public class PlanModelEvaluator {
                 .filter(i -> i.state() == PlanItemState.ACTIVE)
                 .filter(i -> snapshot.definitionOf(i).type() == PlanItemType.STAGE)
                 .filter(i -> !terminatingStageIds.contains(i.id()))
+                .filter(i -> !stagesActivatedPreviousRound.contains(i.id()))
                 .filter(i -> stageCompletion.canComplete(snapshot, i))
+                // An AVAILABLE child whose entry criteria are true is work about to be
+                // admitted, even if those criteria only became true several rounds after the
+                // stage activated. Admission must win over autocomplete in that round.
+                .filter(i -> !hasAdmissibleChild(snapshot, i, context))
                 .toList();
         Set<String> completingStageIds = completingStages.stream()
                 .map(PlanItem::id)
@@ -158,6 +169,28 @@ public class PlanModelEvaluator {
             }
         }
         return transitions;
+    }
+
+    private boolean hasAdmissibleChild(CaseSnapshot snapshot, PlanItem stage,
+                                       EvaluationContext context) {
+        return snapshot.planItems().stream()
+                .filter(child -> stage.id().equals(child.parentStageId()))
+                .filter(child -> child.state() == PlanItemState.AVAILABLE)
+                .map(snapshot::definitionOf)
+                .filter(def -> !def.entryCriteria().isEmpty())
+                .anyMatch(def -> criteria.allMatch(def.entryCriteria(), context));
+    }
+
+    private Set<String> stagesActivatedBy(CaseSnapshot snapshot, List<Transition> transitions) {
+        Map<String, PlanItem> byId = snapshot.planItems().stream()
+                .collect(Collectors.toMap(PlanItem::id, i -> i));
+        return transitions.stream()
+                .filter(t -> t.to() == PlanItemState.ACTIVE)
+                .map(t -> byId.get(t.planItemId()))
+                .filter(Objects::nonNull)
+                .filter(i -> snapshot.definitionOf(i).type() == PlanItemType.STAGE)
+                .map(PlanItem::id)
+                .collect(Collectors.toSet());
     }
 
     private boolean exitCriteriaSatisfied(PlanItemDefinition def, EvaluationContext context) {
