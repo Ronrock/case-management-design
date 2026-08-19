@@ -272,12 +272,12 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
         void failNextPublish() { failPublish = true; }
 
         @Override
-        public long publish(CaseEvent event) {
+        public void publish(CaseEvent event) {
             if (failPublish) {
                 failPublish = false;
                 throw new IllegalStateException("simulated publish failure for '" + event.type() + "'");
             }
-            return super.publish(event);
+            super.publish(event);
         }
 
         @Override

@@ -22,11 +22,14 @@ casemgmt:
     # basic is for the runnable local PoC. Bank deployments should set CASEMGMT_SECURITY_MODE=oidc
     # and configure spring.security.oauth2.resourceserver.jwt.* for issuer/JWKS validation.
     mode: ${CASEMGMT_SECURITY_MODE:basic}
+    engine-integration-principal: ${CASEMGMT_ENGINE_INTEGRATION_PRINCIPAL:admin}
     oidc:
       principal-claim: ${CASEMGMT_SECURITY_PRINCIPAL_CLAIM:sub}
       tenant-claim: ${CASEMGMT_SECURITY_TENANT_CLAIM:tenant}
       groups-claim: ${CASEMGMT_SECURITY_GROUPS_CLAIM:groups}
       worker-permissions-claim: ${CASEMGMT_SECURITY_WORKER_PERMISSIONS_CLAIM:worker_permissions}
+      engine-permissions-claim: ${CASEMGMT_SECURITY_ENGINE_PERMISSIONS_CLAIM:engine_permissions}
+      engine-permission-authority-prefix: "engine:"
 
 operaton:
   bpm:

@@ -148,9 +148,11 @@ states.
 | `casemgmt.engine.remote.connect-timeout-ms` | `5000` | TCP connect bound. |
 | `casemgmt.engine.remote.read-timeout-ms` | `10000` | Bounds a hung engine. |
 | `casemgmt.events.type-prefix` | **none** | Startup fails if unset and webhooks are enabled. |
-| `casemgmt.webhooks.secret-encryption-key` | **none** | Base64 AES key for persisted webhook signing secrets. |
+| `casemgmt.webhooks.secret-encryption-key` | **none** | Base64 AES key required by the default database-backed webhook secret store. A custom `WebhookSecretStore` does not require it. |
 | `casemgmt.webhooks.secret-key-id` | `default` | Key id stored next to encrypted webhook secrets. |
 | `casemgmt.security.mode` | `basic` | Local PoC mode. Use `oidc` for JWT/OIDC bearer-token mode. |
+| `casemgmt.security.engine-integration-principal` | `admin` | Basic-mode integration principal allowed to write to Operaton REST. Ignored in OIDC mode. |
+| `casemgmt.security.oidc.engine-permissions-claim` | `engine_permissions` | Dedicated OIDC claim for engine integration permissions; `api` maps to `engine:api`. |
 | `casemgmt.schedulers.enabled` | `true` | Turns off all background workers. |
 | `casemgmt.schedulers.webhook-interval-ms` | `5000` | Webhook drain. |
 | `casemgmt.schedulers.engine-command-interval-ms` | `5000` | Remote-mode outbox drain. |

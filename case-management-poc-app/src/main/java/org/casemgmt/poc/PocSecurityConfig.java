@@ -63,10 +63,10 @@ public class PocSecurityConfig {
      * gateway's basic-auth credentials ({@code casemgmt.engine.remote.username/password}, sent by
      * {@code RemoteEngineAutoConfiguration.engineRestClient}) were never actually checked by
      * anything. Both {@code /case-api/v2/**} and {@code /engine-rest/**} now require
-     * authentication; writes to {@code /engine-rest/**} are additionally reserved for the engine
-     * integration identity ({@code admin} in the local PoC) or an explicit {@code engine-api}
-     * authority, so ordinary users cannot complete tasks directly in Operaton Tasklist and bypass
-     * the case state machine.
+     * authentication; writes to {@code /engine-rest/**} are additionally reserved for the
+     * configured basic-mode integration identity or {@code engine:api}, which is mapped only from
+     * the dedicated OIDC {@code engine_permissions} claim. User names and ordinary group claims
+     * cannot grant this access.
      */
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http,
@@ -76,11 +76,7 @@ public class PocSecurityConfig {
                     .requestMatchers(HttpMethod.GET, "/engine-rest/**").authenticated()
                     .requestMatchers("/engine-rest/**").access((authentication, context) -> {
                         Authentication current = authentication.get();
-                        boolean allowed = current != null && current.isAuthenticated()
-                                && ("admin".equals(current.getName())
-                                    || current.getAuthorities().stream()
-                                        .anyMatch(a -> "engine-api".equals(a.getAuthority())));
-                        return new AuthorizationDecision(allowed);
+                        return new AuthorizationDecision(canWriteEngine(current, properties));
                     })
                     .requestMatchers("/case-api/v2/**").authenticated()
                     .anyRequest().permitAll());
@@ -93,5 +89,16 @@ public class PocSecurityConfig {
             http.httpBasic(basic -> { });
         }
         return http.build();
+    }
+
+    static boolean canWriteEngine(Authentication current, PocSecurityProperties properties) {
+        if (current == null || !current.isAuthenticated()) {
+            return false;
+        }
+        boolean localIntegration = properties.getMode() == PocSecurityProperties.Mode.basic
+                && properties.getEngineIntegrationPrincipal().equals(current.getName());
+        boolean claimedIntegration = current.getAuthorities().stream()
+                .anyMatch(a -> "engine:api".equals(a.getAuthority()));
+        return localIntegration || claimedIntegration;
     }
 }

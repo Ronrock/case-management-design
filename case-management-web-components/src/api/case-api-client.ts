@@ -20,6 +20,14 @@ export interface TaskSummary {
   assignee?: string;
 }
 
+export interface Page<T> {
+  items: T[];
+  page: number;
+  pageSize: number;
+  totalItems: number;
+  totalPages: number;
+}
+
 export interface CaseApiClientOptions {
   baseUrl: string;
   getAccessToken: () => Promise<string | undefined>;
@@ -33,7 +41,7 @@ export class CaseApiClient {
     return this.get("/case-definitions");
   }
 
-  cases(): Promise<CaseSummary[]> {
+  cases(): Promise<Page<CaseSummary>> {
     return this.get("/cases");
   }
 

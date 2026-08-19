@@ -402,6 +402,44 @@ class AutoConfigurationTest {
         }
     }
 
+    @Configuration(proxyBeanMethods = false)
+    static class CustomWebhookSecretStoreConfiguration {
+        static final WebhookSecretStore STORE = mock(WebhookSecretStore.class);
+
+        @Bean
+        WebhookSecretStore webhookSecretStore() {
+            return STORE;
+        }
+    }
+
+    @Test
+    void customWebhookSecretStoreDoesNotRequireTheDatabaseEncryptionKey() {
+        runner.withUserConfiguration(CustomWebhookSecretStoreConfiguration.class)
+                .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=remote",
+                        "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.webhooks.secret-encryption-key=",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(WebhookSecretStore.class))
+                            .isSameAs(CustomWebhookSecretStoreConfiguration.STORE);
+                });
+    }
+
+    @Test
+    void defaultWebhookSecretStoreFailsClearlyWithoutAnEncryptionKey() {
+        runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=remote",
+                        "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.webhooks.secret-encryption-key=",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().hasMessageContaining("secret-encryption-key"));
+    }
+
     @Test
     void missingEventTypePrefixFailsStartup() {
         runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",

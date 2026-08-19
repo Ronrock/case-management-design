@@ -41,7 +41,7 @@ export class CaseManagementShell extends LitElement {
         client.tasks()
       ]);
       this.user = user;
-      this.cases = cases;
+      this.cases = cases.items;
       this.tasks = tasks;
     } catch (error) {
       this.error = error instanceof Error ? error.message : String(error);

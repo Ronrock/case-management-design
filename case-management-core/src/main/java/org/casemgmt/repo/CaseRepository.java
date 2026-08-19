@@ -8,6 +8,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 
 public class CaseRepository {
@@ -236,7 +237,7 @@ public class CaseRepository {
             params.add(new Object[]{"bk", q.businessKey()});
         }
         if (q.participantUser() != null) {
-            sql.append("""
+            sql.append(" " + """
                     AND EXISTS (
                         SELECT 1 FROM CM_PARTICIPANT p
                         WHERE p.CASE_ID_ = CM_CASE.ID_ AND p.USER_ID_ = :participantUser)""");
@@ -263,21 +264,25 @@ public class CaseRepository {
             params.add(new Object[]{"createdBefore", q.createdBefore()});
         }
         if (q.freeText() != null && !q.freeText().isBlank()) {
-            String needle = q.freeText().toLowerCase();
-            sql.append("""
+            String needle = q.freeText().toLowerCase(Locale.ROOT);
+            sql.append(" " + """
                     AND (
-                        LOWER(TITLE_) LIKE :freeTextLike
-                        OR LOWER(BUSINESS_KEY_) LIKE :freeTextLike
+                        LOWER(TITLE_) LIKE :freeTextLike ESCAPE '~'
+                        OR LOWER(BUSINESS_KEY_) LIKE :freeTextLike ESCAPE '~'
                         OR EXISTS (
                             SELECT 1 FROM CM_COMMENT cm
                             WHERE cm.CASE_ID_ = CM_CASE.ID_
                               AND DBMS_LOB.INSTR(LOWER(cm.TEXT_), :freeTextNeedle) > 0
                         )
                     )""");
-            params.add(new Object[]{"freeTextLike", "%" + needle + "%"});
+            params.add(new Object[]{"freeTextLike", containsLike(needle)});
             params.add(new Object[]{"freeTextNeedle", needle});
         }
         return new Predicate(sql.toString(), params);
+    }
+
+    private static String containsLike(String value) {
+        return "%" + value.replace("~", "~~").replace("%", "~%").replace("_", "~_") + "%";
     }
 
     private static String orderBy(CaseQuery q) {

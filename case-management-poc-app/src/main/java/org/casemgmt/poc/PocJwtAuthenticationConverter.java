@@ -26,6 +26,8 @@ public class PocJwtAuthenticationConverter implements Converter<Jwt, AbstractAut
         addAll(authorities, claimValues(jwt, properties.getGroupsClaim()), "");
         addAll(authorities, claimValues(jwt, properties.getWorkerPermissionsClaim()),
                 nullToEmpty(properties.getWorkerPermissionAuthorityPrefix()));
+        addAll(authorities, claimValues(jwt, properties.getEnginePermissionsClaim()),
+                nullToEmpty(properties.getEnginePermissionAuthorityPrefix()));
 
         String tenant = jwt.getClaimAsString(properties.getTenantClaim());
         if (tenant != null && !tenant.isBlank()) {

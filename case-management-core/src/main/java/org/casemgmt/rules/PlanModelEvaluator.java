@@ -109,11 +109,12 @@ public class PlanModelEvaluator {
                 .filter(i -> i.state() == PlanItemState.ACTIVE)
                 .filter(i -> snapshot.definitionOf(i).type() == PlanItemType.STAGE)
                 .filter(i -> !terminatingStageIds.contains(i.id()))
-                // A stage that entered in the previous round must first give its children one
-                // evaluation round to materialise; otherwise autocomplete sweeps them while the
-                // pre-round snapshot still shows them as AVAILABLE.
                 .filter(i -> !stagesActivatedPreviousRound.contains(i.id()))
                 .filter(i -> stageCompletion.canComplete(snapshot, i))
+                // An AVAILABLE child whose entry criteria are true is work about to be
+                // admitted, even if those criteria only became true several rounds after the
+                // stage activated. Admission must win over autocomplete in that round.
+                .filter(i -> !hasAdmissibleChild(snapshot, i, context))
                 .toList();
         Set<String> completingStageIds = completingStages.stream()
                 .map(PlanItem::id)
@@ -168,6 +169,16 @@ public class PlanModelEvaluator {
             }
         }
         return transitions;
+    }
+
+    private boolean hasAdmissibleChild(CaseSnapshot snapshot, PlanItem stage,
+                                       EvaluationContext context) {
+        return snapshot.planItems().stream()
+                .filter(child -> stage.id().equals(child.parentStageId()))
+                .filter(child -> child.state() == PlanItemState.AVAILABLE)
+                .map(snapshot::definitionOf)
+                .filter(def -> !def.entryCriteria().isEmpty())
+                .anyMatch(def -> criteria.allMatch(def.entryCriteria(), context));
     }
 
     private Set<String> stagesActivatedBy(CaseSnapshot snapshot, List<Transition> transitions) {

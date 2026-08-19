@@ -165,4 +165,13 @@
                            columnName="CASE_ID_"
                            columnDataType="VARCHAR2(140)"/>
   </changeSet>
+
+  <!-- Keep the immutable baseline at its historical default and apply the aligned retry
+       ladder as an explicit upgrade so existing and newly-created databases behave alike. -->
+  <changeSet id="cm-poc-webhook-max-retries-default" author="casemgmt">
+    <addDefaultValue tableName="CM_WEBHOOK_SUB"
+                     columnName="MAX_RETRIES_"
+                     columnDataType="NUMBER(3)"
+                     defaultValueNumeric="5"/>
+  </changeSet>
 </databaseChangeLog>

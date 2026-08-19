@@ -35,12 +35,13 @@ class EventPublisherTest extends OracleTestBase {
 
     @Test
     void appendsEventsWithAMonotonicCursor() {
-        long first = publisher.publish(event("case.created", "eng-a:1"));
-        long second = publisher.publish(event("case.updated", "eng-a:1"));
+        publisher.publish(event("case.created", "eng-a:1"));
+        publisher.publish(event("case.updated", "eng-a:1"));
+        List<EventRepository.StoredEvent> stored = events.after(0, 10);
 
-        assertThat(second).isGreaterThan(first);
-        assertThat(events.after(0, 10)).hasSize(2);
-        assertThat(events.after(first, 10)).hasSize(1);
+        assertThat(stored.get(1).seq()).isGreaterThan(stored.get(0).seq());
+        assertThat(stored).hasSize(2);
+        assertThat(events.after(stored.get(0).seq(), 10)).hasSize(1);
     }
 
     @Test

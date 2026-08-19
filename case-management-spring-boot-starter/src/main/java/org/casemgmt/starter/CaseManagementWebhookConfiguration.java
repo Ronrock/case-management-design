@@ -1,6 +1,5 @@
 package org.casemgmt.starter;
 
-import org.casemgmt.event.AesGcmWebhookSecretCodec;
 import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.event.WebhookSecretCodec;
 import org.casemgmt.event.WebhookSecretStore;
@@ -9,6 +8,7 @@ import org.casemgmt.repo.DatabaseWebhookSecretStore;
 import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.service.WebhookService;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -17,17 +17,14 @@ import org.springframework.context.annotation.Configuration;
 public class CaseManagementWebhookConfiguration {
 
     @Bean
-    @ConditionalOnMissingBean(WebhookSecretCodec.class)
-    public WebhookSecretCodec webhookSecretCodec(CaseManagementProperties props) {
-        return AesGcmWebhookSecretCodec.fromBase64(
-                props.getWebhooks().getSecretKeyId(),
-                props.getWebhooks().getSecretEncryptionKey());
-    }
-
-    @Bean
     @ConditionalOnMissingBean(WebhookSecretStore.class)
     public WebhookSecretStore webhookSecretStore(WebhookRepository webhooks,
-                                                 WebhookSecretCodec codec) {
+                                                 ObjectProvider<WebhookSecretCodec> codecs,
+                                                 CaseManagementProperties props) {
+        WebhookSecretCodec codec = codecs.getIfAvailable(() ->
+                org.casemgmt.event.AesGcmWebhookSecretCodec.fromBase64(
+                        props.getWebhooks().getSecretKeyId(),
+                        props.getWebhooks().getSecretEncryptionKey()));
         return new DatabaseWebhookSecretStore(webhooks, codec);
     }
 
