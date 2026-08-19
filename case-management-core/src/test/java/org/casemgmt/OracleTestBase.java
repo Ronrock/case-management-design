@@ -21,19 +21,52 @@ import java.util.List;
 
 // No @Testcontainers/@Container here on purpose. That extension manages a *per-class-instance*
 // container lifecycle (start before the class's tests, stop after); ORACLE below is a single
-// static container deliberately started once and shared for the whole JVM's lifetime across
-// every class that extends this one, torn down only when the JVM exits (Ryuk). Annotating with
+// static container deliberately started once and shared for the module test fork's lifetime
+// across every class that extends this one, torn down when that fork exits (Ryuk). Annotating with
 // @Testcontainers without an @Container field would manage nothing and just be decoration -
 // dropped rather than kept for show. If a future task genuinely wants a fresh container per
 // test class, that is a different design (an instance field, not this shared static one).
 public abstract class OracleTestBase {
 
-    // Reused across all test classes in the JVM: starting Oracle takes ~40s.
-    private static final OracleContainer ORACLE =
-            new OracleContainer("gvenzl/oracle-free:23-slim-faststart")
-                    .withUsername("cm")
-                    .withPassword("cm")
-                    .withReuse(true);
+    private static final String ORACLE_IMAGE = "gvenzl/oracle-free:23-slim-faststart";
+
+    private static final String LIGHTWEIGHT_ORACLE_SPFILE = String.join("\n",
+            "cat > /tmp/initFREE-light.ora <<'EOF'",
+            "common_user_prefix=\"\"",
+            "compatible=\"23.6.0\"",
+            "control_files=\"/opt/oracle/oradata/FREE/control01.ctl\",\"/opt/oracle/oradata/FREE/control02.ctl\"",
+            "control_management_pack_access=\"DIAGNOSTIC+TUNING\"",
+            "cpu_count=2",
+            "db_block_size=8192",
+            "db_name=\"FREE\"",
+            "diagnostic_dest=\"/opt/oracle\"",
+            "dispatchers=\"(PROTOCOL=TCP) (SERVICE=FREEXDB)\"",
+            "enable_pluggable_database=true",
+            "fast_start_parallel_rollback=\"FALSE\"",
+            "job_queue_processes=1",
+            "local_listener=\"\"",
+            "mle_prog_languages=\"OFF\"",
+            "nls_language=\"AMERICAN\"",
+            "nls_territory=\"AMERICA\"",
+            "open_cursors=300",
+            "pga_aggregate_target=256m",
+            "processes=300",
+            "remote_login_passwordfile=\"EXCLUSIVE\"",
+            "sga_target=768m",
+            "shared_servers=0",
+            "spatial_vector_acceleration=FALSE",
+            "undo_tablespace=\"UNDOTBS1\"",
+            "EOF",
+            "sqlplus -s / as sysdba <<'SQL'",
+            "WHENEVER SQLERROR EXIT SQL.SQLCODE",
+            "CREATE SPFILE='${ORACLE_HOME}/dbs/spfile${ORACLE_SID}.ora' FROM PFILE='/tmp/initFREE-light.ora';",
+            "EXIT;",
+            "SQL",
+            "exec container-entrypoint.sh",
+            "");
+
+    // Reused across all core test classes in this module's forked JVM: starting Oracle takes ~40s.
+    private static final OracleContainer ORACLE = oracleContainer();
 
     // Pooled rather than a plain DriverManagerDataSource: the schema-reset hooks below run
     // from every extending class's @BeforeEach (every test method) and @AfterAll, and Tasks
@@ -57,6 +90,14 @@ public abstract class OracleTestBase {
     // per-class @BeforeAll (below) means class init always succeeds and every single
     // extending class reports the real cause.
     private static Throwable startupFailure;
+
+    private static OracleContainer oracleContainer() {
+        return new OracleContainer(ORACLE_IMAGE)
+                .withUsername("cm")
+                .withPassword("cm")
+                .withCreateContainerCmdModifier(cmd -> cmd.withEntrypoint(
+                        "bash", "-lc", LIGHTWEIGHT_ORACLE_SPFILE));
+    }
 
     static {
         try {

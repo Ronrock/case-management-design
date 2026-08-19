@@ -27,6 +27,7 @@ class CollaborationServicesTest extends OracleTestBase {
 
     private CaseService cases;
     private CommentService comments;
+    private DocumentService documents;
     private MilestoneService milestones;
     private LinkedProcessService processes;
     private CaseServiceTest.RecordingGateway gateway;
@@ -42,6 +43,7 @@ class CollaborationServicesTest extends OracleTestBase {
         gateway = new CaseServiceTest.RecordingGateway();
         cases = TestServices.caseService(dataSource(), gateway);
         comments = TestServices.commentService(dataSource());
+        documents = TestServices.documentService(dataSource());
         milestones = TestServices.milestoneService(dataSource());
         processes = TestServices.processService(dataSource(), gateway);
         caseId = cases.create("widget-review", "t1", null, "T", CasePriority.MEDIUM, Map.of(), alice).id();
@@ -73,6 +75,23 @@ class CollaborationServicesTest extends OracleTestBase {
         List<String> types = jdbc().sql("SELECT TYPE_ FROM CM_EVENT ORDER BY SEQ_")
                 .query(String.class).list();
         assertThat(types).contains("org.example.cm.case.comment.added");
+    }
+
+    @Test
+    void documentsAreReferencesAndEmitEvents() {
+        var row = documents.add(caseId, "passport.pdf", "evidence", "application/pdf",
+                123L, "https://dms.example/documents/passport", alice);
+
+        assertThat(documents.forCase(caseId)).extracting(DocumentRepository.DocumentRow::id)
+                .containsExactly(row.id());
+        documents.remove(caseId, row.id(), alice);
+        assertThat(documents.forCase(caseId)).isEmpty();
+
+        List<String> types = jdbc().sql("SELECT TYPE_ FROM CM_EVENT ORDER BY SEQ_")
+                .query(String.class).list();
+        assertThat(types)
+                .contains("org.example.cm.case.document.added",
+                        "org.example.cm.case.document.removed");
     }
 
     @Test
@@ -121,7 +140,7 @@ class CollaborationServicesTest extends OracleTestBase {
         public void claimTask(String id, String user) {}
         public void completeTask(String id, Map<String, Object> v) {}
         public EngineProcessRef startProcess(StartProcessRequest r) {
-            return new EngineProcessRef(null, r.processDefinitionKey());
+            return new EngineProcessRef(null, r.processDefinitionKey(), r.caseId());
         }
         public void cancelProcess(String id, String reason) {}
         public List<EngineTaskRef> findTasks(EngineTaskQuery q) { return List.of(); }
@@ -188,7 +207,7 @@ class CollaborationServicesTest extends OracleTestBase {
         String reviewedPlanItemId = new PlanItemRepository(jdbc()).findByCase(caseId).stream()
                 .filter(i -> i.name().equals("reviewed")).findFirst().orElseThrow().id();
         String milestoneId = org.casemgmt.domain.CaseIds.newId();
-        new MilestoneRepository(jdbc()).insert(milestoneId, caseId, reviewedPlanItemId, "Acknowledged");
+        new MilestoneRepository(jdbc()).insert(milestoneId, caseId, reviewedPlanItemId, "Confirmed");
 
         var achieved = milestones.achieve(caseId, milestoneId, alice);
         assertThat(achieved.achieved()).isTrue();
@@ -198,6 +217,6 @@ class CollaborationServicesTest extends OracleTestBase {
         // wording drifted or the wrong milestone's name leaked in.
         assertThatThrownBy(() -> milestones.achieve(caseId, milestoneId, alice))
                 .isInstanceOf(CaseConflictException.class)
-                .hasMessage("Milestone Acknowledged is already achieved");
+                .hasMessage("Milestone Confirmed is already achieved");
     }
 }

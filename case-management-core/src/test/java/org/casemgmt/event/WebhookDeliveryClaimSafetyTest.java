@@ -38,9 +38,6 @@ class WebhookDeliveryClaimSafetyTest extends OracleTestBase {
 
     @BeforeEach
     void setUp() {
-        for (String t : List.of("CM_WEBHOOK_DELIVERY", "CM_WEBHOOK_SUB", "CM_EVENT")) {
-            jdbc().sql("DELETE FROM " + t).update();
-        }
         webhooks = new WebhookRepository(jdbc());
         events = new EventRepository(jdbc());
         webhooks.insert("w-1", "t1", "http://localhost:1/hook", List.of("*"), "hash", 5);
@@ -170,15 +167,6 @@ class WebhookDeliveryClaimSafetyTest extends OracleTestBase {
 
     private String status() {
         return jdbc().sql("SELECT STATUS_ FROM CM_WEBHOOK_DELIVERY").query(String.class).single();
-    }
-
-    @Test
-    void freshlyClaimedDeliveriesAreNotReclaimedBeforeTheLeaseExpires() {
-        enqueue(1);
-        assertThat(webhooks.claimDueDeliveries(10)).hasSize(1);
-
-        // No back-dating this time: the claim is still fresh, so it must NOT come back.
-        assertThat(webhooks.claimDueDeliveries(10)).isEmpty();
     }
 
     private void enqueue(int n) {

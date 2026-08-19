@@ -95,6 +95,24 @@ class EngineCommandDispatcherTest extends OracleTestBase {
         assertThat(status).isEqualTo("DEAD");
     }
 
+    @Test
+    void failedStartProcessReportsOnlyTheLinkedProcessCorrelationId() {
+        var reports = new java.util.ArrayList<String>();
+        var outbox = new OutboxEngineGateway(commands, id -> {});
+        outbox.startProcess(new StartProcessRequest("eng-a:4", "pi-4", "process-key",
+                Map.of(), "linked-process-1"));
+
+        var dispatcher = new EngineCommandDispatcher(commands, new FailingGateway(),
+                (key, sync, engineId) -> reports.add(key + ":" + sync + ":" + engineId));
+
+        for (int attempt = 1; attempt <= 6; attempt++) {
+            jdbc().sql("UPDATE CM_ENGINE_COMMAND SET NEXT_ATTEMPT_AT_ = SYSTIMESTAMP - INTERVAL '1' HOUR").update();
+            dispatcher.drainOnce();
+        }
+
+        assertThat(reports).containsExactly("linked-process-1:FAILED:null");
+    }
+
     static class RecordingGateway implements EngineGateway {
         final java.util.List<HumanTaskRequest> createdTasks = new java.util.ArrayList<>();
         public EngineTaskRef createHumanTask(HumanTaskRequest r) {
@@ -104,7 +122,7 @@ class EngineCommandDispatcherTest extends OracleTestBase {
         public void claimTask(String id, String user) {}
         public void completeTask(String id, Map<String, Object> vars) {}
         public EngineProcessRef startProcess(StartProcessRequest r) {
-            return new EngineProcessRef("proc-1", r.processDefinitionKey());
+            return new EngineProcessRef("proc-1", r.processDefinitionKey(), r.caseId());
         }
         public void cancelProcess(String id, String reason) {}
         public List<EngineTaskRef> findTasks(EngineTaskQuery q) { return List.of(); }
@@ -112,6 +130,9 @@ class EngineCommandDispatcherTest extends OracleTestBase {
 
     static class FailingGateway extends RecordingGateway {
         @Override public EngineTaskRef createHumanTask(HumanTaskRequest r) {
+            throw new EngineException("engine is down");
+        }
+        @Override public EngineProcessRef startProcess(StartProcessRequest r) {
             throw new EngineException("engine is down");
         }
     }

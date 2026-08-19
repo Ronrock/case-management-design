@@ -1,8 +1,11 @@
 package org.casemgmt.service;
 
 import org.casemgmt.domain.*;
+import org.casemgmt.error.CaseConflictException;
+import org.casemgmt.error.InvalidCaseDefinitionException;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.JsonCodec;
+import org.springframework.dao.DuplicateKeyException;
 
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -10,8 +13,16 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 public class CaseDefinitionService {
+
+    private static final Set<String> RESERVED_CASE_ROLE_NAMES =
+            Set.of("owner", "handler", "reviewer", "watcher");
+    private static final Pattern DOT_ITEM_REFERENCE =
+            Pattern.compile("\\bitems\\.([A-Za-z_][A-Za-z0-9_-]*)\\.");
+    private static final Pattern BRACKET_ITEM_REFERENCE =
+            Pattern.compile("\\bitems\\[['\"]([^'\"]+)['\"]\\]");
 
     private final CaseDefinitionRepository repo;
 
@@ -39,34 +50,46 @@ public class CaseDefinitionService {
     public CaseDefinition deploy(String json, String deployedBy, String tenantId) {
         Map<String, Object> doc = JsonCodec.toMap(json);
         String key = required(doc, "key");
-        int version = repo.nextVersion(key, tenantId);
-        String id = definitionId(tenantId, key, version);
-
-        List<PlanItemDefinition> items = new ArrayList<>();
         List<Map<String, Object>> raw = (List<Map<String, Object>>) doc.getOrDefault("planItems", List.of());
-        for (Map<String, Object> p : raw) {
-            items.add(new PlanItemDefinition(
-                    CaseIds.newId(), id, required(p, "defKey"),
-                    PlanItemType.valueOf(required(p, "type")),
-                    (String) p.getOrDefault("name", p.get("defKey")),
-                    (String) p.get("parentStageKey"),
-                    bool(p, "manualActivation"), bool(p, "required"), bool(p, "repetition"),
-                    strings(p, "entryCriteria"), strings(p, "exitCriteria"),
-                    (String) p.get("formKey"), (String) p.get("processDefinitionKey"),
-                    strings(p, "candidateGroups"),
-                    p.get("sortOrder") instanceof Number n ? n.intValue() : 0));
+        List<String> roles = strings(doc, "roles");
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            int version = repo.nextVersion(key, tenantId);
+            String id = definitionId(tenantId, key, version);
+
+            List<PlanItemDefinition> items = new ArrayList<>();
+            for (Map<String, Object> p : raw) {
+                items.add(new PlanItemDefinition(
+                        CaseIds.newId(), id, required(p, "defKey"),
+                        planItemType(key, p),
+                        (String) p.getOrDefault("name", p.get("defKey")),
+                        (String) p.get("parentStageKey"),
+                        bool(p, "manualActivation"), bool(p, "required"), bool(p, "repetition"),
+                        strings(p, "entryCriteria"), strings(p, "exitCriteria"),
+                        (String) p.get("formKey"), (String) p.get("processDefinitionKey"),
+                        strings(p, "candidateGroups"),
+                        p.get("sortOrder") instanceof Number n ? n.intValue() : 0));
+            }
+            validatePlanItems(key, roles, items);
+
+            CaseDefinition def = new CaseDefinition(id, key, version,
+                    (String) doc.getOrDefault("name", key), tenantId,
+                    (String) doc.get("description"), (String) doc.get("slaPolicyId"),
+                    roles, strings(doc, "attachmentCategories"),
+                    (Map<String, Object>) doc.getOrDefault("forms", Map.of()),
+                    items, OffsetDateTime.now(), deployedBy);
+
+            try {
+                repo.insert(def);
+                return def;
+            } catch (DuplicateKeyException e) {
+                // Another deployment won the nextVersion -> insert race. Recompute and retry.
+            }
         }
-        validatePlanItems(key, items);
 
-        CaseDefinition def = new CaseDefinition(id, key, version,
-                (String) doc.getOrDefault("name", key), tenantId,
-                (String) doc.get("description"), (String) doc.get("slaPolicyId"),
-                strings(doc, "roles"), strings(doc, "attachmentCategories"),
-                (Map<String, Object>) doc.getOrDefault("forms", Map.of()),
-                items, OffsetDateTime.now(), deployedBy);
-
-        repo.insert(def);
-        return def;
+        throw new CaseConflictException("case-definition-version-conflict",
+                "Could not allocate a new version for case definition '" + key
+                        + "' after concurrent deploy retries; retry the request", List.of());
     }
 
     /**
@@ -77,7 +100,7 @@ public class CaseDefinitionService {
      *   {@code CaseDefinitionRepository.insert} and fails midway through the plan-item
      *   INSERT loop on the {@code UQ_CM_PI_DEF UNIQUE (CASE_DEF_ID_, DEF_KEY_)} constraint —
      *   which {@code insert} now handles atomically (rolls back the whole definition, see its
-     *   Javadoc), but a clear pre-write {@link IllegalArgumentException} naming the offending
+     *   Javadoc), but a clear pre-write {@link InvalidCaseDefinitionException} naming the offending
      *   key is a far better signal to the caller than a raw
      *   {@code DataIntegrityViolationException} surfacing from deep inside the repository.
      *   <li>A {@code parentStageKey} that names no {@code defKey} in the same definition.
@@ -98,22 +121,60 @@ public class CaseDefinitionService {
      * a cheap, clear, pre-write rejection; the repository's transaction is the backstop for
      * everything else.
      */
-    private static void validatePlanItems(String key, List<PlanItemDefinition> items) {
+    private static void validatePlanItems(String key, List<String> roles, List<PlanItemDefinition> items) {
         Set<String> defKeys = new HashSet<>();
+        Set<String> roleNames = new HashSet<>(RESERVED_CASE_ROLE_NAMES);
+        roleNames.addAll(roles == null ? List.of() : roles);
         for (PlanItemDefinition p : items) {
             if (!defKeys.add(p.defKey())) {
-                throw new IllegalArgumentException("Case definition '" + key
+                throw invalid(key, "Case definition '" + key
                         + "': duplicate plan item defKey '" + p.defKey()
                         + "' — defKeys must be unique within a definition");
+            }
+            for (String group : p.candidateGroups()) {
+                if (roleNames.contains(group)) {
+                    throw invalid(key, "Case definition '" + key
+                            + "': plan item '" + p.defKey() + "' uses candidateGroup '" + group
+                            + "', which conflicts with a case participant role name; use a distinct "
+                            + "identity-group namespace for task assignment");
+                }
             }
         }
         for (PlanItemDefinition p : items) {
             if (p.parentStageKey() != null && !defKeys.contains(p.parentStageKey())) {
-                throw new IllegalArgumentException("Case definition '" + key + "': plan item '"
+                throw invalid(key, "Case definition '" + key + "': plan item '"
                         + p.defKey() + "' declares parentStageKey '" + p.parentStageKey()
                         + "', but no plan item with that defKey exists in this definition");
             }
+            validateCriteriaReferences(key, p.defKey(), "entryCriteria", p.entryCriteria(), defKeys);
+            validateCriteriaReferences(key, p.defKey(), "exitCriteria", p.exitCriteria(), defKeys);
         }
+    }
+
+    private static void validateCriteriaReferences(String key, String itemKey, String field,
+                                                   List<String> expressions, Set<String> defKeys) {
+        for (String expression : expressions) {
+            for (String referenced : referencedItemKeys(expression)) {
+                if (!defKeys.contains(referenced)) {
+                    throw invalid(key, "Case definition '" + key + "': plan item '"
+                            + itemKey + "' " + field + " references unknown plan item defKey '"
+                            + referenced + "'");
+                }
+            }
+        }
+    }
+
+    private static Set<String> referencedItemKeys(String expression) {
+        Set<String> refs = new HashSet<>();
+        var dot = DOT_ITEM_REFERENCE.matcher(expression);
+        while (dot.find()) {
+            refs.add(dot.group(1));
+        }
+        var bracket = BRACKET_ITEM_REFERENCE.matcher(expression);
+        while (bracket.find()) {
+            refs.add(bracket.group(1));
+        }
+        return refs;
     }
 
     /**
@@ -135,8 +196,12 @@ public class CaseDefinitionService {
      *
      * <p>A null tenant (an untenanted definition — {@code TENANT_ID_} is nullable, and
      * {@code findLatest(key, null)} exists to read one back) yields an empty first segment,
-     * e.g. {@code :widget-review:1}. That cannot collide with a real tenant's id: Oracle
-     * normalises an empty string to NULL, so no row can carry a zero-length {@code TENANT_ID_}.
+     * e.g. {@code :widget-review:1}. That cannot collide with a real tenant's id because real
+     * tenant ids are non-empty and therefore always produce a different prefix such as
+     * {@code t1:widget-review:1}. Two null-tenant deploys of the same key are safe for the same
+     * reason as tenant-scoped deploys: {@link CaseDefinitionRepository#nextVersion} uses a
+     * null-aware tenant predicate, so the second deploy receives version 2 rather than reusing
+     * {@code :widget-review:1}.
      *
      * <p>The id is opaque to every consumer — nothing in this codebase parses or reconstructs it,
      * verified by grep before the change — so widening the format needed no migration. Note
@@ -151,8 +216,23 @@ public class CaseDefinitionService {
 
     private static String required(Map<String, Object> m, String field) {
         Object v = m.get(field);
-        if (v == null) throw new IllegalArgumentException("Definition is missing required field: " + field);
+        if (v == null) throw invalid(String.valueOf(m.getOrDefault("key", "<unknown>")),
+                "Definition is missing required field: " + field);
         return v.toString();
+    }
+
+    private static PlanItemType planItemType(String key, Map<String, Object> item) {
+        String raw = required(item, "type");
+        try {
+            return PlanItemType.valueOf(raw);
+        } catch (IllegalArgumentException e) {
+            throw invalid(key, "Case definition '" + key + "': plan item '"
+                    + item.getOrDefault("defKey", "<unknown>") + "' has unsupported type '" + raw + "'");
+        }
+    }
+
+    private static InvalidCaseDefinitionException invalid(String key, String message) {
+        return new InvalidCaseDefinitionException(key, message);
     }
 
     private static boolean bool(Map<String, Object> m, String field) {

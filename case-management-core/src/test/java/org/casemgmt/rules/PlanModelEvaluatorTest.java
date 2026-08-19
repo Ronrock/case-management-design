@@ -149,7 +149,7 @@ class PlanModelEvaluatorTest {
 
         PlanModelEvaluator neverSettles = new PlanModelEvaluator(new JuelCriterionEvaluator()) {
             @Override
-            List<Transition> singlePass(CaseSnapshot ignored) {
+            List<Transition> singlePass(CaseSnapshot ignored, java.util.Set<String> stagesActivatedPreviousRound) {
                 return List.of(new Transition("pi-1", PlanItemState.AVAILABLE, PlanItemState.ACTIVE,
                         "test double: never settles"));
             }

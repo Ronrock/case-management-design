@@ -220,7 +220,7 @@ class CaseServiceTransactionalIntegrationTest extends OracleTestBase {
 
         @Override
         public EngineProcessRef startProcess(StartProcessRequest r) {
-            return new EngineProcessRef("proc-1", r.processDefinitionKey());
+            return new EngineProcessRef("proc-1", r.processDefinitionKey(), r.caseId());
         }
 
         @Override public void cancelProcess(String id, String reason) {}

@@ -148,21 +148,29 @@ public class CaseService {
         if (patch.containsKey("title")) {
             patched = new CaseInstance(patched.id(), patched.engineId(), patched.tenantId(),
                     patched.caseDefId(), patched.caseDefKey(), patched.caseDefVersion(),
-                    patched.businessKey(), String.valueOf(patch.get("title")), patched.state(),
+                    patched.businessKey(), (String) patch.get("title"), patched.state(),
                     patched.priority(), patched.assignee(), patched.queueId(), patched.initiator(),
                     patched.slaStatus(), patched.outcome(), patched.cancelReason(),
                     patched.variables(), patched.version(), patched.createdAt(),
                     patched.updatedAt(), patched.closedAt());
         }
         if (patch.containsKey("variables")) {
-            patched = patched.withVariables((Map<String, Object>) patch.get("variables"));
+            Object variablesPatch = patch.get("variables");
+            patched = patched.withVariables(variablesPatch == null
+                    ? Map.of()
+                    : mergeObject(patched.variables(), (Map<String, Object>) variablesPatch));
         }
 
         CaseInstance saved = cases.update(patched, expectedVersion);
         publisher.publish(event(saved, EventTypes.CASE_UPDATED, Map.of("fields", patch.keySet())));
+        Map<String, Object> before = new LinkedHashMap<>();
+        before.put("title", current.title());
+        before.put("variables", current.variables());
+        Map<String, Object> after = new LinkedHashMap<>();
+        after.put("title", saved.title());
+        after.put("variables", saved.variables());
         publisher.audit(caseId, saved.tenantId(), actor.userId(), "case.update", "Case", caseId,
-                Map.of("title", current.title(), "variables", current.variables()),
-                Map.of("title", saved.title(), "variables", saved.variables()));
+                before, after);
 
         reevaluate(caseId, actor);
 
@@ -171,6 +179,24 @@ public class CaseService {
         // this call's own write. reevaluate() above never touches CM_CASE, so `saved` is still
         // exactly correct.
         return saved;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> mergeObject(Map<String, Object> current,
+                                                   Map<String, Object> patch) {
+        Map<String, Object> merged = new LinkedHashMap<>(current == null ? Map.of() : current);
+        for (Map.Entry<String, Object> entry : patch.entrySet()) {
+            if (entry.getValue() == null) {
+                merged.remove(entry.getKey());
+            } else if (entry.getValue() instanceof Map<?, ?> patchObject
+                    && merged.get(entry.getKey()) instanceof Map<?, ?> currentObject) {
+                merged.put(entry.getKey(), mergeObject((Map<String, Object>) currentObject,
+                        (Map<String, Object>) patchObject));
+            } else {
+                merged.put(entry.getKey(), entry.getValue());
+            }
+        }
+        return merged;
     }
 
     /**

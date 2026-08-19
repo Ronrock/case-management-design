@@ -101,13 +101,22 @@ public class EngineCommandDispatcher {
      */
     private void reportFailure(EngineCommand command) {
         Map<String, Object> p = command.payload();
-        String planItemId = blankToNull(str(p, "planItemId"));
-        if (planItemId != null) {
-            syncReporter.report(planItemId, CaseTask.EngineSync.FAILED, null);
-        }
-        String correlationId = blankToNull(str(p, "correlationId"));
-        if (correlationId != null) {
-            syncReporter.report(correlationId, CaseTask.EngineSync.FAILED, null);
+        switch (command.type()) {
+            case CREATE_TASK -> {
+                String planItemId = blankToNull(str(p, "planItemId"));
+                if (planItemId != null) {
+                    syncReporter.report(planItemId, CaseTask.EngineSync.FAILED, null);
+                }
+            }
+            case START_PROCESS -> {
+                String correlationId = blankToNull(str(p, "correlationId"));
+                if (correlationId != null) {
+                    syncReporter.report(correlationId, CaseTask.EngineSync.FAILED, null);
+                }
+            }
+            default -> {
+                // No local task/process row waits for sync state on these command types.
+            }
         }
     }
 

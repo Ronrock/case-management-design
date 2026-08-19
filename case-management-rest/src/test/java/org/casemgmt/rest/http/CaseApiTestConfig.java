@@ -2,12 +2,17 @@ package org.casemgmt.rest.http;
 
 import org.casemgmt.config.TransactionManagerConfig;
 import org.casemgmt.engine.EngineGateway;
+import org.casemgmt.event.AesGcmWebhookSecretCodec;
 import org.casemgmt.event.EventPublisher;
+import org.casemgmt.event.WebhookSecretCodec;
+import org.casemgmt.event.WebhookSecretStore;
 import org.casemgmt.repo.AuditRepository;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.CommentRepository;
+import org.casemgmt.repo.DocumentRepository;
+import org.casemgmt.repo.DatabaseWebhookSecretStore;
 import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.IdempotencyRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
@@ -22,10 +27,18 @@ import org.casemgmt.rules.JuelCriterionEvaluator;
 import org.casemgmt.rules.PlanModelEvaluator;
 import org.casemgmt.rules.PlanModelInstantiator;
 import org.casemgmt.rules.StageCompletion;
+import org.casemgmt.search.CaseProjectionSearchProvider;
+import org.casemgmt.search.DocumentMetadataSearchProvider;
+import org.casemgmt.search.SearchOrchestrator;
+import org.casemgmt.search.SearchProvider;
+import org.casemgmt.permissions.PermissionDecision;
+import org.casemgmt.permissions.WorkerPermissionEvaluator;
+import org.casemgmt.permissions.WorkerPermissionsClient;
 import org.casemgmt.service.CaseDefinitionService;
 import org.casemgmt.service.CaseService;
 import org.casemgmt.service.CaseTaskService;
 import org.casemgmt.service.CommentService;
+import org.casemgmt.service.DocumentService;
 import org.casemgmt.service.FormValidator;
 import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.service.MilestoneService;
@@ -100,12 +113,32 @@ public class CaseApiTestConfig {
     @Bean public MilestoneRepository milestoneRepository(JdbcClient j) { return new MilestoneRepository(j); }
     @Bean public ParticipantRepository participantRepository(JdbcClient j) { return new ParticipantRepository(j); }
     @Bean public CommentRepository commentRepository(JdbcClient j) { return new CommentRepository(j); }
+    @Bean public DocumentRepository documentRepository(JdbcClient j) { return new DocumentRepository(j); }
     @Bean public LinkedProcessRepository linkedProcessRepository(JdbcClient j) { return new LinkedProcessRepository(j); }
     @Bean public EventRepository eventRepository(JdbcClient j) { return new EventRepository(j); }
     @Bean public AuditRepository auditRepository(JdbcClient j) { return new AuditRepository(j); }
     @Bean public WebhookRepository webhookRepository(JdbcClient j) { return new WebhookRepository(j); }
     @Bean public SlaRepository slaRepository(JdbcClient j) { return new SlaRepository(j); }
     @Bean public IdempotencyRepository idempotencyRepository(JdbcClient j) { return new IdempotencyRepository(j); }
+    @Bean public CaseProjectionSearchProvider caseProjectionSearchProvider(CaseRepository cases,
+                                                                           WorkerPermissionsClient permissions) { return new CaseProjectionSearchProvider(cases, permissions); }
+    @Bean public DocumentMetadataSearchProvider documentMetadataSearchProvider(DocumentRepository documents,
+                                                                               WorkerPermissionsClient permissions) { return new DocumentMetadataSearchProvider(documents, permissions); }
+    @Bean public SearchOrchestrator searchOrchestrator(java.util.List<SearchProvider> providers) { return new SearchOrchestrator(providers); }
+    @Bean
+    public WorkerPermissionsClient workerPermissionsClient() {
+        return request -> request.resources().stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        resource -> resource.id(),
+                        resource -> "erin".equals(request.workerId())
+                                ? PermissionDecision.deny(resource.id())
+                                : PermissionDecision.allow(resource.id())));
+    }
+
+    @Bean
+    public WorkerPermissionEvaluator workerPermissionEvaluator(WorkerPermissionsClient client) {
+        return new WorkerPermissionEvaluator(client);
+    }
 
     @Bean
     public CaseDefinitionRepository caseDefinitionRepository(DataSource dataSource) {
@@ -130,9 +163,11 @@ public class CaseApiTestConfig {
 
     @Bean
     public TransitionApplier transitionApplier(PlanItemRepository planItems, CaseTaskRepository tasks,
-                                               MilestoneRepository milestones, EngineGateway engine,
-                                               EventPublisher publisher) {
-        return new TransitionApplier(planItems, tasks, milestones, engine, publisher);
+                                               LinkedProcessRepository linkedProcesses,
+                                               MilestoneRepository milestones,
+                                               EngineGateway engine, EventPublisher publisher) {
+        return new TransitionApplier(planItems, tasks, linkedProcesses, milestones, engine,
+                publisher);
     }
 
     @Bean
@@ -168,6 +203,12 @@ public class CaseApiTestConfig {
     }
 
     @Bean
+    public DocumentService documentService(DocumentRepository documents, CaseRepository cases,
+                                           EventPublisher publisher) {
+        return new DocumentService(documents, cases, publisher);
+    }
+
+    @Bean
     public MilestoneService milestoneService(MilestoneRepository milestones, CaseRepository cases,
                                               EventPublisher publisher) {
         return new MilestoneService(milestones, cases, publisher);
@@ -180,7 +221,23 @@ public class CaseApiTestConfig {
         return new LinkedProcessService(processes, cases, engine, publisher);
     }
 
-    @Bean public WebhookService webhookService(WebhookRepository webhooks) { return new WebhookService(webhooks); }
+    @Bean
+    public WebhookSecretCodec webhookSecretCodec() {
+        return new AesGcmWebhookSecretCodec("test",
+                "0123456789abcdef0123456789abcdef".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Bean
+    public WebhookSecretStore webhookSecretStore(WebhookRepository webhooks,
+                                                 WebhookSecretCodec codec) {
+        return new DatabaseWebhookSecretStore(webhooks, codec);
+    }
+
+    @Bean
+    public WebhookService webhookService(WebhookRepository webhooks, WebhookSecretStore secrets,
+                                         AuditRepository audit) {
+        return new WebhookService(webhooks, secrets, audit);
+    }
 
     @Bean
     public CaseDefinitionService caseDefinitionService(CaseDefinitionRepository repo) {
@@ -237,7 +294,9 @@ public class CaseApiTestConfig {
                 User.withUsername("dave").password("{noop}dave")
                         .authorities("users", "tenant:t2", "admin", "reviewers").build(),
                 User.withUsername("mallory").password("{noop}mallory")
-                        .authorities("users", "tenant:t1", "owner", "handler").build());
+                        .authorities("users", "tenant:t1", "owner", "handler").build(),
+                User.withUsername("erin").password("{noop}erin")
+                        .authorities("users", "tenant:t1", "admin", "reviewers").build());
     }
 
     /**

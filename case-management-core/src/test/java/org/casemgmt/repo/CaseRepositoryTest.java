@@ -159,4 +159,42 @@ class CaseRepositoryTest extends OracleTestBase {
 
         assertThat(active).extracting(CaseInstance::id).containsExactly("eng-a:4");
     }
+
+    @Test
+    void filtersByParticipantWithoutCorruptingNamedParameters() {
+        repo.insert(newCase("eng-a:participant"));
+        jdbc().sql("""
+                INSERT INTO CM_PARTICIPANT (ID_, CASE_ID_, USER_ID_, ROLE_, ADDED_BY_)
+                VALUES ('participant-1', 'eng-a:participant', 'alice', 'reviewer', 'admin')""")
+                .update();
+        CaseQuery query = query("alice", null);
+
+        assertThat(repo.query(query)).extracting(CaseInstance::id)
+                .containsExactly("eng-a:participant");
+        assertThat(repo.count(query)).isEqualTo(1);
+    }
+
+    @Test
+    void freeTextExecutesAndTreatsLikeWildcardsLiterally() {
+        repo.insert(newCase("eng-a:literal-percent"));
+        repo.insert(newCase("eng-a:wildcard-decoy"));
+        jdbc().sql("""
+                INSERT INTO CM_COMMENT (ID_, CASE_ID_, AUTHOR_, TEXT_)
+                VALUES ('comment-1', 'eng-a:literal-percent', 'alice', 'Fee is 100% correct')""")
+                .update();
+        jdbc().sql("""
+                INSERT INTO CM_COMMENT (ID_, CASE_ID_, AUTHOR_, TEXT_)
+                VALUES ('comment-2', 'eng-a:wildcard-decoy', 'alice', 'Fee is 1000 correct')""")
+                .update();
+        CaseQuery query = query(null, "100%");
+
+        assertThat(repo.query(query)).extracting(CaseInstance::id)
+                .containsExactly("eng-a:literal-percent");
+        assertThat(repo.count(query)).isEqualTo(1);
+    }
+
+    private static CaseQuery query(String participantUser, String freeText) {
+        return new CaseQuery("t1", List.of(), null, null, null, participantUser,
+                null, null, null, freeText, null, null, List.of(), 0, 50);
+    }
 }

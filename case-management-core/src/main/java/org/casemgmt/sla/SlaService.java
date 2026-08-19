@@ -183,13 +183,13 @@ public class SlaService {
     }
 
     /**
-     * S3 fix: {@code PAUSED_STATES_JSON_} was read from the database and never consulted,
+     * S3 fix: the legacy {@code PAUSED_STATES_JSON_} column was read from the database and never consulted,
      * making it a configuration field with no effect. Wired here as the set of reasons this
      * target accepts a pause for — an empty list (no restriction configured) accepts any reason,
      * matching this target's behaviour before this fix.
      */
     private void assertValidPauseReason(SlaRepository.TargetRow target, String reason) {
-        List<String> allowed = target.pausedStates();
+        List<String> allowed = target.pauseReasons();
         if (!allowed.isEmpty() && !allowed.contains(reason)) {
             throw new CaseConflictException("invalid-pause-reason",
                     "'" + reason + "' is not a configured pause reason for target '"
@@ -200,7 +200,9 @@ public class SlaService {
     private BusinessCalendar calendarFor(String policyId) {
         String calendarId = sla.calendarIdOf(policyId);
         Map<String, Object> definition = calendarId == null ? Map.of() : sla.calendarDefinition(calendarId);
-        return BusinessCalendar.fromJson(definition.isEmpty() ? ALWAYS_OPEN_CALENDAR : definition);
+        String source = calendarId == null ? "Default SLA calendar"
+                : "Business calendar '" + calendarId + "'";
+        return BusinessCalendar.fromJson(source, definition.isEmpty() ? ALWAYS_OPEN_CALENDAR : definition);
     }
 
     private SlaRecord save(SlaRecord record, long expectedVersion) {

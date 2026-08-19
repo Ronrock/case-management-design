@@ -35,17 +35,22 @@ public class BusinessCalendar {
 
     @SuppressWarnings("unchecked")
     public static BusinessCalendar fromJson(Map<String, Object> definition) {
+        return fromJson("Calendar definition", definition);
+    }
+
+    @SuppressWarnings("unchecked")
+    public static BusinessCalendar fromJson(String source, Map<String, Object> definition) {
         ZoneId zone = ZoneId.of((String) definition.getOrDefault("timezone", "UTC"));
 
         Map<DayOfWeek, List<Interval>> hours = new EnumMap<>(DayOfWeek.class);
         Map<String, Object> raw = (Map<String, Object>) definition.getOrDefault("workingHours", Map.of());
         raw.forEach((day, intervals) -> {
             List<Interval> sorted = ((List<Map<String, String>>) intervals).stream()
-                    .map(i -> parseInterval(day, i))
+                    .map(i -> parseInterval(source, day, i))
                     .sorted(Comparator.comparing(Interval::from))
                     .toList();
-            checkNoOverlaps(day, sorted);
-            hours.put(parseDay(day), sorted);
+            checkNoOverlaps(source, day, sorted);
+            hours.put(parseDay(source, day), sorted);
         });
 
         Set<LocalDate> holidays = new HashSet<>();
@@ -55,36 +60,36 @@ public class BusinessCalendar {
         return new BusinessCalendar(zone, hours, holidays);
     }
 
-    private static DayOfWeek parseDay(String day) {
+    private static DayOfWeek parseDay(String source, String day) {
         try {
             return DayOfWeek.valueOf(day);
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException(
-                    "Calendar definition workingHours has an unknown day key '" + day
+                    source + " workingHours has an unknown day key '" + day
                             + "' — expected one of " + Arrays.toString(DayOfWeek.values()), e);
         }
     }
 
-    private static Interval parseInterval(String day, Map<String, String> raw) {
+    private static Interval parseInterval(String source, String day, Map<String, String> raw) {
         LocalTime from;
         LocalTime to;
         try {
             from = LocalTime.parse(raw.get("from"));
         } catch (DateTimeException e) {
             throw new IllegalArgumentException(
-                    "Calendar definition workingHours." + day + " has a malformed 'from' time '"
+                    source + " workingHours." + day + " has a malformed 'from' time '"
                             + raw.get("from") + "' — expected HH:mm", e);
         }
         try {
             to = LocalTime.parse(raw.get("to"));
         } catch (DateTimeException e) {
             throw new IllegalArgumentException(
-                    "Calendar definition workingHours." + day + " has a malformed 'to' time '"
+                    source + " workingHours." + day + " has a malformed 'to' time '"
                             + raw.get("to") + "' — expected HH:mm", e);
         }
         if (!from.isBefore(to)) {
             throw new IllegalArgumentException(
-                    "Calendar definition workingHours." + day + " has interval [" + from + ", " + to
+                    source + " workingHours." + day + " has interval [" + from + ", " + to
                             + "] where 'from' is not before 'to' — overnight intervals that split across "
                             + "midnight are not supported by this calendar, and zero-length intervals are "
                             + "meaningless; fix the calendar document");
@@ -92,13 +97,13 @@ public class BusinessCalendar {
         return new Interval(from, to);
     }
 
-    private static void checkNoOverlaps(String day, List<Interval> sorted) {
+    private static void checkNoOverlaps(String source, String day, List<Interval> sorted) {
         for (int i = 1; i < sorted.size(); i++) {
             Interval previous = sorted.get(i - 1);
             Interval current = sorted.get(i);
             if (current.from().isBefore(previous.to())) {
                 throw new IllegalArgumentException(
-                        "Calendar definition workingHours." + day + " has overlapping intervals ["
+                        source + " workingHours." + day + " has overlapping intervals ["
                                 + previous.from() + ", " + previous.to() + "] and [" + current.from() + ", "
                                 + current.to() + "] — addDuration would count the overlap twice and "
                                 + "compute a shorter working window than the calendar actually specifies; "

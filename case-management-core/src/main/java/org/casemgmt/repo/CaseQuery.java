@@ -1,7 +1,9 @@
 package org.casemgmt.repo;
 
 import org.casemgmt.domain.CaseState;
+import org.casemgmt.domain.CasePriority;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 
 /**
@@ -16,9 +18,27 @@ import java.util.List;
  * translation belongs to the REST layer, which is where the spec's pagination vocabulary lives.
  */
 public record CaseQuery(String tenantId, List<CaseState> states, String assignee,
-                        String caseDefKey, String businessKey, int offset, int limit) {
+                        String caseDefKey, String businessKey, String participantUser,
+                        String queueId, String slaStatus, CasePriority priority, String freeText,
+                        OffsetDateTime createdAfter, OffsetDateTime createdBefore,
+                        List<SortTerm> sort, int offset, int limit) {
 
     public CaseQuery {
         states = states == null ? List.of() : List.copyOf(states);
+        sort = sort == null ? List.of() : List.copyOf(sort);
     }
+
+    public CaseQuery(String tenantId, List<CaseState> states, String assignee,
+                     String caseDefKey, String businessKey, int offset, int limit) {
+        this(tenantId, states, assignee, caseDefKey, businessKey, null, null, null,
+                null, null, null, null, List.of(), offset, limit);
+    }
+
+    public CaseQuery withWindow(int newOffset, int newLimit) {
+        return new CaseQuery(tenantId, states, assignee, caseDefKey, businessKey,
+                participantUser, queueId, slaStatus, priority, freeText, createdAfter,
+                createdBefore, sort, newOffset, newLimit);
+    }
+
+    public record SortTerm(String field, boolean descending) {}
 }

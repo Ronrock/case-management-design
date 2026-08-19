@@ -13,12 +13,15 @@ public final class EventTypes {
     public static final String TASK_COMPLETED = "case.task.completed";
     public static final String MILESTONE_ACHIEVED = "case.milestone.achieved";
     public static final String COMMENT_ADDED = "case.comment.added";
+    public static final String DOCUMENT_ADDED = "case.document.added";
+    public static final String DOCUMENT_REMOVED = "case.document.removed";
     public static final String PROCESS_STARTED = "case.process.started";
     public static final String SLA_STARTED = "case.sla.started";
     public static final String SLA_PAUSED = "case.sla.paused";
     public static final String SLA_RESUMED = "case.sla.resumed";
     public static final String SLA_WARNING = "case.sla.warning";
     public static final String SLA_BREACHED = "case.sla.breached";
+    public static final String SLA_ESCALATED = "case.sla.escalated";
 
     private EventTypes() {}
 }

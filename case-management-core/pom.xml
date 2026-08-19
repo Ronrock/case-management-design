@@ -81,10 +81,9 @@
 
   <build>
     <plugins>
-      <!-- Publishes a test-jar containing EngineGatewayContract (and any other shared test
-           fixtures under src/test/java) so case-management-engine-embedded and
-           case-management-engine-remote can each depend on it with <type>test-jar</type>
-           and subclass the contract to prove their EngineGateway implementations agree. -->
+      <!-- Publishes only EngineGatewayContract so case-management-engine-embedded and
+           case-management-engine-remote can subclass the shared contract without receiving
+           every core test class in their dependency graph. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
@@ -92,6 +91,11 @@
           <execution>
             <id>test-jar</id>
             <goals><goal>test-jar</goal></goals>
+            <configuration>
+              <includes>
+                <include>org/casemgmt/engine/EngineGatewayContract.class</include>
+              </includes>
+            </configuration>
           </execution>
         </executions>
       </plugin>

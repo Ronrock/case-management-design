@@ -116,7 +116,4 @@ it; the task then runs as many times as there are aspects to examine.
 - [ ] Every `formKey` on a `HUMAN_TASK` has a matching entry in `forms`.
 - [ ] `candidateGroups` match the identity groups your principals really carry.
 - [ ] Work that must happen is `required`; work that's optional is not.
-- [ ] Non-required children of stages that are themselves criteria-entered: consider marking them
-      `required`, given the known evaluator defect
-      ([issue #2](https://github.com/Ronrock/case-management-design/issues/2)).
 - [ ] `sortOrder` set on everything, so ordering is deterministic.

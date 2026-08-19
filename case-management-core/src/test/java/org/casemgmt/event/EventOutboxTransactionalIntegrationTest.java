@@ -81,16 +81,21 @@ class EventOutboxTransactionalIntegrationTest extends OracleTestBase {
     void aSuccessfulMutationCommitsTheCaseTheEventTheAuditRowAndTheDeliveryRowTogether() {
         seedCase("eng-a:outbox-ok");
 
-        long seq = caseChange.mutateCaseAndPublish("eng-a:outbox-ok", false);
+        boolean deferredInsideTransaction = caseChange.mutateCaseAndPublish("eng-a:outbox-ok", false);
 
         assertThat(caseTitle("eng-a:outbox-ok")).isEqualTo("Updated by outbox test");
         assertThat(countWhere("CM_EVENT", "SUBJECT_ = 'eng-a:outbox-ok'")).isEqualTo(1);
         assertThat(countWhere("CM_AUDIT_LOG", "RESOURCE_ID_ = 'eng-a:outbox-ok'")).isEqualTo(1);
 
         // The delivery row is consistent with the event it fans out from, not just present.
+        Long eventSeq = jdbc().sql("SELECT SEQ_ FROM CM_EVENT WHERE SUBJECT_ = 'eng-a:outbox-ok'")
+                .query(Long.class).single();
         Long deliveredSeq = jdbc().sql("SELECT EVENT_SEQ_ FROM CM_WEBHOOK_DELIVERY WHERE WEBHOOK_ID_ = 'w-outbox'")
                 .query(Long.class).single();
-        assertThat(deliveredSeq).isEqualTo(seq);
+        assertThat(deliveredSeq).isEqualTo(eventSeq);
+        assertThat(deferredInsideTransaction)
+                .as("the append lock is acquired at commit, after business-row locks")
+                .isTrue();
     }
 
     private String caseTitle(String id) {
@@ -124,21 +129,23 @@ class EventOutboxTransactionalIntegrationTest extends OracleTestBase {
         }
 
         @Transactional
-        long mutateCaseAndPublish(String caseId, boolean thenFail) {
+        boolean mutateCaseAndPublish(String caseId, boolean thenFail) {
             jdbc.sql("UPDATE CM_CASE SET TITLE_ = :title, VERSION_ = VERSION_ + 1 WHERE ID_ = :id")
                 .param("title", "Updated by outbox test").param("id", caseId).update();
 
-            long seq = publisher.publish(new CaseEvent(
+            publisher.publish(new CaseEvent(
                     org.casemgmt.domain.CaseIds.newId(), "eng-a", "case.updated", caseId, "t1",
                     OffsetDateTime.now(), Map.of("title", "Updated by outbox test")));
 
             publisher.audit(caseId, "t1", "alice", "case.update", "Case", caseId,
                     Map.of("title", "Original title"), Map.of("title", "Updated by outbox test"));
 
+            boolean deferred = jdbc.sql("SELECT COUNT(*) FROM CM_EVENT WHERE SUBJECT_ = :caseId")
+                    .param("caseId", caseId).query(Integer.class).single() == 0;
             if (thenFail) {
                 throw new IllegalStateException("simulated failure after case mutation and outbox writes");
             }
-            return seq;
+            return deferred;
         }
     }
 }

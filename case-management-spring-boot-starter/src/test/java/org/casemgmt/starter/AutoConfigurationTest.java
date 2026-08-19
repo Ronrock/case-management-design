@@ -4,6 +4,9 @@ import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
 import org.casemgmt.event.EventPublisher;
+import org.casemgmt.event.WebhookDispatcher;
+import org.casemgmt.event.WebhookSecretStore;
+import org.casemgmt.repo.IdempotencyRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.rules.CriterionEvaluator;
@@ -12,6 +15,7 @@ import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseService;
 import org.casemgmt.service.FormValidator;
 import org.casemgmt.service.WebhookService;
+import org.casemgmt.sla.SlaSweeper;
 import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.ProcessEngine;
 import org.operaton.bpm.engine.RuntimeService;
@@ -28,15 +32,24 @@ import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
 import org.springframework.transaction.interceptor.TransactionAttribute;
 import org.springframework.util.ReflectionUtils;
+import org.springframework.web.client.RestClient;
 
 import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+
+import com.sun.net.httpserver.HttpServer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 class AutoConfigurationTest {
 
@@ -53,7 +66,7 @@ class AutoConfigurationTest {
      * {@code EmbeddedEngineAutoConfiguration.embeddedEngineRequirementCheck} produces — confirmed
      * by actually running the test with the omission restored (see the Task 25 report's
      * mechanism-stripping evidence). Omitting {@code CaseManagementSchedulers} let
-     * {@link #disabledByDefaultPropertyLeavesTheContextClean} pass without ever exercising it,
+     * {@link #disabledPropertyLeavesTheContextClean} pass without ever exercising it,
      * hiding a real Important-1 bug (fix round 1): {@code CaseManagementSchedulers} had no
      * {@code casemgmt.enabled} guard of its own, so {@code casemgmt.enabled=false} left it active
      * and demanding {@code WebhookDispatcher}/{@code SlaSweeper} beans that no longer existed —
@@ -66,7 +79,9 @@ class AutoConfigurationTest {
                     RemoteEngineAutoConfiguration.class, CaseManagementSchedulers.class))
             .withPropertyValues(
                     "spring.datasource.url=jdbc:h2:mem:autoconfig;DB_CLOSE_DELAY=-1",
-                    "spring.datasource.driver-class-name=org.h2.Driver");
+                    "spring.datasource.driver-class-name=org.h2.Driver",
+                    "casemgmt.webhooks.secret-encryption-key="
+                            + "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=");
 
     /**
      * Fix round 1, Important 1: strengthened beyond a bean-absence check to
@@ -76,7 +91,7 @@ class AutoConfigurationTest {
      * FIRST of those, per {@code CaseManagementProperties}' own Javadoc.
      */
     @Test
-    void disabledByDefaultPropertyLeavesTheContextClean() {
+    void disabledPropertyLeavesTheContextClean() {
         runner.withPropertyValues("casemgmt.enabled=false")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -156,6 +171,89 @@ class AutoConfigurationTest {
                     assertThat(context.getBean(EngineGateway.class))
                             .isInstanceOf(OutboxEngineGateway.class);
                 });
+    }
+
+    @Test
+    void schedulerAutoConfigurationConstructsTheSchedulerBeanWhenEnabled() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(CaseManagementSchedulers.class))
+                .withBean(CaseManagementProperties.class, CaseManagementProperties::new)
+                .withBean(WebhookDispatcher.class, () -> mock(WebhookDispatcher.class))
+                .withBean(SlaSweeper.class, () -> mock(SlaSweeper.class))
+                .withBean(IdempotencyRepository.class, () -> mock(IdempotencyRepository.class))
+                .withPropertyValues(
+                        "casemgmt.enabled=true",
+                        "casemgmt.schedulers.enabled=true",
+                        "casemgmt.schedulers.webhook-interval-ms=3600000",
+                        "casemgmt.schedulers.engine-command-interval-ms=3600000",
+                        "casemgmt.schedulers.sla-sweep-interval-ms=3600000",
+                        "casemgmt.schedulers.idempotency-purge-interval-ms=3600000")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(CaseManagementSchedulers.class);
+                });
+    }
+
+    @Test
+    void remoteEngineRestClientSupportsBearerTokenProvider() throws Exception {
+        AtomicReference<String> authorization = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/", exchange -> {
+            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            byte[] body = "[]".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            try (var out = exchange.getResponseBody()) {
+                out.write(body);
+            }
+        });
+        server.start();
+        try {
+            runner.withUserConfiguration(RemoteBearerConfiguration.class)
+                    .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                            "casemgmt.engine.mode=remote",
+                            "casemgmt.engine.remote.base-url=http://localhost:"
+                                    + server.getAddress().getPort() + "/engine-rest",
+                            "casemgmt.engine.remote.auth-mode=bearer",
+                            "casemgmt.events.type-prefix=org.example.cm",
+                            "casemgmt.schedulers.enabled=false")
+                    .run(context -> {
+                        assertThat(context).hasNotFailed();
+                        context.getBean("engineRestClient", RestClient.class)
+                                .get()
+                                .uri("/task")
+                                .retrieve()
+                                .toBodilessEntity();
+                        assertThat(authorization).hasValue("Bearer engine-token");
+                    });
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void bearerRemoteEngineAuthRequiresATokenSource() {
+        runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=remote",
+                        "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
+                        "casemgmt.engine.remote.auth-mode=bearer",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().hasMessageContaining("RemoteEngineBearerTokenProvider"));
+    }
+
+    @Test
+    void remoteEngineTimeoutsMustFitTheClientFactoryIntegerBoundary() {
+        runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=remote",
+                        "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
+                        "casemgmt.engine.remote.connect-timeout-ms=2147483648",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().hasMessageContaining("connect-timeout-ms")
+                        .hasMessageContaining("32-bit"));
     }
 
     /**
@@ -258,6 +356,24 @@ class AutoConfigurationTest {
                 });
     }
 
+    @Test
+    void caseManagementAutoConfigurationDelegatesBeanWiringToFocusedConfigurations() {
+        assertThat(Arrays.stream(CaseManagementAutoConfiguration.class.getDeclaredMethods())
+                .filter(m -> m.isAnnotationPresent(Bean.class))
+                .toList())
+                .as("the top-level auto-configuration should only compose focused wiring classes")
+                .isEmpty();
+
+        assertThat(CaseManagementAutoConfiguration.class.getAnnotation(Import.class).value())
+                .contains(CaseManagementRepositoryConfiguration.class,
+                        CaseManagementPolicyConfiguration.class,
+                        CaseManagementServiceConfiguration.class,
+                        CaseManagementWorkerPermissionsConfiguration.class,
+                        CaseManagementSearchConfiguration.class,
+                        CaseManagementWebhookConfiguration.class,
+                        CaseManagementSlaConfiguration.class);
+    }
+
     /**
      * A consumer's own configuration. Each bean is a distinct instance held in a static field so
      * the assertions above can check identity rather than type — the substitutes are subclasses,
@@ -280,6 +396,52 @@ class AutoConfigurationTest {
         @Bean EventPublisher eventPublisher() { return EVENT_PUBLISHER; }
     }
 
+    @Configuration(proxyBeanMethods = false)
+    static class RemoteBearerConfiguration {
+        @Bean
+        RemoteEngineBearerTokenProvider remoteEngineBearerTokenProvider() {
+            return () -> "engine-token";
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class CustomWebhookSecretStoreConfiguration {
+        static final WebhookSecretStore STORE = mock(WebhookSecretStore.class);
+
+        @Bean
+        WebhookSecretStore webhookSecretStore() {
+            return STORE;
+        }
+    }
+
+    @Test
+    void customWebhookSecretStoreDoesNotRequireTheDatabaseEncryptionKey() {
+        runner.withUserConfiguration(CustomWebhookSecretStoreConfiguration.class)
+                .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=remote",
+                        "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.webhooks.secret-encryption-key=",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(WebhookSecretStore.class))
+                            .isSameAs(CustomWebhookSecretStoreConfiguration.STORE);
+                });
+    }
+
+    @Test
+    void defaultWebhookSecretStoreFailsClearlyWithoutAnEncryptionKey() {
+        runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=remote",
+                        "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.webhooks.secret-encryption-key=",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().hasMessageContaining("secret-encryption-key"));
+    }
+
     @Test
     void missingEventTypePrefixFailsStartup() {
         runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
@@ -290,7 +452,7 @@ class AutoConfigurationTest {
     }
 
     /**
-     * Not one of the brief's four test cases. {@code CaseManagementAutoConfiguration.webhookService}
+     * Not one of the brief's four test cases. {@code CaseManagementWebhookConfiguration.webhookService}
      * overrides {@code WebhookService.subscribe} in an anonymous subclass to capture the plaintext
      * secret (K3), which looked like a K3-shaped risk on inspection: Java annotations are not
      * normally inherited across an override, so re-declaring {@code @Transactional} there (which
@@ -316,7 +478,7 @@ class AutoConfigurationTest {
      * {@code @Transactional} does anything at all.
      */
     @Test
-    void webhookServiceSubscribeOverrideStaysTransactional() {
+    void webhookServiceSubscribeStaysTransactionalAndUsesASecretStore() {
         runner.withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
                         "casemgmt.engine.mode=remote",
                         "casemgmt.engine.remote.base-url=http://localhost:9999/engine-rest",
@@ -326,6 +488,7 @@ class AutoConfigurationTest {
                     assertThat(context).as("TransactionManagerConfig must be wired in so a real "
                                     + "PlatformTransactionManager exists")
                             .hasSingleBean(PlatformTransactionManager.class);
+                    assertThat(context).hasSingleBean(WebhookSecretStore.class);
 
                     WebhookService bean = context.getBean(WebhookService.class);
                     assertThat(AopUtils.isAopProxy(bean))

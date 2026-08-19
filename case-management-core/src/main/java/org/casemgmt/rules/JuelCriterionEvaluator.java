@@ -18,6 +18,7 @@ import java.util.Map;
 public class JuelCriterionEvaluator implements CriterionEvaluator {
 
     private final ExpressionFactory factory = new ExpressionFactoryImpl();
+    private final ELResolver resolver = resolver();
 
     @Override
     public boolean matches(String expression, EvaluationContext context) {
@@ -40,15 +41,18 @@ public class JuelCriterionEvaluator implements CriterionEvaluator {
     }
 
     private ELContext elContext(EvaluationContext context) {
-        CompositeELResolver resolver = new CompositeELResolver();
-        resolver.add(new MapELResolver(true));    // read-only
-        resolver.add(new ListELResolver(true));   // read-only
-
         SimpleContext ctx = new SimpleContext(resolver);
         bind(ctx, "case", context.caseAttributes());
         bind(ctx, "vars", context.variables());
         bind(ctx, "items", context.items());
         return ctx;
+    }
+
+    private static ELResolver resolver() {
+        CompositeELResolver resolver = new CompositeELResolver();
+        resolver.add(new MapELResolver(true));    // read-only
+        resolver.add(new ListELResolver(true));   // read-only
+        return resolver;
     }
 
     private void bind(SimpleContext ctx, String name, Map<String, ?> value) {

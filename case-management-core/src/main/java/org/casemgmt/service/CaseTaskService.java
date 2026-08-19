@@ -147,10 +147,9 @@ public class CaseTaskService {
             // The condition detected, and the message, are unchanged.
             //
             // Final whole-branch review (Important 1): resolved through the case's own PINNED
-            // definition id, not through CaseDefinitionRepository.formSchema(caseDefKey, ...).
-            // That method is documented tenant-agnostic and picks, across ALL tenants, the row
-            // with the highest VERSION_NO_ — acceptable for the form-rendering GET endpoint it
-            // was written for, and two real defects here, on the server-side write path:
+            // definition id, not through the latest form schema for the key. Even the
+            // tenant-scoped discovery lookup is wrong for this write path because it is not
+            // version-pinned:
             //   * version drift — deploying v2 with a new `required` field re-validated every
             //     in-flight v1 case's task completion against v2, the exact failure versioned
             //     definitions exist to prevent (every other definition lookup in this codebase

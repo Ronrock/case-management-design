@@ -19,7 +19,7 @@ A **plan item** is one element of work inside a case.
 | `HUMAN_TASK` | Work a person does. Mirrored into the engine as a real task with candidate groups and a form. |
 | `STAGE` | A container for other items. Completes when its required children are done. |
 | `MILESTONE` | A marker with no work attached. Achieved when its criteria hold. |
-| `PROCESS_TASK` | Names a BPMN process. **Currently inert** — see [Operations § Known limits](operations.md#known-limits). |
+| `PROCESS_TASK` | Names a BPMN process. When it becomes `ACTIVE`, the platform starts the configured process and links it to the case. |
 
 ## The lifecycle
 
@@ -67,7 +67,8 @@ Criteria are evaluated against a *consistent* view, so two items whose condition
 other can't observe a half-applied world.
 
 > The same property has a cost: an item admitted during a pass isn't visible to the rest of that
-> same pass. That's the cause of one known defect — see [Operations § Known limits](operations.md#known-limits).
+> same pass. Stages that just became active are given one evaluation round before autocomplete can
+> terminate leftover children, so contained optional work has a chance to enter.
 
 ## Required, optional and discretionary
 

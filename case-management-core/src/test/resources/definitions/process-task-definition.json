@@ -1,0 +1,17 @@
+{
+  "key": "process-task-demo",
+  "name": "Process Task Demo",
+  "tenantId": "t1",
+  "roles": ["owner"],
+  "planItems": [
+    {
+      "defKey": "generate-letter",
+      "type": "PROCESS_TASK",
+      "name": "Generate Letter",
+      "processDefinitionKey": "generic-process",
+      "manualActivation": false,
+      "required": true,
+      "sortOrder": 10
+    }
+  ]
+}

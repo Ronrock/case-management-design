@@ -27,6 +27,19 @@ class FormValidatorTest {
                 validator.validate(schema(), Map.of("outcome", "approve", "amount", 10)));
     }
 
+    @Test
+    void acceptsUiWidgetAnnotationAsNonValidationMetadata() {
+        Map<String, Object> schema = Map.of(
+                "type", "object",
+                "properties", Map.of("summary", Map.of(
+                        "type", "string",
+                        "title", "Summary",
+                        "ui:widget", "textarea")));
+
+        assertThatNoException().isThrownBy(() ->
+                validator.validate(schema, Map.of("summary", "Customer supplied context")));
+    }
+
     /**
      * A missing required property has no field of its own to point at — the violation applies
      * to the object as a whole, so networknt reports it at the document root. Per RFC 6901,

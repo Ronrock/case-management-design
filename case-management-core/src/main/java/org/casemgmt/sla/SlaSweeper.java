@@ -2,6 +2,7 @@ package org.casemgmt.sla;
 
 import org.casemgmt.domain.CaseIds;
 import org.casemgmt.domain.CaseInstance;
+import org.casemgmt.error.NotFoundException;
 import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
@@ -18,7 +19,7 @@ import java.util.Map;
 /**
  * Polls {@code CM_SLA_RECORD} for RUNNING clocks past their warning or due threshold, emits
  * {@code sla.warning}/{@code sla.breached} and denormalises the result onto {@code CM_CASE.SLA_STATUS_}.
- * Paused clocks are excluded by {@link SlaRepository#dueRecords}'s {@code STATUS_ = 'RUNNING'}
+ * Paused clocks are excluded by {@link SlaRepository#claimDueRecords}'s {@code STATUS_ = 'RUNNING'}
  * predicate — that is the whole point of pause/resume.
  *
  * <p><b>Real background job (fix round 1, I2):</b> Task 25 registers this as a Spring bean and
@@ -63,26 +64,29 @@ public class SlaSweeper {
      * @return how many due records this pass actually warned or breached
      *
      * <p><b>Bounded, ordered batch</b> (final whole-branch review, Important 8). This method is
-     * {@code @Transactional} and iterates everything {@link SlaRepository#dueRecords} returns, so
-     * for as long as it runs it holds row locks across {@code CM_SLA_RECORD} and — through
-     * {@code cases.require}/{@code updateSlaStatusMonotonic} — {@code CM_CASE}. With an unbounded
-     * result set that is one transaction locking the whole backlog on a live, user-facing table:
-     * a lock convoy waiting for the first busy day (a backlog after an outage, the first sweep
-     * after a bulk import). {@code dueRecords} now returns at most
-     * {@link SlaRepository#MAX_SWEEP_BATCH} rows, oldest id first; whatever is left over is due
-     * again on the next tick, which is every 60s by default. The {@code ORDER BY} is the other
-     * half: without a total order two concurrent sweepers can take the same rows in different
-     * sequences and deadlock (ORA-00060), and that arrives as a {@code DataAccessException} —
-     * which escapes {@link #processOne}'s per-record {@code OptimisticLockException} catch and
-     * takes the whole batch down with it.
+     * {@code @Transactional} and iterates everything {@link SlaRepository#claimDueRecords}
+     * returns, so for as long as it runs it holds row locks across {@code CM_SLA_RECORD} and —
+     * through {@code cases.require}/{@code updateSlaStatusMonotonic} — {@code CM_CASE}. With an
+     * unbounded result set that is one transaction locking the whole backlog on a live,
+     * user-facing table: a lock convoy waiting for the first busy day. The claim query now
+     * returns at most {@link SlaRepository#MAX_SWEEP_BATCH} rows, oldest id first, and stamps
+     * them with a claim token before processing; whatever is left over is due again on the next
+     * tick, which is every 60s by default.
      */
     @Transactional
     public int sweep() {
         OffsetDateTime now = OffsetDateTime.now();
         int handled = 0;
+        var claimedRecords = sla.claimDueRecords(now);
+        Map<String, SlaRepository.TargetRow> targetsById = sla.targetsById(
+                claimedRecords.stream().map(c -> c.record().targetId()).toList());
 
-        for (SlaRecord record : sla.dueRecords(now)) {
-            if (processOne(record, now)) {
+        for (SlaRepository.ClaimedRecord claimed : claimedRecords) {
+            SlaRepository.TargetRow target = targetsById.get(claimed.record().targetId());
+            if (target == null) {
+                throw new NotFoundException("SlaTarget", claimed.record().targetId());
+            }
+            if (processOne(claimed, target, now)) {
                 handled++;
             }
         }
@@ -95,7 +99,9 @@ public class SlaSweeper {
      * race, nothing else for this record has happened yet, so catching and skipping here leaves
      * no partial state — no event fired for a status change that didn't actually stick.
      */
-    private boolean processOne(SlaRecord record, OffsetDateTime now) {
+    private boolean processOne(SlaRepository.ClaimedRecord claimed, SlaRepository.TargetRow target,
+                               OffsetDateTime now) {
+        SlaRecord record = claimed.record();
         boolean breaching = record.dueAt() != null && !record.dueAt().isAfter(now);
         boolean warning = !breaching && record.warnAt() != null && !record.warnAt().isAfter(now);
         if (!breaching && !warning) {
@@ -104,10 +110,10 @@ public class SlaSweeper {
 
         try {
             if (breaching) {
-                sla.update(breached(record), record.version());
+                sla.updateClaimed(breached(record), record.version(), claimed.claimToken());
             } else {
                 // Clear WARN_AT_ so the warning fires once, not on every sweep.
-                sla.update(warned(record), record.version());
+                sla.updateClaimed(warned(record), record.version(), claimed.claimToken());
             }
         } catch (OptimisticLockException e) {
             log.warn("SLA record {} (case {}) lost a concurrent version race during sweep; "
@@ -116,18 +122,21 @@ public class SlaSweeper {
         }
 
         CaseInstance c = cases.require(record.caseId());
-        SlaRepository.TargetRow target = sla.target(record.targetId());
         if (breaching) {
+            cases.updateSlaStatusMonotonic(c.id(), "BREACHED");
             // S3: BREACH_ACTIONS_JSON_ was read and never consulted. EMIT_EVENT now actually
-            // gates the event; the record/case status writes above and below are the SLA breach
-            // fact itself, not a declared "action", so they always happen regardless.
+            // gates the breach event; ESCALATE emits its own escalation event and audit row. The
+            // record/case status writes above and below are the SLA breach fact itself, not a
+            // declared "action", so they always happen regardless.
             if (target.breachActions().contains("EMIT_EVENT")) {
                 emit(c, EventTypes.SLA_BREACHED, record);
             }
-            cases.updateSlaStatusMonotonic(c.id(), "BREACHED");
+            if (target.breachActions().contains("ESCALATE")) {
+                escalate(c, target, record);
+            }
         } else {
-            emit(c, EventTypes.SLA_WARNING, record);
             cases.updateSlaStatusMonotonic(c.id(), "WARNING");
+            emit(c, EventTypes.SLA_WARNING, record);
         }
         return true;
     }
@@ -147,5 +156,17 @@ public class SlaSweeper {
                 c.tenantId(), OffsetDateTime.now(),
                 Map.of("slaId", record.id(), "targetId", record.targetId(),
                         "dueAt", String.valueOf(record.dueAt()))));
+    }
+
+    private void escalate(CaseInstance c, SlaRepository.TargetRow target, SlaRecord record) {
+        Map<String, Object> data = Map.of(
+                "slaId", record.id(),
+                "targetId", record.targetId(),
+                "targetKey", target.targetKey(),
+                "dueAt", String.valueOf(record.dueAt()));
+        publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(),
+                EventTypes.SLA_ESCALATED, c.id(), c.tenantId(), OffsetDateTime.now(), data));
+        publisher.audit(c.id(), c.tenantId(), "system", "sla.escalate", "SlaRecord",
+                record.id(), Map.of("status", "RUNNING"), data);
     }
 }

@@ -100,17 +100,6 @@ public class PlanItemController {
                         request == null ? null : request.reason(), callers.actor(authentication)));
     }
 
-    /**
-     * If-Match, then authorize, then act. The item read for the policy check is a check-then-act
-     * against the service's own re-read, which is fine: the service re-validates the source
-     * state and the version inside its transaction, so the worst a racing writer can do is turn
-     * this into a 409 or a 412 — never a mutation the policy would have refused, because the
-     * policy's decision only ever widens with a state the caller could not have caused.
-     */
-    /**
-     * Loads the case's snapshot, or reports the case absent when it belongs to another tenant
-     * (fix round 1, Critical 2).
-     */
     private CaseSnapshot visibleSnapshot(String caseId, Actor actor) {
         var instance = cases.get(caseId);
         callers.requireVisible("Case", caseId, instance.tenantId(), actor);
@@ -122,6 +111,7 @@ public class PlanItemController {
                                                  Function<Long, PlanItem> operation) {
         Actor actor = callers.actor(authentication);
         CaseSnapshot snapshot = visibleSnapshot(caseId, actor);
+        Set<String> roles = callers.roles(caseId, actor);
         long version = ETagSupport.expectedVersion(ifMatch, "plan item " + itemId,
                 () -> repo.findById(itemId)
                         .map(i -> OptionalLong.of(i.version()))
@@ -137,11 +127,10 @@ public class PlanItemController {
             throw new CaseConflictException("wrong-case",
                     "Plan item " + itemId + " does not belong to case " + caseId, List.of());
         }
-        policy.assertAllowedOnPlanItem(snapshot, current, callers.roles(caseId, actor), action);
+        policy.assertAllowedOnPlanItem(snapshot, current, roles, action);
 
         PlanItem updated = operation.apply(version);
-        List<AvailableAction> actions = policy.listForPlanItem(
-                cases.snapshot(caseId), updated, callers.roles(caseId, actor));
+        List<AvailableAction> actions = policy.listForPlanItem(cases.snapshot(caseId), updated, roles);
         return ResponseEntity.ok().eTag(ETagSupport.format(updated.version()))
                 .body(PlanItemResponse.of(updated, actions));
     }

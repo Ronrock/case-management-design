@@ -108,14 +108,14 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
     void theGlobalEventStreamIsScopedToTheCallersTenant() {
         deployAndCreateCase();
 
-        ResponseEntity<List> mine = alice().get().uri("/events?after=0&limit=100")
-                .retrieve().toEntity(List.class);
-        assertThat((List<?>) mine.getBody()).isNotEmpty();
+        ResponseEntity<Map> mine = alice().get().uri("/events?after=0&limit=100")
+                .retrieve().toEntity(Map.class);
+        assertThat((List<?>) mine.getBody().get("items")).isNotEmpty();
 
-        ResponseEntity<List> theirs = client(OTHER_TENANT_USER).get().uri("/events?after=0&limit=100")
-                .retrieve().toEntity(List.class);
+        ResponseEntity<Map> theirs = client(OTHER_TENANT_USER).get().uri("/events?after=0&limit=100")
+                .retrieve().toEntity(Map.class);
         assertThat(theirs.getStatusCode().value()).isEqualTo(200);
-        assertThat((List<?>) theirs.getBody())
+        assertThat((List<?>) theirs.getBody().get("items"))
                 .as("tenant t1's case events must not reach a t2 caller").isEmpty();
     }
 
@@ -405,6 +405,46 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
                 .contains("reviewed").doesNotContain("t2reviewed");
         assertThat(planItemNames(client(OTHER_TENANT_USER), (String) t2Case.getBody().get("id")))
                 .contains("t2reviewed").doesNotContain("reviewed");
+    }
+
+    @Test
+    void formSchemaDiscoveryIsScopedToTheCallersTenant() {
+        deployDefinition();
+
+        ResponseEntity<Map> foreign = client(OTHER_TENANT_USER).get()
+                .uri("/case-definitions/{key}/forms/{formKey}", DEFINITION_KEY, "reviewForm")
+                .retrieve().toEntity(Map.class);
+        assertThat(foreign.getStatusCode().value()).isEqualTo(404);
+        assertThat(foreign.getBody()).containsEntry("code", "not-found");
+
+        ResponseEntity<Map> explicitForeign = client(OTHER_TENANT_USER).get()
+                .uri("/case-definitions/{key}/forms/{formKey}?tenantId={tenant}",
+                        DEFINITION_KEY, "reviewForm", TENANT)
+                .retrieve().toEntity(Map.class);
+        assertThat(explicitForeign.getStatusCode().value()).isEqualTo(403);
+        assertThat(explicitForeign.getBody()).containsEntry("code", "forbidden");
+
+        client(OTHER_TENANT_USER).post().uri("/case-definitions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(definitionJson()
+                        .replace("\"tenantId\": \"t1\"", "\"tenantId\": \"t2\"")
+                        .replace("\"note\": { \"type\": \"string\" }",
+                                "\"t2Only\": { \"type\": \"string\" }"))
+                .retrieve().toEntity(Map.class);
+
+        ResponseEntity<Map> davesSchema = client(OTHER_TENANT_USER).get()
+                .uri("/case-definitions/{key}/forms/{formKey}", DEFINITION_KEY, "reviewForm")
+                .retrieve().toEntity(Map.class);
+        assertThat(davesSchema.getStatusCode().value()).isEqualTo(200);
+        assertThat((Map<String, Object>) davesSchema.getBody().get("properties"))
+                .containsKey("t2Only").doesNotContainKey("note");
+
+        ResponseEntity<Map> alicesSchema = alice().get()
+                .uri("/case-definitions/{key}/forms/{formKey}", DEFINITION_KEY, "reviewForm")
+                .retrieve().toEntity(Map.class);
+        assertThat(alicesSchema.getStatusCode().value()).isEqualTo(200);
+        assertThat((Map<String, Object>) alicesSchema.getBody().get("properties"))
+                .containsKey("note").doesNotContainKey("t2Only");
     }
 
     private List<String> planItemNames(org.springframework.web.client.RestClient client, String caseId) {

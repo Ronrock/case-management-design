@@ -149,6 +149,25 @@ class RuntimeRepositoriesTest extends OracleTestBase {
     }
 
     @Test
+    void worklistTenantPredicateFiltersCandidateGroupMatchesByOwningCaseTenant() {
+        new CaseRepository(jdbc()).insert(new CaseInstance("eng-a:2", "eng-a", "t2", "d:1", "d", 1,
+                null, "T2", CaseState.ACTIVE, CasePriority.MEDIUM, null, null, "dave", "NONE",
+                null, null, Map.of(), 0L, OffsetDateTime.now(), OffsetDateTime.now(), null));
+        tasks.insert(openTask("t-tenant-1", null, List.of("reviewers")));
+        planItems.insert(new PlanItem("t-tenant-2-pi", "eng-a:2", "pd-1", PlanItemType.HUMAN_TASK,
+                "Review", PlanItemState.ACTIVE, null, false, 1, null, null, null, 0L,
+                OffsetDateTime.now(), OffsetDateTime.now(), null));
+        tasks.insert(new CaseTask("t-tenant-2", "eng-a:2", "t-tenant-2-pi", null, "T", null,
+                TaskState.OPEN, null, null, List.of("reviewers"), null, 50, null, null,
+                CaseTask.EngineSync.SYNCED, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null));
+
+        assertThat(tasks.worklist("t1", null, List.of("reviewers"), 20))
+                .extracting(CaseTask::id).containsExactly("t-tenant-1");
+        assertThat(tasks.worklist("t2", null, List.of("reviewers"), 20))
+                .extracting(CaseTask::id).containsExactly("t-tenant-2");
+    }
+
+    @Test
     void worklistExcludesFailedSyncAlongsidePending() {
         planItems.insert(item("t-failed-pi", PlanItemState.ACTIVE));
         tasks.insert(new CaseTask("t-failed", "eng-a:1", "t-failed-pi", null, "T", null,

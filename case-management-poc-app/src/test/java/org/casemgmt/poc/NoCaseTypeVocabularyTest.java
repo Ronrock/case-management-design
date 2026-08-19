@@ -13,6 +13,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -35,16 +37,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * so a new plan item, form or process key added to that file is covered automatically the moment
  * it exists. Nothing has to be remembered.
  *
- * <p><b>The one documented limitation.</b> Only DISTINCTIVE tokens are enforceable: those with a
- * hyphen or an interior capital ({@code registerComplaint}, {@code closeForm},
- * {@code decision-letter}, {@code sla-complaint}), plus the case-definition key itself. The case
- * type also declares single lowercase words as plan-item keys — {@code intake},
- * {@code assessment}, {@code decision}, {@code closure}, {@code decided} — and those are ordinary
- * English that appears legitimately in prose and in generic domain code ("the retry-vs-dead-letter
- * decision"). Searching for them would produce false failures with no way to tell a leak from a
- * sentence, so they are excluded by a mechanical rule stated in {@link #isDistinctive(String)}
- * rather than by a hand-maintained ignore list. This is a real gap in coverage, stated here rather
- * than papered over: a leak of exactly the string {@code "intake"} would not be caught.
+ * <p><b>How plain lowercase tokens are handled.</b> Distinctive identifiers are searched in all
+ * source text. Plain lowercase words such as {@code intake} or {@code decision} are searched only
+ * when they occur as quoted literals, where they are most likely to become executable case-type
+ * coupling and least likely to be ordinary prose.
  */
 class NoCaseTypeVocabularyTest {
 
@@ -61,6 +57,9 @@ class NoCaseTypeVocabularyTest {
             ".java", ".xml", ".yaml", ".yml", ".json", ".sql", ".properties", ".bpmn", ".txt", ".md");
 
     private static final Path REPOSITORY_ROOT = Path.of("..").toAbsolutePath().normalize();
+
+    private static final Pattern DOUBLE_QUOTED_LITERAL =
+            Pattern.compile("\"(?:\\\\.|[^\"\\\\])*\"", Pattern.DOTALL);
 
     @Test
     void theScanIsPointedAtARealRepositoryTree() {
@@ -81,7 +80,8 @@ class NoCaseTypeVocabularyTest {
         // the leak scan below pass over an empty token set. Pin what the derivation must produce.
         assertThat(vocabulary)
                 .contains("complaint", "registerComplaint", "closeComplaint", "registerForm",
-                        "closeForm", "decision-letter", "sla-complaint")
+                        "closeForm", "decision-letter", "sla-complaint",
+                        "intake", "assessment", "decision", "closure", "decided")
                 .hasSizeGreaterThanOrEqualTo(10);
     }
 
@@ -94,11 +94,14 @@ class NoCaseTypeVocabularyTest {
             Path source = REPOSITORY_ROOT.resolve(module).resolve("src");
             try (Stream<Path> files = Files.walk(source)) {
                 for (Path file : files.filter(Files::isRegularFile).filter(this::isTextFile).toList()) {
-                    List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+                    String document = Files.readString(file, StandardCharsets.UTF_8);
+                    List<String> lines = document.lines().toList();
                     for (int i = 0; i < lines.size(); i++) {
-                        String lowercase = lines.get(i).toLowerCase(Locale.ROOT);
+                        String line = lines.get(i);
+                        String lowercase = line.toLowerCase(Locale.ROOT);
+                        Set<String> literalTokens = quotedLiteralTokens(line);
                         for (String token : vocabulary) {
-                            if (lowercase.contains(token.toLowerCase(Locale.ROOT))) {
+                            if (mentionsToken(lowercase, literalTokens, token)) {
                                 leaks.add(REPOSITORY_ROOT.relativize(file) + ":" + (i + 1)
                                         + " mentions '" + token + "'");
                             }
@@ -119,8 +122,7 @@ class NoCaseTypeVocabularyTest {
     /**
      * Reads the deployed case definition and returns the tokens that identify THIS case type:
      * its key and display name, its SLA policy id, its form keys, and each plan item's key, form
-     * key and process-definition key — filtered to those {@link #isDistinctive(String) distinctive}
-     * enough to search for.
+     * key and process-definition key.
      */
     @SuppressWarnings("unchecked")
     private Set<String> caseTypeVocabulary() {
@@ -149,9 +151,9 @@ class NoCaseTypeVocabularyTest {
         }
 
         Set<String> vocabulary = new LinkedHashSet<>();
-        String key = String.valueOf(definition.get("key"));
-        vocabulary.add(key);                                    // the case type's own key, always
-        candidates.stream().filter(this::isDistinctive).forEach(vocabulary::add);
+        candidates.stream()
+                .filter(token -> token != null && !token.isBlank())
+                .forEach(vocabulary::add);
         return vocabulary;
     }
 
@@ -167,6 +169,23 @@ class NoCaseTypeVocabularyTest {
         }
         return token.indexOf('-') >= 0
                 || token.chars().skip(1).anyMatch(Character::isUpperCase);
+    }
+
+    private boolean mentionsToken(String lowercaseLine, Set<String> literalTokens, String token) {
+        String lowercaseToken = token.toLowerCase(Locale.ROOT);
+        return isDistinctive(token)
+                ? lowercaseLine.contains(lowercaseToken)
+                : literalTokens.contains(lowercaseToken);
+    }
+
+    private Set<String> quotedLiteralTokens(String document) {
+        Set<String> tokens = new LinkedHashSet<>();
+        Matcher matcher = DOUBLE_QUOTED_LITERAL.matcher(document);
+        while (matcher.find()) {
+            String literal = matcher.group();
+            tokens.add(literal.substring(1, literal.length() - 1).toLowerCase(Locale.ROOT));
+        }
+        return tokens;
     }
 
     private boolean isTextFile(Path file) {

@@ -30,7 +30,8 @@ public final class TestServices {
                 new WebhookRepository(jdbc), "org.example.cm", "eng-test");
         var evaluator = new PlanModelEvaluator(new JuelCriterionEvaluator());
         var applier = new TransitionApplier(new PlanItemRepository(jdbc), new CaseTaskRepository(jdbc),
-                new MilestoneRepository(jdbc), gateway, publisher);
+                new LinkedProcessRepository(jdbc), new MilestoneRepository(jdbc), gateway,
+                publisher);
         return new CaseService(new CaseRepository(jdbc), new CaseDefinitionRepository(dataSource),
                 new PlanItemRepository(jdbc), new MilestoneRepository(jdbc),
                 new ParticipantRepository(jdbc), evaluator, new PlanModelInstantiator(),
@@ -42,7 +43,8 @@ public final class TestServices {
         var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
                 new WebhookRepository(jdbc), "org.example.cm", "eng-test");
         var applier = new TransitionApplier(new PlanItemRepository(jdbc), new CaseTaskRepository(jdbc),
-                new MilestoneRepository(jdbc), gateway, publisher);
+                new LinkedProcessRepository(jdbc), new MilestoneRepository(jdbc), gateway,
+                publisher);
         return new PlanItemService(new PlanItemRepository(jdbc), caseService(dataSource, gateway),
                 applier, publisher, new StageCompletion());
     }
@@ -61,6 +63,13 @@ public final class TestServices {
         var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
                 new WebhookRepository(jdbc), "org.example.cm", "eng-test");
         return new CommentService(new CommentRepository(jdbc), new CaseRepository(jdbc), publisher);
+    }
+
+    public static DocumentService documentService(DataSource dataSource) {
+        JdbcClient jdbc = JdbcClient.create(dataSource);
+        var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        return new DocumentService(new DocumentRepository(jdbc), new CaseRepository(jdbc), publisher);
     }
 
     public static MilestoneService milestoneService(DataSource dataSource) {

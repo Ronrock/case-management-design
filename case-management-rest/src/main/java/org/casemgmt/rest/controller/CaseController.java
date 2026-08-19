@@ -5,6 +5,11 @@ import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
 import org.casemgmt.domain.PlanItem;
+import org.casemgmt.permissions.PermissionActions;
+import org.casemgmt.permissions.PermissionDecision;
+import org.casemgmt.permissions.ResourceTypes;
+import org.casemgmt.permissions.WorkerPermissionEvaluator;
+import org.casemgmt.permissions.WorkerPermissionResource;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseQuery;
 import org.casemgmt.repo.CaseRepository;
@@ -17,7 +22,6 @@ import org.casemgmt.rest.dto.Dtos.CaseResponse;
 import org.casemgmt.rest.dto.Dtos.CloseRequest;
 import org.casemgmt.rest.dto.Dtos.CreateCaseRequest;
 import org.casemgmt.rest.dto.Dtos.Page;
-import org.casemgmt.rest.dto.Dtos.PatchCaseRequest;
 import org.casemgmt.rest.error.InvalidRequestException;
 import org.casemgmt.rest.filter.ETagSupport;
 import org.casemgmt.rest.filter.IdempotencySupport;
@@ -40,6 +44,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.net.URI;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -88,11 +95,13 @@ public class CaseController {
     private final ActionPolicy policy;
     private final CallerResolver callers;
     private final IdempotencySupport idempotency;
+    private final WorkerPermissionEvaluator permissions;
 
     public CaseController(CaseService cases, CaseRepository caseRepo,
                           CaseDefinitionRepository definitionRepo, PlanItemRepository planItemRepo,
                           ActionPolicy policy, CallerResolver callers,
-                          IdempotencyRepository idempotencyRepo) {
+                          IdempotencyRepository idempotencyRepo,
+                          WorkerPermissionEvaluator permissions) {
         this.cases = cases;
         this.caseRepo = caseRepo;
         this.definitionRepo = definitionRepo;
@@ -100,6 +109,7 @@ public class CaseController {
         this.policy = policy;
         this.callers = callers;
         this.idempotency = new IdempotencySupport(idempotencyRepo);
+        this.permissions = permissions;
     }
 
     /**
@@ -123,6 +133,9 @@ public class CaseController {
         String tenantId = callers.requireTenant(actor, request.tenantId());
         CasePriority priority = InvalidRequestException.enumValue(
                 CasePriority.class, "priority", request.priority(), CasePriority.MEDIUM);
+        permissions.assertAllowed(actor, tenantId, PermissionActions.CASE_CREATE,
+                ResourceTypes.CASE, "new:" + request.caseDefinitionKey(),
+                createContext(request, priority));
 
         var result = idempotency.execute(idempotencyKey, idempotencyScope(actor),
                 JsonCodec.toJson(request),
@@ -145,17 +158,10 @@ public class CaseController {
     }
 
     /**
-     * The case listing, as {@code openapi-specs.md} declares it (fix round 1, review finding I6):
-     * a {@code Page} envelope rather than a bare array, {@code page}/{@code pageSize} rather than
-     * {@code offset}/{@code limit}, and a repeatable {@code state}.
-     *
-     * <p>Known deviations from the spec, both deliberate and both out of scope for this round:
-     * {@code totalItems}/{@code totalPages} are not emitted (they need a COUNT query
-     * {@code CaseRepository} does not offer), and the spec's {@code sort},
-     * {@code createdAfter}/{@code createdBefore}, {@code participantUser}, {@code queueId},
-     * {@code slaStatus}, {@code priority} and {@code freeText} filters are not implemented. The
-     * envelope is the part that matters now: adding a total to it later is additive, whereas
-     * replacing a bare array with one is breaking.
+     * The case listing, as {@code openapi-specs.md} declares it: a {@code Page} envelope,
+     * repeatable {@code state}, column-backed filters, and whitelisted sorting. The free-text
+     * predicate covers title, business key, and comments; heavier ranking belongs to a projection
+     * or search module rather than this transactional list endpoint.
      */
     @GetMapping
     public Page<CaseResponse> query(@RequestParam(required = false) String tenantId,
@@ -163,6 +169,14 @@ public class CaseController {
                                     @RequestParam(required = false) String assignee,
                                     @RequestParam(required = false) String caseDefinitionKey,
                                     @RequestParam(required = false) String businessKey,
+                                    @RequestParam(required = false) String participantUser,
+                                    @RequestParam(required = false) String queueId,
+                                    @RequestParam(required = false) String slaStatus,
+                                    @RequestParam(required = false) String priority,
+                                    @RequestParam(required = false) String freeText,
+                                    @RequestParam(required = false) String createdAfter,
+                                    @RequestParam(required = false) String createdBefore,
+                                    @RequestParam(required = false) String sort,
                                     @RequestParam(defaultValue = "0") int page,
                                     @RequestParam(defaultValue = "" + DEFAULT_PAGE_SIZE) int pageSize,
                                     Authentication authentication) {
@@ -170,48 +184,56 @@ public class CaseController {
         String tenant = callers.requireTenant(actor, tenantId);
 
         List<CaseState> states = state == null ? List.of() : state.stream()
+                .flatMap(s -> List.of(s.split(",")).stream())
                 .map(s -> InvalidRequestException.enumValue(CaseState.class, "state", s, null))
                 .filter(Objects::nonNull)
                 .toList();
+        CasePriority parsedPriority = InvalidRequestException.enumValue(
+                CasePriority.class, "priority", priority, null);
         int effectivePage = Math.max(page, 0);
         int effectiveSize = Math.clamp(pageSize, 1, MAX_PAGE_SIZE);
 
-        List<CaseInstance> rows = caseRepo.query(new CaseQuery(tenant, states, assignee,
-                caseDefinitionKey, businessKey, effectivePage * effectiveSize, effectiveSize));
+        CaseQuery query = new CaseQuery(tenant, states, blankToNull(assignee),
+                blankToNull(caseDefinitionKey), blankToNull(businessKey), blankToNull(participantUser),
+                blankToNull(queueId), parseSlaStatus(slaStatus), parsedPriority, blankToNull(freeText),
+                parseDateTime("createdAfter", createdAfter), parseDateTime("createdBefore", createdBefore),
+                parseSort(sort), 0, effectiveSize);
 
-        return new Page<>(withActions(rows, actor), effectivePage, effectiveSize);
+        AuthorizedPage authorized = authorizedPage(query, actor, tenant, effectivePage, effectiveSize);
+        long totalItems = authorized.totalItems();
+        int totalPages = totalItems == 0 ? 0
+                : (int) Math.min(Integer.MAX_VALUE,
+                        (totalItems + effectiveSize - 1L) / effectiveSize);
+
+        return new Page<>(withActions(authorized.items(), actor), effectivePage, effectiveSize,
+                totalItems, totalPages);
     }
 
     @GetMapping("/{caseId}")
     public ResponseEntity<CaseResponse> get(@PathVariable String caseId, Authentication authentication) {
         Actor actor = callers.actor(authentication);
         CaseInstance c = visibleCase(caseId, actor);
+        assertCasePermission(actor, c, PermissionActions.CASE_READ);
         return ResponseEntity.ok().eTag(ETagSupport.format(c.version())).body(response(c, actor));
     }
 
     /**
-     * {@code consumes} is {@code application/merge-patch+json} per the spec (fix round 1, I6).
-     *
-     * <p>Known deviation, explicitly out of scope: true RFC 7386 null-clearing semantics (an
-     * explicit {@code null} removing a field) are NOT implemented — a null field is treated as
-     * absent, exactly as before. Declaring the media type without the semantics is the lesser of
-     * two evils here: the wire contract now matches the spec a client generates from, and the
-     * one behaviour that differs is recorded rather than silently wrong under
-     * {@code application/json}, which promises nothing at all about merge semantics.
+     * {@code consumes} is {@code application/merge-patch+json} per the spec. The raw map is
+     * intentional: this endpoint must distinguish an absent field from a field explicitly present
+     * with {@code null}, which a DTO record cannot do.
      */
     @PatchMapping(path = "/{caseId}", consumes = "application/merge-patch+json")
     public ResponseEntity<CaseResponse> patch(@PathVariable String caseId,
                                               @RequestHeader(value = "If-Match", required = false) String ifMatch,
-                                              @RequestBody PatchCaseRequest request,
+                                              @RequestBody(required = false) Map<String, Object> request,
                                               Authentication authentication) {
         Actor actor = callers.actor(authentication);
         long version = expectedVersion(ifMatch, caseId, actor);
-        policy.assertAllowed(cases.snapshot(visibleCase(caseId, actor)),
-                callers.roles(caseId, actor), "update");
+        CaseInstance c = visibleCase(caseId, actor);
+        assertCasePermission(actor, c, PermissionActions.CASE_UPDATE);
+        policy.assertAllowed(cases.snapshot(c), callers.roles(caseId, actor), "update");
 
-        Map<String, Object> patch = new LinkedHashMap<>();
-        if (request.title() != null) patch.put("title", request.title());
-        if (request.variables() != null) patch.put("variables", request.variables());
+        Map<String, Object> patch = validatePatch(request == null ? Map.of() : request);
 
         CaseInstance updated = cases.update(caseId, version, patch, actor);
         return ResponseEntity.ok().eTag(ETagSupport.format(updated.version()))
@@ -225,8 +247,9 @@ public class CaseController {
                                               Authentication authentication) {
         Actor actor = callers.actor(authentication);
         long version = expectedVersion(ifMatch, caseId, actor);
-        policy.assertAllowed(cases.snapshot(visibleCase(caseId, actor)),
-                callers.roles(caseId, actor), "close");
+        CaseInstance c = visibleCase(caseId, actor);
+        assertCasePermission(actor, c, PermissionActions.CASE_CLOSE);
+        policy.assertAllowed(cases.snapshot(c), callers.roles(caseId, actor), "close");
 
         CaseInstance closed = cases.close(caseId, version,
                 request == null ? null : request.outcome(), actor);
@@ -241,8 +264,9 @@ public class CaseController {
                                                Authentication authentication) {
         Actor actor = callers.actor(authentication);
         long version = expectedVersion(ifMatch, caseId, actor);
-        policy.assertAllowed(cases.snapshot(visibleCase(caseId, actor)),
-                callers.roles(caseId, actor), "cancel");
+        CaseInstance c = visibleCase(caseId, actor);
+        assertCasePermission(actor, c, PermissionActions.CASE_CANCEL);
+        policy.assertAllowed(cases.snapshot(c), callers.roles(caseId, actor), "cancel");
 
         CaseInstance cancelled = cases.cancel(caseId, version,
                 request == null ? null : request.reason(), actor);
@@ -262,6 +286,81 @@ public class CaseController {
      */
     private String idempotencyScope(Actor actor) {
         return "POST /cases:" + actor.userId();
+    }
+
+    private static Map<String, Object> validatePatch(Map<String, Object> request) {
+        Map<String, Object> patch = new LinkedHashMap<>();
+        for (String key : request.keySet()) {
+            if (!Set.of("title", "variables").contains(key)) {
+                throw new InvalidRequestException("Unsupported case patch field '" + key
+                        + "'; supported fields are title and variables");
+            }
+        }
+        if (request.containsKey("title")) {
+            Object title = request.get("title");
+            if (title != null && !(title instanceof String)) {
+                throw new InvalidRequestException("Field 'title' must be a string or null");
+            }
+            patch.put("title", title);
+        }
+        if (request.containsKey("variables")) {
+            Object variables = request.get("variables");
+            if (variables != null && !(variables instanceof Map<?, ?>)) {
+                throw new InvalidRequestException("Field 'variables' must be an object or null");
+            }
+            patch.put("variables", variables);
+        }
+        return patch;
+    }
+
+    private static OffsetDateTime parseDateTime(String field, String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return OffsetDateTime.parse(value);
+        } catch (DateTimeParseException e) {
+            throw new InvalidRequestException("Invalid date-time value '" + value + "' for " + field);
+        }
+    }
+
+    private static String parseSlaStatus(String value) {
+        String status = blankToNull(value);
+        if (status == null) {
+            return null;
+        }
+        if (!Set.of("NONE", "ON_TRACK", "WARNING", "BREACHED").contains(status)) {
+            throw new InvalidRequestException("Invalid value '" + value
+                    + "' for slaStatus; legal values are NONE, ON_TRACK, WARNING, BREACHED");
+        }
+        return status;
+    }
+
+    private static List<CaseQuery.SortTerm> parseSort(String sort) {
+        if (sort == null || sort.isBlank()) {
+            return List.of();
+        }
+        Set<String> allowed = Set.of("createdAt", "updatedAt", "closedAt", "priority",
+                "state", "title", "businessKey");
+        List<CaseQuery.SortTerm> terms = new ArrayList<>();
+        for (String raw : sort.split(",")) {
+            String token = raw.trim();
+            if (token.isEmpty()) {
+                continue;
+            }
+            boolean descending = token.startsWith("-");
+            String field = descending ? token.substring(1) : token;
+            if (!allowed.contains(field)) {
+                throw new InvalidRequestException("Invalid case sort field '" + field
+                        + "'; legal values are " + allowed);
+            }
+            terms.add(new CaseQuery.SortTerm(field, descending));
+        }
+        return terms;
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     /**
@@ -304,8 +403,9 @@ public class CaseController {
     private CaseResponse response(CaseInstance c, Actor actor) {
         Set<String> roles = callers.roles(c.id(), actor);
         CaseSnapshot snapshot = cases.snapshot(c);
-        List<AvailableAction> actions = policy.listForCase(snapshot, roles);
-        return CaseResponse.of(c, actions);
+        List<AvailableAction> actions = filterCaseActions(c, actor,
+                policy.listForCase(snapshot, roles));
+        return CaseResponse.of(c, actions, policy.listForCollaboration(snapshot, roles));
     }
 
     /**
@@ -326,7 +426,111 @@ public class CaseController {
                     definitions.computeIfAbsent(c.caseDefId(), definitionRepo::require);
             CaseSnapshot snapshot = new CaseSnapshot(c, definition,
                     itemsByCase.getOrDefault(c.id(), List.of()));
-            return CaseResponse.of(c, policy.listForCase(snapshot, rolesByCase.get(c.id())));
+            Set<String> roles = rolesByCase.get(c.id());
+            return CaseResponse.of(c, filterCaseActions(c, actor,
+                    policy.listForCase(snapshot, roles)),
+                    policy.listForCollaboration(snapshot, roles));
         }).toList();
+    }
+
+    private List<CaseInstance> readableCases(List<CaseInstance> rows, Actor actor, String tenant) {
+        if (rows.isEmpty()) {
+            return rows;
+        }
+        Map<String, PermissionDecision> decisions = permissions.evaluate(actor, tenant,
+                PermissionActions.CASE_READ, ResourceTypes.CASE,
+                rows.stream()
+                        .map(c -> new WorkerPermissionResource(c.id(), caseContext(c)))
+                        .toList());
+        return rows.stream()
+                .filter(c -> decisions.getOrDefault(c.id(),
+                        PermissionDecision.deny(c.id())).allowed())
+                .toList();
+    }
+
+    /**
+     * Worker Permissions is resource based, so authorization must happen before pagination and
+     * totals are exposed. Scan deterministic repository windows, evaluate each window in one
+     * permission request, and only then select the requested authorized page.
+     */
+    private AuthorizedPage authorizedPage(CaseQuery query, Actor actor, String tenant,
+                                          int page, int pageSize) {
+        final int scanSize = MAX_PAGE_SIZE;
+        long rawTotal = caseRepo.count(query);
+        long requestedStart = (long) page * pageSize;
+        long requestedEnd = requestedStart + pageSize;
+        long authorizedCount = 0;
+        int rawOffset = 0;
+        List<CaseInstance> pageItems = new ArrayList<>(pageSize);
+
+        while (rawOffset < rawTotal) {
+            List<CaseInstance> batch = caseRepo.query(query.withWindow(rawOffset, scanSize));
+            if (batch.isEmpty()) {
+                break;
+            }
+            for (CaseInstance readable : readableCases(batch, actor, tenant)) {
+                if (authorizedCount >= requestedStart && authorizedCount < requestedEnd) {
+                    pageItems.add(readable);
+                }
+                authorizedCount++;
+            }
+            rawOffset = Math.addExact(rawOffset, batch.size());
+        }
+        return new AuthorizedPage(List.copyOf(pageItems), authorizedCount);
+    }
+
+    private record AuthorizedPage(List<CaseInstance> items, long totalItems) {}
+
+    private void assertCasePermission(Actor actor, CaseInstance c, String action) {
+        permissions.assertAllowed(actor, c.tenantId(), action, ResourceTypes.CASE, c.id(),
+                caseContext(c));
+    }
+
+    private List<AvailableAction> filterCaseActions(CaseInstance c, Actor actor,
+                                                    List<AvailableAction> actions) {
+        return actions.stream()
+                .filter(action -> {
+                    String permission = casePermissionAction(action.action());
+                    return permission != null && permissions.allowedOrFalse(actor, c.tenantId(),
+                            permission, ResourceTypes.CASE, c.id(), caseContext(c));
+                })
+                .toList();
+    }
+
+    private static String casePermissionAction(String action) {
+        return switch (action) {
+            case "update" -> PermissionActions.CASE_UPDATE;
+            case "close" -> PermissionActions.CASE_CLOSE;
+            case "cancel" -> PermissionActions.CASE_CANCEL;
+            default -> null;
+        };
+    }
+
+    private static Map<String, Object> createContext(CreateCaseRequest request,
+                                                     CasePriority priority) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseDefinitionKey", request.caseDefinitionKey());
+        context.put("priority", priority.name());
+        if (request.businessKey() != null) {
+            context.put("businessKey", request.businessKey());
+        }
+        if (request.title() != null) {
+            context.put("title", request.title());
+        }
+        return context;
+    }
+
+    private static Map<String, Object> caseContext(CaseInstance c) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseDefinitionKey", c.caseDefKey());
+        context.put("state", c.state().name());
+        context.put("priority", c.priority().name());
+        if (c.businessKey() != null) {
+            context.put("businessKey", c.businessKey());
+        }
+        if (c.assignee() != null) {
+            context.put("assignee", c.assignee());
+        }
+        return context;
     }
 }

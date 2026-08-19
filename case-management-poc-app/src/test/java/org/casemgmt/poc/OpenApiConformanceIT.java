@@ -10,6 +10,8 @@ import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.poc.support.PocAppEmbeddedTestBase;
 import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.WebhookRepository;
+import org.casemgmt.service.Actor;
+import org.casemgmt.sla.SlaService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
@@ -19,6 +21,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -58,6 +61,7 @@ class OpenApiConformanceIT extends PocAppEmbeddedTestBase {
     @Autowired private EventRepository events;
     @Autowired private WebhookRepository webhooks;
     @Autowired private WebhookDispatcher dispatcher;
+    @Autowired private SlaService sla;
     @Autowired private JdbcClient jdbc;
 
     private static OpenApiInteractionValidator validator() {
@@ -126,6 +130,181 @@ class OpenApiConformanceIT extends PocAppEmbeddedTestBase {
         assertConforms("/cases", Request.Method.GET, 200, listing.getBody());
         assertRejected("/cases", Request.Method.GET, 200,
                 listing.getBody().replaceFirst("\"page\":\\d+", "\"page\":\"first\""), "page");
+    }
+
+    @Test
+    void caseMutationsAndEventFeedsConformToTheSpec() {
+        ResponseEntity<String> created = client("alice").post().uri("/case-api/v2/cases")
+                .header("Idempotency-Key", "openapi-mutate-" + UUID.randomUUID())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("caseDefinitionKey", "complaint", "tenantId", "t1",
+                        "title", "Spec mutate"))
+                .retrieve().toEntity(String.class);
+        assertThat(created.getStatusCode().value()).isEqualTo(201);
+        String caseId = stringField(created.getBody(), "id");
+
+        ResponseEntity<String> patched = client("alice").patch()
+                .uri("/case-api/v2/cases/{id}", caseId)
+                .header("If-Match", "*")
+                .contentType(MediaType.valueOf("application/merge-patch+json"))
+                .body(Map.of("title", "Spec mutate patched"))
+                .retrieve().toEntity(String.class);
+        assertThat(patched.getStatusCode().value()).isEqualTo(200);
+        assertConforms("/cases/{caseId}", Request.Method.PATCH, 200, patched.getBody());
+        assertRejected("/cases/{caseId}", Request.Method.PATCH, 200,
+                patched.getBody().replace("\"state\":\"ACTIVE\"", "\"state\":\"MAYBE\""),
+                "state");
+
+        ResponseEntity<String> caseEvents = client("alice").get()
+                .uri("/case-api/v2/cases/{id}/events", caseId).retrieve().toEntity(String.class);
+        assertThat(caseEvents.getStatusCode().value()).isEqualTo(200);
+        assertConforms("/cases/{caseId}/events", Request.Method.GET, 200, caseEvents.getBody());
+        assertRejected("/cases/{caseId}/events", Request.Method.GET, 200,
+                caseEvents.getBody().replaceFirst("\"specversion\":\"1.0\"",
+                        "\"specversion\":1"),
+                "specversion");
+
+        ResponseEntity<String> allEvents = client("alice").get()
+                .uri("/case-api/v2/events?limit=5").retrieve().toEntity(String.class);
+        assertThat(allEvents.getStatusCode().value()).isEqualTo(200);
+        assertConforms("/events", Request.Method.GET, 200, allEvents.getBody());
+        assertRejected("/events", Request.Method.GET, 200, "{\"items\":{}}", "items");
+
+        ResponseEntity<String> cancelled = client("alice").post()
+                .uri("/case-api/v2/cases/{id}/cancel", caseId)
+                .header("If-Match", "*")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("reason", "openapi conformance cleanup"))
+                .retrieve().toEntity(String.class);
+        assertThat(cancelled.getStatusCode().value()).isEqualTo(200);
+        assertConforms("/cases/{caseId}/cancel", Request.Method.POST, 200, cancelled.getBody());
+    }
+
+    @Test
+    void caseDefinitionDiscoveryResponsesConformToTheSpec() {
+        ResponseEntity<String> listing = client("alice").get()
+                .uri("/case-api/v2/case-definitions").retrieve().toEntity(String.class);
+        assertThat(listing.getStatusCode().value()).isEqualTo(200);
+
+        assertConforms("/case-definitions", Request.Method.GET, 200, listing.getBody());
+        assertRejected("/case-definitions", Request.Method.GET, 200, "{}", "array");
+
+        List<Map<String, Object>> definitions = client("alice").get()
+                .uri("/case-api/v2/case-definitions").retrieve().toEntity(List.class).getBody();
+        assertThat(definitions).isNotEmpty();
+        String key = (String) definitions.get(0).get("key");
+
+        ResponseEntity<String> detail = client("alice").get()
+                .uri("/case-api/v2/case-definitions/{key}", key).retrieve().toEntity(String.class);
+        assertThat(detail.getStatusCode().value()).isEqualTo(200);
+
+        assertConforms("/case-definitions/{key}", Request.Method.GET, 200, detail.getBody());
+        assertRejected("/case-definitions/{key}", Request.Method.GET, 200,
+                detail.getBody().replaceFirst("\"version\":\\d+", "\"version\":\"one\""), "version");
+
+        Map<String, Object> detailBody = client("alice").get()
+                .uri("/case-api/v2/case-definitions/{key}", key).retrieve().toEntity(Map.class).getBody();
+        String formKey = (String) ((List<?>) detailBody.get("formKeys")).get(0);
+
+        ResponseEntity<String> schema = client("alice").get()
+                .uri("/case-api/v2/case-definitions/{key}/forms/{formKey}", key, formKey)
+                .retrieve().toEntity(String.class);
+        assertThat(schema.getStatusCode().value()).isEqualTo(200);
+        assertThat(schema.getHeaders().getContentType()).hasToString("application/schema+json");
+
+        assertConforms("/case-definitions/{key}/forms/{formKey}", Request.Method.GET, 200,
+                schema.getBody(), "application/schema+json");
+        assertRejected("/case-definitions/{key}/forms/{formKey}", Request.Method.GET, 200,
+                "[]", "application/schema+json", "object");
+    }
+
+    @Test
+    void planItemsTasksCollaborationAndSlaReadModelsConformToTheSpec() {
+        String caseId = (String) ((Map) client("alice").post().uri("/case-api/v2/cases")
+                .header("Idempotency-Key", "openapi-readmodels-" + UUID.randomUUID())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("caseDefinitionKey", "complaint", "tenantId", "t1",
+                        "title", "Spec read models"))
+                .retrieve().toEntity(Map.class).getBody()).get("id");
+
+        ResponseEntity<String> planItems = client("alice").get()
+                .uri("/case-api/v2/cases/{id}/plan-items", caseId).retrieve().toEntity(String.class);
+        assertThat(planItems.getStatusCode().value()).isEqualTo(200);
+        assertConforms("/cases/{caseId}/plan-items", Request.Method.GET, 200, planItems.getBody());
+        assertRejected("/cases/{caseId}/plan-items", Request.Method.GET, 200,
+                planItems.getBody().replaceFirst("\"state\":\"[A-Z_]+\"", "\"state\":\"BROKEN\""),
+                "state");
+
+        ResponseEntity<String> worklist = client("alice").get()
+                .uri("/case-api/v2/tasks?limit=5").retrieve().toEntity(String.class);
+        assertThat(worklist.getStatusCode().value()).isEqualTo(200);
+        assertThat(worklist.getBody()).contains("\"engineSync\":\"SYNCED\"");
+        assertConforms("/tasks", Request.Method.GET, 200, worklist.getBody());
+        assertRejected("/tasks", Request.Method.GET, 200,
+                worklist.getBody().replaceFirst("\"engineSync\":\"SYNCED\"", "\"engineSync\":\"LOST\""),
+                "engineSync");
+
+        ResponseEntity<String> comments = client("alice").get()
+                .uri("/case-api/v2/cases/{id}/comments", caseId).retrieve().toEntity(String.class);
+        assertThat(comments.getStatusCode().value()).isEqualTo(200);
+        assertConforms("/cases/{caseId}/comments", Request.Method.GET, 200, comments.getBody());
+        assertRejected("/cases/{caseId}/comments", Request.Method.GET, 200, "{}", "array");
+
+        ResponseEntity<String> createdComment = client("alice").post()
+                .uri("/case-api/v2/cases/{id}/comments", caseId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("text", "OpenAPI comment", "visibility", "internal"))
+                .retrieve().toEntity(String.class);
+        assertThat(createdComment.getStatusCode().value()).isEqualTo(201);
+        assertConforms("/cases/{caseId}/comments", Request.Method.POST, 201, createdComment.getBody());
+        assertRejected("/cases/{caseId}/comments", Request.Method.POST, 201,
+                createdComment.getBody().replace("\"visibility\":\"internal\"", "\"visibility\":\"private\""),
+                "visibility");
+
+        ResponseEntity<String> milestones = client("alice").get()
+                .uri("/case-api/v2/cases/{id}/milestones", caseId).retrieve().toEntity(String.class);
+        assertThat(milestones.getStatusCode().value()).isEqualTo(200);
+        assertConforms("/cases/{caseId}/milestones", Request.Method.GET, 200, milestones.getBody());
+        assertRejected("/cases/{caseId}/milestones", Request.Method.GET, 200,
+                "[{\"id\":\"milestone-openapi-negative\",\"name\":\"Broken\",\"achieved\":\"no\"}]",
+                "achieved");
+
+        sla.startClocks(caseId, "sla-complaint", new Actor("alice", List.of("handlers")));
+        ResponseEntity<String> slas = client("alice").get()
+                .uri("/case-api/v2/cases/{id}/slas", caseId).retrieve().toEntity(String.class);
+        assertThat(slas.getStatusCode().value()).isEqualTo(200);
+        assertThat(slas.getBody()).contains("\"status\":\"RUNNING\"");
+        assertConforms("/cases/{caseId}/slas", Request.Method.GET, 200, slas.getBody());
+        assertRejected("/cases/{caseId}/slas", Request.Method.GET, 200,
+                slas.getBody().replaceFirst("\"status\":\"RUNNING\"", "\"status\":\"UNKNOWN\""),
+                "status");
+    }
+
+    @Test
+    void webhookSubscriptionAndRedeliveryResponsesConformToTheSpec() {
+        ResponseEntity<String> created = client(ADMIN).post().uri("/case-api/v2/webhooks")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("url", "http://127.0.0.1:1/hook", "eventTypes", java.util.List.of("*")))
+                .retrieve().toEntity(String.class);
+        assertThat(created.getStatusCode().value()).isEqualTo(201);
+        assertConforms("/webhooks", Request.Method.POST, 201, created.getBody());
+        assertRejected("/webhooks", Request.Method.POST, 201,
+                created.getBody().replace("\"eventTypes\":[\"*\"]", "\"eventTypes\":\"*\""),
+                "eventTypes");
+        String webhookId = stringField(created.getBody(), "id");
+
+        ResponseEntity<String> listing = client(ADMIN).get()
+                .uri("/case-api/v2/webhooks").retrieve().toEntity(String.class);
+        assertThat(listing.getStatusCode().value()).isEqualTo(200);
+        assertConforms("/webhooks", Request.Method.GET, 200, listing.getBody());
+        assertRejected("/webhooks", Request.Method.GET, 200, "{}", "array");
+
+        ResponseEntity<String> redelivery = client(ADMIN).post()
+                .uri("/case-api/v2/webhooks/{id}/dead-letters/redeliver", webhookId)
+                .retrieve().toEntity(String.class);
+        assertThat(redelivery.getStatusCode().value()).isEqualTo(202);
+        assertConformsNoBody("/webhooks/{webhookId}/dead-letters/redeliver",
+                Request.Method.POST, 202);
     }
 
     /**
@@ -274,16 +453,35 @@ class OpenApiConformanceIT extends PocAppEmbeddedTestBase {
     // ---- plumbing ----
 
     private void assertConforms(String path, Request.Method method, int status, String body) {
-        ValidationReport report = validate(path, method, status, body);
+        assertConforms(path, method, status, body, "application/json");
+    }
+
+    private void assertConforms(String path, Request.Method method, int status, String body,
+                                String contentType) {
+        ValidationReport report = validate(path, method, status, body, contentType);
         assertThat(report.getMessages())
                 .as("%s %s -> %d does not match openapi-specs.md:%n%s%nbody was:%n%s",
                         method, path, status, report, body)
                 .isEmpty();
     }
 
+    private void assertConformsNoBody(String path, Request.Method method, int status) {
+        ValidationReport report = VALIDATOR.validateResponse(path, method,
+                SimpleResponse.Builder.status(status).build());
+        assertThat(report.getMessages())
+                .as("%s %s -> %d does not match openapi-specs.md:%n%s",
+                        method, path, status, report)
+                .isEmpty();
+    }
+
     private void assertRejected(String path, Request.Method method, int status, String body,
                                 String expectedInMessage) {
-        ValidationReport report = validate(path, method, status, body);
+        assertRejected(path, method, status, body, "application/json", expectedInMessage);
+    }
+
+    private void assertRejected(String path, Request.Method method, int status, String body,
+                                String contentType, String expectedInMessage) {
+        ValidationReport report = validate(path, method, status, body, contentType);
         assertThat(report.getMessages())
                 .as("negative control for %s %s: a deliberately invalid body was accepted, so the "
                         + "conforming assertion beside it proves nothing", method, path)
@@ -295,10 +493,29 @@ class OpenApiConformanceIT extends PocAppEmbeddedTestBase {
     }
 
     private ValidationReport validate(String path, Request.Method method, int status, String body) {
+        return validate(path, method, status, body, "application/json");
+    }
+
+    private ValidationReport validate(String path, Request.Method method, int status, String body,
+                                      String contentType) {
         return VALIDATOR.validateResponse(path, method,
                 SimpleResponse.Builder.status(status)
-                        .withContentType("application/json")
+                        .withContentType(contentType)
                         .withBody(body)
                         .build());
+    }
+
+    private static String stringField(String json, String field) {
+        String needle = "\"" + field + "\":\"";
+        int start = json.indexOf(needle);
+        if (start < 0) {
+            throw new AssertionError("No string field '" + field + "' in " + json);
+        }
+        int valueStart = start + needle.length();
+        int valueEnd = json.indexOf('"', valueStart);
+        if (valueEnd < 0) {
+            throw new AssertionError("Unterminated string field '" + field + "' in " + json);
+        }
+        return json.substring(valueStart, valueEnd);
     }
 }
