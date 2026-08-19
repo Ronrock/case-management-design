@@ -2,6 +2,11 @@ package org.casemgmt.rest.controller;
 
 import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CaseTask;
+import org.casemgmt.permissions.PermissionActions;
+import org.casemgmt.permissions.PermissionDecision;
+import org.casemgmt.permissions.ResourceTypes;
+import org.casemgmt.permissions.WorkerPermissionEvaluator;
+import org.casemgmt.permissions.WorkerPermissionResource;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.rest.CallerResolver;
@@ -23,6 +28,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.OptionalLong;
 
@@ -56,30 +62,37 @@ public class TaskController {
     private final CaseRepository caseRepo;
     private final ActionPolicy policy;
     private final CallerResolver callers;
+    private final WorkerPermissionEvaluator permissions;
 
     public TaskController(CaseTaskService tasks, CaseTaskRepository taskRepo, CaseRepository caseRepo,
-                          ActionPolicy policy, CallerResolver callers) {
+                          ActionPolicy policy, CallerResolver callers,
+                          WorkerPermissionEvaluator permissions) {
         this.tasks = tasks;
         this.taskRepo = taskRepo;
         this.caseRepo = caseRepo;
         this.policy = policy;
         this.callers = callers;
+        this.permissions = permissions;
     }
 
     @GetMapping("/tasks")
     public List<TaskResponse> worklist(@RequestParam(defaultValue = "50") int limit,
                                        Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        return tasks.worklist(callers.tenantId(actor), actor,
-                        Math.clamp(limit, 1, CaseController.MAX_PAGE_SIZE)).stream()
+        String tenant = callers.tenantId(actor);
+        return readableTasks(tasks.worklist(tenant, actor,
+                        Math.clamp(limit, 1, CaseController.MAX_PAGE_SIZE)), actor, tenant).stream()
                 .map(t -> respond(t, actor)).toList();
     }
 
     @GetMapping("/cases/{caseId}/tasks")
     public List<TaskResponse> forCase(@PathVariable String caseId, Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        visibleCaseOf(caseId, actor);
-        return tasks.forCase(caseId).stream().map(t -> respond(t, actor)).toList();
+        CaseInstance c = visibleCaseOf(caseId, actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.CASE_READ,
+                ResourceTypes.CASE, c.id(), caseContext(c));
+        return readableTasks(tasks.forCase(caseId), actor, c.tenantId()).stream()
+                .map(t -> respond(t, actor)).toList();
     }
 
     @PostMapping("/tasks/{taskId}/claim")
@@ -90,7 +103,9 @@ public class TaskController {
 
         // Tenant check BEFORE If-Match (final whole-branch review, Minor). See expectedVersion.
         CaseTask current = taskRepo.require(taskId);
-        visibleCaseOf(current.caseId(), actor);
+        CaseInstance c = visibleCaseOf(current.caseId(), actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.TASK_CLAIM,
+                ResourceTypes.TASK, current.id(), taskContext(current));
         long version = expectedVersion(ifMatch, taskId, actor);
         policy.assertAllowedOnTask(current, actor.userId(),
                 callers.roles(current.caseId(), actor), callers.groups(actor), "claim");
@@ -109,7 +124,9 @@ public class TaskController {
 
         // Tenant check BEFORE If-Match (final whole-branch review, Minor). See expectedVersion.
         CaseTask current = taskRepo.require(taskId);
-        visibleCaseOf(current.caseId(), actor);
+        CaseInstance c = visibleCaseOf(current.caseId(), actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.TASK_COMPLETE,
+                ResourceTypes.TASK, current.id(), taskContext(current));
         long version = expectedVersion(ifMatch, taskId, actor);
         policy.assertAllowedOnTask(current, actor.userId(),
                 callers.roles(current.caseId(), actor), callers.groups(actor), "complete");
@@ -156,7 +173,70 @@ public class TaskController {
     }
 
     private TaskResponse respond(CaseTask task, Actor actor) {
-        return TaskResponse.of(task, policy.listForTask(task, actor.userId(),
-                callers.roles(task.caseId(), actor), callers.groups(actor)));
+        CaseInstance c = caseRepo.require(task.caseId());
+        return TaskResponse.of(task, filterTaskActions(task, actor, c.tenantId(),
+                policy.listForTask(task, actor.userId(),
+                        callers.roles(task.caseId(), actor), callers.groups(actor))));
+    }
+
+    private List<CaseTask> readableTasks(List<CaseTask> rows, Actor actor, String tenant) {
+        if (rows.isEmpty()) {
+            return rows;
+        }
+        Map<String, PermissionDecision> decisions = permissions.evaluate(actor, tenant,
+                PermissionActions.TASK_READ, ResourceTypes.TASK,
+                rows.stream()
+                        .map(task -> new WorkerPermissionResource(task.id(), taskContext(task)))
+                        .toList());
+        return rows.stream()
+                .filter(task -> decisions.getOrDefault(task.id(),
+                        PermissionDecision.deny(task.id())).allowed())
+                .toList();
+    }
+
+    private List<org.casemgmt.rest.policy.AvailableAction> filterTaskActions(
+            CaseTask task, Actor actor, String tenant,
+            List<org.casemgmt.rest.policy.AvailableAction> actions) {
+        return actions.stream()
+                .filter(action -> {
+                    String permission = taskPermissionAction(action.action());
+                    return permission != null && permissions.allowedOrFalse(actor, tenant,
+                            permission, ResourceTypes.TASK, task.id(), taskContext(task));
+                })
+                .toList();
+    }
+
+    private static String taskPermissionAction(String action) {
+        return switch (action) {
+            case "claim" -> PermissionActions.TASK_CLAIM;
+            case "complete" -> PermissionActions.TASK_COMPLETE;
+            default -> null;
+        };
+    }
+
+    private static Map<String, Object> taskContext(CaseTask task) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseId", task.caseId());
+        context.put("state", task.state().name());
+        context.put("engineSync", task.engineSync().name());
+        if (task.planItemId() != null) {
+            context.put("planItemId", task.planItemId());
+        }
+        if (task.assignee() != null) {
+            context.put("assignee", task.assignee());
+        }
+        context.put("candidateGroups", task.candidateGroups());
+        return context;
+    }
+
+    private static Map<String, Object> caseContext(CaseInstance c) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseDefinitionKey", c.caseDefKey());
+        context.put("state", c.state().name());
+        context.put("priority", c.priority().name());
+        if (c.businessKey() != null) {
+            context.put("businessKey", c.businessKey());
+        }
+        return context;
     }
 }

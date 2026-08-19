@@ -27,6 +27,7 @@ class CollaborationServicesTest extends OracleTestBase {
 
     private CaseService cases;
     private CommentService comments;
+    private DocumentService documents;
     private MilestoneService milestones;
     private LinkedProcessService processes;
     private CaseServiceTest.RecordingGateway gateway;
@@ -42,6 +43,7 @@ class CollaborationServicesTest extends OracleTestBase {
         gateway = new CaseServiceTest.RecordingGateway();
         cases = TestServices.caseService(dataSource(), gateway);
         comments = TestServices.commentService(dataSource());
+        documents = TestServices.documentService(dataSource());
         milestones = TestServices.milestoneService(dataSource());
         processes = TestServices.processService(dataSource(), gateway);
         caseId = cases.create("widget-review", "t1", null, "T", CasePriority.MEDIUM, Map.of(), alice).id();
@@ -73,6 +75,23 @@ class CollaborationServicesTest extends OracleTestBase {
         List<String> types = jdbc().sql("SELECT TYPE_ FROM CM_EVENT ORDER BY SEQ_")
                 .query(String.class).list();
         assertThat(types).contains("org.example.cm.case.comment.added");
+    }
+
+    @Test
+    void documentsAreReferencesAndEmitEvents() {
+        var row = documents.add(caseId, "passport.pdf", "evidence", "application/pdf",
+                123L, "https://dms.example/documents/passport", alice);
+
+        assertThat(documents.forCase(caseId)).extracting(DocumentRepository.DocumentRow::id)
+                .containsExactly(row.id());
+        documents.remove(caseId, row.id(), alice);
+        assertThat(documents.forCase(caseId)).isEmpty();
+
+        List<String> types = jdbc().sql("SELECT TYPE_ FROM CM_EVENT ORDER BY SEQ_")
+                .query(String.class).list();
+        assertThat(types)
+                .contains("org.example.cm.case.document.added",
+                        "org.example.cm.case.document.removed");
     }
 
     @Test

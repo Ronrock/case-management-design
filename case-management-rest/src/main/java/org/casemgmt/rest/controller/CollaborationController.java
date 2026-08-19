@@ -4,13 +4,21 @@ import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.error.OptimisticLockException;
+import org.casemgmt.permissions.PermissionActions;
+import org.casemgmt.permissions.PermissionDecision;
+import org.casemgmt.permissions.ResourceTypes;
+import org.casemgmt.permissions.WorkerPermissionEvaluator;
+import org.casemgmt.permissions.WorkerPermissionResource;
 import org.casemgmt.repo.CommentRepository;
+import org.casemgmt.repo.DocumentRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.MilestoneRepository;
 import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.dto.Dtos.CommentRequest;
+import org.casemgmt.rest.dto.Dtos.DocumentRequest;
 import org.casemgmt.rest.dto.Dtos.StartProcessRequest;
+import org.casemgmt.rest.error.InvalidRequestException;
 import org.casemgmt.rest.filter.ETagSupport;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.rest.policy.AvailableAction;
@@ -18,11 +26,13 @@ import org.casemgmt.rules.CaseSnapshot;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseService;
 import org.casemgmt.service.CommentService;
+import org.casemgmt.service.DocumentService;
 import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.service.MilestoneService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -39,12 +49,12 @@ import java.util.OptionalLong;
 import java.util.Set;
 
 /**
- * Comments, milestones and linked processes for one case.
+ * Comments, document references, milestones and linked processes for one case.
  *
  * <p><b>Authorization (fix round 1, Critical 1).</b> The first cut of this class was
  * authenticated but had no rule at all: the caller the case-level policy refuses a title edit to
  * could still comment on the case, achieve its milestones and start a BPMN process against it.
- * All three writes now assert against {@code ActionPolicy}'s own collaboration and milestone
+ * Collaboration writes now assert against {@code ActionPolicy}'s own collaboration and milestone
  * rules, and every method — read or write — first resolves the case through {@link #visible},
  * so a case in another tenant is a 404 rather than a source of data (Critical 2).
  *
@@ -59,34 +69,40 @@ import java.util.Set;
 public class CollaborationController {
 
     private final CommentService comments;
+    private final DocumentService documents;
     private final MilestoneService milestones;
     private final LinkedProcessService processes;
     private final CaseService cases;
     private final PlanItemRepository planItems;
     private final ActionPolicy policy;
     private final CallerResolver callers;
+    private final WorkerPermissionEvaluator permissions;
 
-    public CollaborationController(CommentService comments, MilestoneService milestones,
-                                   LinkedProcessService processes, CaseService cases,
-                                   PlanItemRepository planItems, ActionPolicy policy,
-                                   CallerResolver callers) {
+    public CollaborationController(CommentService comments, DocumentService documents,
+                                   MilestoneService milestones, LinkedProcessService processes,
+                                   CaseService cases, PlanItemRepository planItems,
+                                   ActionPolicy policy, CallerResolver callers,
+                                   WorkerPermissionEvaluator permissions) {
         this.comments = comments;
+        this.documents = documents;
         this.milestones = milestones;
         this.processes = processes;
         this.cases = cases;
         this.planItems = planItems;
         this.policy = policy;
         this.callers = callers;
+        this.permissions = permissions;
     }
 
     @GetMapping("/comments")
     public List<Map<String, Object>> listComments(@PathVariable String caseId,
                                                   @RequestParam(required = false) String visibility,
                                                   Authentication authentication) {
-        visible(caseId, callers.actor(authentication));
-        return comments.forCase(caseId, visibility).stream()
-                .map(CollaborationController::commentBody)
-                .toList();
+        Actor actor = callers.actor(authentication);
+        CaseInstance c = visible(caseId, actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.CASE_READ,
+                ResourceTypes.CASE, c.id(), caseContext(c));
+        return authorizedCommentBodies(comments.forCase(caseId, visibility), actor, c.tenantId());
     }
 
     @PostMapping("/comments")
@@ -94,7 +110,10 @@ public class CollaborationController {
                                                           @RequestBody CommentRequest request,
                                                           Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        policy.assertAllowedOnCollaboration(snapshot(caseId, actor),
+        CaseInstance c = visible(caseId, actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.COMMENT_ADD,
+                ResourceTypes.COMMENT, "new:" + caseId, commentCreateContext(caseId, request));
+        policy.assertAllowedOnCollaboration(cases.snapshot(c),
                 callers.roles(caseId, actor), "comment");
 
         CommentRepository.CommentRow row = comments.add(caseId, request.text(),
@@ -102,15 +121,58 @@ public class CollaborationController {
         return ResponseEntity.status(HttpStatus.CREATED).body(commentBody(row));
     }
 
+    @GetMapping("/documents")
+    public List<Map<String, Object>> listDocuments(@PathVariable String caseId,
+                                                   Authentication authentication) {
+        Actor actor = callers.actor(authentication);
+        CaseInstance c = visible(caseId, actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.CASE_READ,
+                ResourceTypes.CASE, c.id(), caseContext(c));
+        return authorizedDocumentBodies(documents.forCase(caseId), actor, c.tenantId());
+    }
+
+    @PostMapping("/documents")
+    public ResponseEntity<Map<String, Object>> addDocument(@PathVariable String caseId,
+                                                           @RequestBody(required = false) DocumentRequest request,
+                                                           Authentication authentication) {
+        Actor actor = callers.actor(authentication);
+        CaseInstance c = visible(caseId, actor);
+        DocumentRequest body = requireDocumentRequest(request);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.DOCUMENT_LINK,
+                ResourceTypes.DOCUMENT, "new:" + caseId, documentCreateContext(caseId, body));
+        policy.assertAllowedOnCollaboration(cases.snapshot(c),
+                callers.roles(caseId, actor), "add-document");
+
+        DocumentRepository.DocumentRow row = documents.add(caseId, body.name(), body.category(),
+                body.mimeType(), body.sizeBytes(), body.contentUrl(), actor);
+        return ResponseEntity.status(HttpStatus.CREATED).body(documentBody(row));
+    }
+
+    @DeleteMapping("/documents/{documentId}")
+    public ResponseEntity<Void> removeDocument(@PathVariable String caseId,
+                                               @PathVariable String documentId,
+                                               Authentication authentication) {
+        Actor actor = callers.actor(authentication);
+        CaseInstance c = visible(caseId, actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.DOCUMENT_REMOVE,
+                ResourceTypes.DOCUMENT, documentId, documentContext(caseId, documentId));
+        policy.assertAllowedOnCollaboration(cases.snapshot(c),
+                callers.roles(caseId, actor), "remove-document");
+        documents.remove(caseId, documentId, actor);
+        return ResponseEntity.noContent().build();
+    }
+
     @GetMapping("/milestones")
     public List<Map<String, Object>> listMilestones(@PathVariable String caseId,
                                                     Authentication authentication) {
         Actor actor = callers.actor(authentication);
-        CaseSnapshot snapshot = snapshot(caseId, actor);
+        CaseInstance c = visible(caseId, actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.CASE_READ,
+                ResourceTypes.CASE, c.id(), caseContext(c));
+        CaseSnapshot snapshot = cases.snapshot(c);
         Set<String> roles = callers.roles(caseId, actor);
-        return milestones.forCase(caseId).stream()
-                .map(m -> milestoneBody(m, policy.listForMilestone(snapshot, m.id(), m.achieved(), roles)))
-                .toList();
+        return authorizedMilestoneBodies(milestones.forCase(caseId), snapshot, roles,
+                actor, c.tenantId());
     }
 
     /**
@@ -132,6 +194,8 @@ public class CollaborationController {
                 .filter(m -> m.id().equals(milestoneId)).findFirst()
                 .orElseThrow(() -> new NotFoundException("Milestone", milestoneId));
         Set<String> roles = callers.roles(caseId, actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.MILESTONE_ACHIEVE,
+                ResourceTypes.MILESTONE, milestoneId, milestoneContext(caseId, current));
         policy.assertAllowedOnMilestone(cases.snapshot(c), milestoneId, current.achieved(),
                 roles, "achieve");
 
@@ -143,10 +207,11 @@ public class CollaborationController {
     @GetMapping("/processes")
     public List<Map<String, Object>> listProcesses(@PathVariable String caseId,
                                                    Authentication authentication) {
-        visible(caseId, callers.actor(authentication));
-        return processes.forCase(caseId).stream()
-                .map(CollaborationController::processBody)
-                .toList();
+        Actor actor = callers.actor(authentication);
+        CaseInstance c = visible(caseId, actor);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.CASE_READ,
+                ResourceTypes.CASE, c.id(), caseContext(c));
+        return authorizedProcessBodies(processes.forCase(caseId), actor, c.tenantId());
     }
 
     /**
@@ -173,6 +238,8 @@ public class CollaborationController {
         Actor actor = callers.actor(authentication);
         CaseInstance c = visible(caseId, actor);
         requireCaseVersion(c, ifMatch);
+        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.PROCESS_START,
+                ResourceTypes.PROCESS, "new:" + caseId, processCreateContext(caseId, request));
         policy.assertAllowedOnCollaboration(cases.snapshot(c), callers.roles(caseId, actor),
                 "start-process");
 
@@ -230,25 +297,240 @@ public class CollaborationController {
     }
 
     private static Map<String, Object> commentBody(CommentRepository.CommentRow c) {
+        return commentBody(c, PermissionDecision.allow(c.id()));
+    }
+
+    private static Map<String, Object> commentBody(CommentRepository.CommentRow c,
+                                                   PermissionDecision decision) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", c.id());
-        body.put("author", c.author());
-        body.put("text", c.text());
-        body.put("visibility", c.visibility());
-        body.put("createdAt", c.createdAt());
+        body.put("caseId", c.caseId());
+        putIfAllowed(body, decision, "author", c.author());
+        putIfAllowed(body, decision, "text", c.text());
+        putIfAllowed(body, decision, "visibility", c.visibility());
+        putIfAllowed(body, decision, "createdAt", c.createdAt());
         return body;
+    }
+
+    private List<Map<String, Object>> authorizedCommentBodies(
+            List<CommentRepository.CommentRow> rows, Actor actor, String tenant) {
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+        Map<String, PermissionDecision> decisions = permissions.evaluate(actor, tenant,
+                PermissionActions.COMMENT_READ, ResourceTypes.COMMENT,
+                rows.stream()
+                        .map(row -> new WorkerPermissionResource(row.id(), commentContext(row)))
+                        .toList());
+        return rows.stream()
+                .map(row -> Map.entry(row, decisions.getOrDefault(row.id(),
+                        PermissionDecision.deny(row.id()))))
+                .filter(entry -> entry.getValue().allowed())
+                .map(entry -> commentBody(entry.getKey(), entry.getValue()))
+                .toList();
+    }
+
+    private static DocumentRequest requireDocumentRequest(DocumentRequest request) {
+        if (request == null) {
+            throw new InvalidRequestException("Document request body is required");
+        }
+        if (request.name() == null || request.name().isBlank()) {
+            throw new InvalidRequestException("Document name is required");
+        }
+        if (request.contentUrl() == null || request.contentUrl().isBlank()) {
+            throw new InvalidRequestException("Document contentUrl is required");
+        }
+        if (request.sizeBytes() != null && request.sizeBytes() < 0) {
+            throw new InvalidRequestException("Document sizeBytes must not be negative");
+        }
+        return request;
+    }
+
+    private static Map<String, Object> documentBody(DocumentRepository.DocumentRow d) {
+        return documentBody(d, PermissionDecision.allow(d.id()));
+    }
+
+    private static Map<String, Object> documentBody(DocumentRepository.DocumentRow d,
+                                                    PermissionDecision decision) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", d.id());
+        body.put("caseId", d.caseId());
+        putIfAllowed(body, decision, "name", d.name());
+        putIfAllowed(body, decision, "category", d.category());
+        putIfAllowed(body, decision, "mimeType", d.mimeType());
+        putIfAllowed(body, decision, "sizeBytes", d.sizeBytes());
+        putIfAllowed(body, decision, "contentUrl", d.contentUrl());
+        putIfAllowed(body, decision, "uploadedBy", d.uploadedBy());
+        body.put("uploadedAt", d.uploadedAt());
+        return body;
+    }
+
+    private List<Map<String, Object>> authorizedDocumentBodies(
+            List<DocumentRepository.DocumentRow> rows, Actor actor, String tenant) {
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+        Map<String, PermissionDecision> decisions = permissions.evaluate(actor, tenant,
+                PermissionActions.DOCUMENT_READ, ResourceTypes.DOCUMENT,
+                rows.stream()
+                        .map(row -> new WorkerPermissionResource(row.id(),
+                                documentContext(row.caseId(), row.id())))
+                        .toList());
+        return rows.stream()
+                .map(row -> Map.entry(row, decisions.getOrDefault(row.id(),
+                        PermissionDecision.deny(row.id()))))
+                .filter(entry -> entry.getValue().allowed())
+                .map(entry -> documentBody(entry.getKey(), entry.getValue()))
+                .toList();
+    }
+
+    private static Map<String, Object> commentCreateContext(String caseId,
+                                                            CommentRequest request) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseId", caseId);
+        context.put("visibility", request == null || request.visibility() == null
+                ? "internal" : request.visibility());
+        context.put("hasText", request != null && request.text() != null && !request.text().isBlank());
+        return context;
+    }
+
+    private static Map<String, Object> commentContext(CommentRepository.CommentRow row) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseId", row.caseId());
+        context.put("visibility", row.visibility());
+        context.put("author", row.author());
+        return context;
+    }
+
+    private static Map<String, Object> documentCreateContext(String caseId, DocumentRequest request) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseId", caseId);
+        context.put("name", request.name());
+        if (request.category() != null) {
+            context.put("category", request.category());
+        }
+        if (request.mimeType() != null) {
+            context.put("mimeType", request.mimeType());
+        }
+        return context;
+    }
+
+    private static Map<String, Object> documentContext(String caseId, String documentId) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseId", caseId);
+        context.put("documentId", documentId);
+        return context;
+    }
+
+    private static Map<String, Object> milestoneContext(String caseId,
+                                                        MilestoneRepository.MilestoneRow row) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseId", caseId);
+        context.put("milestoneId", row.id());
+        if (row.planItemId() != null) {
+            context.put("planItemId", row.planItemId());
+        }
+        context.put("achieved", row.achieved());
+        return context;
+    }
+
+    private static Map<String, Object> processCreateContext(String caseId,
+                                                            StartProcessRequest request) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseId", caseId);
+        if (request != null && request.planItemId() != null) {
+            context.put("planItemId", request.planItemId());
+        }
+        if (request != null && request.processDefinitionKey() != null) {
+            context.put("processDefinitionKey", request.processDefinitionKey());
+        }
+        return context;
+    }
+
+    private static Map<String, Object> processContext(LinkedProcessRepository.LinkedProcessRow row) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseId", row.caseId());
+        if (row.planItemId() != null) {
+            context.put("planItemId", row.planItemId());
+        }
+        context.put("processDefinitionKey", row.processDefinitionKey());
+        context.put("state", row.state());
+        context.put("engineSync", row.engineSync().name());
+        return context;
+    }
+
+    private static Map<String, Object> caseContext(CaseInstance c) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseDefinitionKey", c.caseDefKey());
+        context.put("state", c.state().name());
+        context.put("priority", c.priority().name());
+        if (c.businessKey() != null) {
+            context.put("businessKey", c.businessKey());
+        }
+        return context;
+    }
+
+    private static boolean fieldAllowed(PermissionDecision decision, String field) {
+        return decision.allowedFields().isEmpty()
+                || decision.allowedFields().contains("*")
+                || decision.allowedFields().contains(field);
+    }
+
+    private static void putIfAllowed(Map<String, Object> target, PermissionDecision decision,
+                                     String field, Object value) {
+        if (value != null && fieldAllowed(decision, field)) {
+            target.put(field, value);
+        }
+    }
+
+    private static void putIfAllowedNullable(Map<String, Object> target,
+                                             PermissionDecision decision,
+                                             String field, Object value) {
+        if (fieldAllowed(decision, field)) {
+            target.put(field, value);
+        }
     }
 
     private static Map<String, Object> milestoneBody(MilestoneRepository.MilestoneRow m,
                                                      List<AvailableAction> actions) {
+        return milestoneBody(m, actions, PermissionDecision.allow(m.id()));
+    }
+
+    private static Map<String, Object> milestoneBody(MilestoneRepository.MilestoneRow m,
+                                                     List<AvailableAction> actions,
+                                                     PermissionDecision decision) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", m.id());
-        body.put("name", m.name());
-        body.put("achieved", m.achieved());
-        body.put("achievedAt", m.achievedAt());
-        body.put("achievedBy", m.achievedBy());
+        body.put("caseId", m.caseId());
+        putIfAllowed(body, decision, "planItemId", m.planItemId());
+        putIfAllowed(body, decision, "name", m.name());
+        putIfAllowed(body, decision, "achieved", m.achieved());
+        putIfAllowedNullable(body, decision, "achievedAt", m.achievedAt());
+        putIfAllowedNullable(body, decision, "achievedBy", m.achievedBy());
         body.put("availableActions", actions);
         return body;
+    }
+
+    private List<Map<String, Object>> authorizedMilestoneBodies(
+            List<MilestoneRepository.MilestoneRow> rows, CaseSnapshot snapshot,
+            Set<String> roles, Actor actor, String tenant) {
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+        Map<String, PermissionDecision> decisions = permissions.evaluate(actor, tenant,
+                PermissionActions.MILESTONE_READ, ResourceTypes.MILESTONE,
+                rows.stream()
+                        .map(row -> new WorkerPermissionResource(row.id(), milestoneContext(row.caseId(), row)))
+                        .toList());
+        return rows.stream()
+                .map(row -> Map.entry(row, decisions.getOrDefault(row.id(),
+                        PermissionDecision.deny(row.id()))))
+                .filter(entry -> entry.getValue().allowed())
+                .map(entry -> milestoneBody(entry.getKey(),
+                        policy.listForMilestone(snapshot, entry.getKey().id(),
+                                entry.getKey().achieved(), roles),
+                        entry.getValue()))
+                .toList();
     }
 
     /**
@@ -272,13 +554,37 @@ public class CollaborationController {
      * making a successful create disappear.
      */
     private static Map<String, Object> processBody(LinkedProcessRepository.LinkedProcessRow p) {
+        return processBody(p, PermissionDecision.allow(p.id()));
+    }
+
+    private static Map<String, Object> processBody(LinkedProcessRepository.LinkedProcessRow p,
+                                                   PermissionDecision decision) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", p.id());
-        body.put("planItemId", p.planItemId());
-        body.put("processInstanceId", p.processInstanceId());
-        body.put("processDefinitionKey", p.processDefinitionKey());
-        body.put("state", p.state());
-        body.put("engineSync", p.engineSync().name());
+        body.put("caseId", p.caseId());
+        putIfAllowed(body, decision, "planItemId", p.planItemId());
+        putIfAllowed(body, decision, "processInstanceId", p.processInstanceId());
+        putIfAllowed(body, decision, "processDefinitionKey", p.processDefinitionKey());
+        putIfAllowed(body, decision, "state", p.state());
+        putIfAllowed(body, decision, "engineSync", p.engineSync().name());
         return body;
+    }
+
+    private List<Map<String, Object>> authorizedProcessBodies(
+            List<LinkedProcessRepository.LinkedProcessRow> rows, Actor actor, String tenant) {
+        if (rows.isEmpty()) {
+            return List.of();
+        }
+        Map<String, PermissionDecision> decisions = permissions.evaluate(actor, tenant,
+                PermissionActions.PROCESS_READ, ResourceTypes.PROCESS,
+                rows.stream()
+                        .map(row -> new WorkerPermissionResource(row.id(), processContext(row)))
+                        .toList());
+        return rows.stream()
+                .map(row -> Map.entry(row, decisions.getOrDefault(row.id(),
+                        PermissionDecision.deny(row.id()))))
+                .filter(entry -> entry.getValue().allowed())
+                .map(entry -> processBody(entry.getKey(), entry.getValue()))
+                .toList();
     }
 }

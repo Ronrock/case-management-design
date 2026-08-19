@@ -5,6 +5,11 @@ import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
 import org.casemgmt.domain.PlanItem;
+import org.casemgmt.permissions.PermissionActions;
+import org.casemgmt.permissions.PermissionDecision;
+import org.casemgmt.permissions.ResourceTypes;
+import org.casemgmt.permissions.WorkerPermissionEvaluator;
+import org.casemgmt.permissions.WorkerPermissionResource;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseQuery;
 import org.casemgmt.repo.CaseRepository;
@@ -88,11 +93,13 @@ public class CaseController {
     private final ActionPolicy policy;
     private final CallerResolver callers;
     private final IdempotencySupport idempotency;
+    private final WorkerPermissionEvaluator permissions;
 
     public CaseController(CaseService cases, CaseRepository caseRepo,
                           CaseDefinitionRepository definitionRepo, PlanItemRepository planItemRepo,
                           ActionPolicy policy, CallerResolver callers,
-                          IdempotencyRepository idempotencyRepo) {
+                          IdempotencyRepository idempotencyRepo,
+                          WorkerPermissionEvaluator permissions) {
         this.cases = cases;
         this.caseRepo = caseRepo;
         this.definitionRepo = definitionRepo;
@@ -100,6 +107,7 @@ public class CaseController {
         this.policy = policy;
         this.callers = callers;
         this.idempotency = new IdempotencySupport(idempotencyRepo);
+        this.permissions = permissions;
     }
 
     /**
@@ -123,6 +131,9 @@ public class CaseController {
         String tenantId = callers.requireTenant(actor, request.tenantId());
         CasePriority priority = InvalidRequestException.enumValue(
                 CasePriority.class, "priority", request.priority(), CasePriority.MEDIUM);
+        permissions.assertAllowed(actor, tenantId, PermissionActions.CASE_CREATE,
+                ResourceTypes.CASE, "new:" + request.caseDefinitionKey(),
+                createContext(request, priority));
 
         var result = idempotency.execute(idempotencyKey, idempotencyScope(actor),
                 JsonCodec.toJson(request),
@@ -179,13 +190,15 @@ public class CaseController {
         List<CaseInstance> rows = caseRepo.query(new CaseQuery(tenant, states, assignee,
                 caseDefinitionKey, businessKey, effectivePage * effectiveSize, effectiveSize));
 
-        return new Page<>(withActions(rows, actor), effectivePage, effectiveSize);
+        return new Page<>(withActions(readableCases(rows, actor, tenant), actor),
+                effectivePage, effectiveSize);
     }
 
     @GetMapping("/{caseId}")
     public ResponseEntity<CaseResponse> get(@PathVariable String caseId, Authentication authentication) {
         Actor actor = callers.actor(authentication);
         CaseInstance c = visibleCase(caseId, actor);
+        assertCasePermission(actor, c, PermissionActions.CASE_READ);
         return ResponseEntity.ok().eTag(ETagSupport.format(c.version())).body(response(c, actor));
     }
 
@@ -205,9 +218,10 @@ public class CaseController {
                                               @RequestBody PatchCaseRequest request,
                                               Authentication authentication) {
         Actor actor = callers.actor(authentication);
+        CaseInstance c = visibleCase(caseId, actor);
+        assertCasePermission(actor, c, PermissionActions.CASE_UPDATE);
         long version = expectedVersion(ifMatch, caseId, actor);
-        policy.assertAllowed(cases.snapshot(visibleCase(caseId, actor)),
-                callers.roles(caseId, actor), "update");
+        policy.assertAllowed(cases.snapshot(c), callers.roles(caseId, actor), "update");
 
         Map<String, Object> patch = new LinkedHashMap<>();
         if (request.title() != null) patch.put("title", request.title());
@@ -224,9 +238,10 @@ public class CaseController {
                                               @RequestBody(required = false) CloseRequest request,
                                               Authentication authentication) {
         Actor actor = callers.actor(authentication);
+        CaseInstance c = visibleCase(caseId, actor);
+        assertCasePermission(actor, c, PermissionActions.CASE_CLOSE);
         long version = expectedVersion(ifMatch, caseId, actor);
-        policy.assertAllowed(cases.snapshot(visibleCase(caseId, actor)),
-                callers.roles(caseId, actor), "close");
+        policy.assertAllowed(cases.snapshot(c), callers.roles(caseId, actor), "close");
 
         CaseInstance closed = cases.close(caseId, version,
                 request == null ? null : request.outcome(), actor);
@@ -240,9 +255,10 @@ public class CaseController {
                                                @RequestBody(required = false) CancelRequest request,
                                                Authentication authentication) {
         Actor actor = callers.actor(authentication);
+        CaseInstance c = visibleCase(caseId, actor);
+        assertCasePermission(actor, c, PermissionActions.CASE_CANCEL);
         long version = expectedVersion(ifMatch, caseId, actor);
-        policy.assertAllowed(cases.snapshot(visibleCase(caseId, actor)),
-                callers.roles(caseId, actor), "cancel");
+        policy.assertAllowed(cases.snapshot(c), callers.roles(caseId, actor), "cancel");
 
         CaseInstance cancelled = cases.cancel(caseId, version,
                 request == null ? null : request.reason(), actor);
@@ -304,7 +320,7 @@ public class CaseController {
     private CaseResponse response(CaseInstance c, Actor actor) {
         Set<String> roles = callers.roles(c.id(), actor);
         CaseSnapshot snapshot = cases.snapshot(c);
-        List<AvailableAction> actions = policy.listForCase(snapshot, roles);
+        List<AvailableAction> actions = filterCaseActions(c, actor, policy.listForCase(snapshot, roles));
         return CaseResponse.of(c, actions);
     }
 
@@ -326,7 +342,76 @@ public class CaseController {
                     definitions.computeIfAbsent(c.caseDefId(), definitionRepo::require);
             CaseSnapshot snapshot = new CaseSnapshot(c, definition,
                     itemsByCase.getOrDefault(c.id(), List.of()));
-            return CaseResponse.of(c, policy.listForCase(snapshot, rolesByCase.get(c.id())));
+            return CaseResponse.of(c, filterCaseActions(c, actor,
+                    policy.listForCase(snapshot, rolesByCase.get(c.id()))));
         }).toList();
+    }
+
+    private List<CaseInstance> readableCases(List<CaseInstance> rows, Actor actor, String tenant) {
+        if (rows.isEmpty()) {
+            return rows;
+        }
+        Map<String, PermissionDecision> decisions = permissions.evaluate(actor, tenant,
+                PermissionActions.CASE_READ, ResourceTypes.CASE,
+                rows.stream()
+                        .map(c -> new WorkerPermissionResource(c.id(), caseContext(c)))
+                        .toList());
+        return rows.stream()
+                .filter(c -> decisions.getOrDefault(c.id(),
+                        PermissionDecision.deny(c.id())).allowed())
+                .toList();
+    }
+
+    private void assertCasePermission(Actor actor, CaseInstance c, String action) {
+        permissions.assertAllowed(actor, c.tenantId(), action, ResourceTypes.CASE, c.id(),
+                caseContext(c));
+    }
+
+    private List<AvailableAction> filterCaseActions(CaseInstance c, Actor actor,
+                                                    List<AvailableAction> actions) {
+        return actions.stream()
+                .filter(action -> {
+                    String permission = casePermissionAction(action.action());
+                    return permission != null && permissions.allowedOrFalse(actor, c.tenantId(),
+                            permission, ResourceTypes.CASE, c.id(), caseContext(c));
+                })
+                .toList();
+    }
+
+    private static String casePermissionAction(String action) {
+        return switch (action) {
+            case "update" -> PermissionActions.CASE_UPDATE;
+            case "close" -> PermissionActions.CASE_CLOSE;
+            case "cancel" -> PermissionActions.CASE_CANCEL;
+            default -> null;
+        };
+    }
+
+    private static Map<String, Object> createContext(CreateCaseRequest request,
+                                                     CasePriority priority) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseDefinitionKey", request.caseDefinitionKey());
+        context.put("priority", priority.name());
+        if (request.businessKey() != null) {
+            context.put("businessKey", request.businessKey());
+        }
+        if (request.title() != null) {
+            context.put("title", request.title());
+        }
+        return context;
+    }
+
+    private static Map<String, Object> caseContext(CaseInstance c) {
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("caseDefinitionKey", c.caseDefKey());
+        context.put("state", c.state().name());
+        context.put("priority", c.priority().name());
+        if (c.businessKey() != null) {
+            context.put("businessKey", c.businessKey());
+        }
+        if (c.assignee() != null) {
+            context.put("assignee", c.assignee());
+        }
+        return context;
     }
 }

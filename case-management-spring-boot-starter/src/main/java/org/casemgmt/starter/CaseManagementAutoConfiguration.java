@@ -11,8 +11,12 @@ import org.casemgmt.rest.error.ProblemDetailHandler;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.rules.*;
 import org.casemgmt.search.CaseProjectionSearchProvider;
+import org.casemgmt.search.DocumentMetadataSearchProvider;
 import org.casemgmt.search.SearchOrchestrator;
 import org.casemgmt.search.SearchProvider;
+import org.casemgmt.permissions.WorkerPermissionEvaluator;
+import org.casemgmt.permissions.WorkerPermissionsClient;
+import org.casemgmt.permissions.WorkerPermissionsTokenProvider;
 import org.casemgmt.service.*;
 import org.casemgmt.sla.SlaService;
 import org.casemgmt.sla.SlaSweeper;
@@ -73,6 +77,7 @@ public class CaseManagementAutoConfiguration {
     @Bean public CaseTaskRepository caseTaskRepository(JdbcClient c) { return new CaseTaskRepository(c); }
     @Bean public MilestoneRepository milestoneRepository(JdbcClient c) { return new MilestoneRepository(c); }
     @Bean public CommentRepository commentRepository(JdbcClient c) { return new CommentRepository(c); }
+    @Bean public DocumentRepository documentRepository(JdbcClient c) { return new DocumentRepository(c); }
     @Bean public ParticipantRepository participantRepository(JdbcClient c) { return new ParticipantRepository(c); }
     @Bean public LinkedProcessRepository linkedProcessRepository(JdbcClient c) { return new LinkedProcessRepository(c); }
     @Bean public EventRepository eventRepository(JdbcClient c) { return new EventRepository(c); }
@@ -83,8 +88,38 @@ public class CaseManagementAutoConfiguration {
     @Bean public SlaRepository slaRepository(JdbcClient c) { return new SlaRepository(c); }
 
     @Bean
-    public CaseProjectionSearchProvider caseProjectionSearchProvider(CaseRepository cases) {
-        return new CaseProjectionSearchProvider(cases);
+    public CaseProjectionSearchProvider caseProjectionSearchProvider(CaseRepository cases,
+                                                                     WorkerPermissionsClient permissions) {
+        return new CaseProjectionSearchProvider(cases, permissions);
+    }
+
+    @Bean
+    public DocumentMetadataSearchProvider documentMetadataSearchProvider(DocumentRepository documents,
+                                                                         WorkerPermissionsClient permissions) {
+        return new DocumentMetadataSearchProvider(documents, permissions);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(WorkerPermissionsClient.class)
+    public WorkerPermissionsClient workerPermissionsClient(CaseManagementProperties props,
+                                                           WorkerPermissionsTokenProvider tokenProvider) {
+        CaseManagementProperties.WorkerPermissions config = props.getWorkerPermissions();
+        if (config.isEnabled()) {
+            return new WorkerPermissionsHttpClient(config.getBaseUrl(), config.getEvaluatePath(),
+                    tokenProvider, config.getConnectTimeoutMs(), config.getReadTimeoutMs());
+        }
+        return WorkerPermissionsClient.denyAll();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(WorkerPermissionsTokenProvider.class)
+    public WorkerPermissionsTokenProvider workerPermissionsTokenProvider(CaseManagementProperties props) {
+        return () -> props.getWorkerPermissions().getBearerToken();
+    }
+
+    @Bean
+    public WorkerPermissionEvaluator workerPermissionEvaluator(WorkerPermissionsClient client) {
+        return new WorkerPermissionEvaluator(client);
     }
 
     @Bean
@@ -212,6 +247,12 @@ public class CaseManagementAutoConfiguration {
     public CommentService commentService(CommentRepository comments, CaseRepository cases,
                                          EventPublisher publisher) {
         return new CommentService(comments, cases, publisher);
+    }
+
+    @Bean
+    public DocumentService documentService(DocumentRepository documents, CaseRepository cases,
+                                           EventPublisher publisher) {
+        return new DocumentService(documents, cases, publisher);
     }
 
     @Bean

@@ -1749,7 +1749,7 @@ components:
       properties:
         code:
           type: string
-          enum: [no-provider, provider-timeout, provider-unavailable, stale-projection, partial-results, facet-unavailable]
+          enum: [no-provider, provider-timeout, provider-unavailable, stale-projection, partial-results, facet-unavailable, authorization-unavailable]
         message: {type: string}
         provider: {type: string}
 

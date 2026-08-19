@@ -12,6 +12,7 @@ Documentation for building on the case management library.
 | [API cookbook](api-cookbook.md) | You're writing a client |
 | [Operations](operations.md) | You're deploying, integrating or debugging |
 | [Search architecture](../search-architecture.md) | You're implementing or integrating search providers |
+| [Document management and search](../document-management-and-search.md) | You're linking documents or adding document search/extraction |
 
 Reference material lives elsewhere: [`openapi-specs.md`](../../openapi-specs.md) is the API
 contract, [`db-design.sql`](../../db-design.sql) is the schema, [`FINDINGS.md`](../../FINDINGS.md)

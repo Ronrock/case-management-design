@@ -16,6 +16,7 @@ public class CaseManagementProperties {
     private final Engine engine = new Engine();
     private final Events events = new Events();
     private final Schedulers schedulers = new Schedulers();
+    private final WorkerPermissions workerPermissions = new WorkerPermissions();
 
     public static class Engine {
         private EngineMode mode = EngineMode.embedded;
@@ -98,6 +99,28 @@ public class CaseManagementProperties {
         public void setIdempotencyRetentionHours(int v) { this.idempotencyRetentionHours = v; }
     }
 
+    public static class WorkerPermissions {
+        private boolean enabled = false;
+        private String baseUrl;
+        private String evaluatePath = "/permissions/evaluate";
+        private String bearerToken;
+        private long connectTimeoutMs = 5_000;
+        private long readTimeoutMs = 5_000;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getBaseUrl() { return baseUrl; }
+        public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+        public String getEvaluatePath() { return evaluatePath; }
+        public void setEvaluatePath(String evaluatePath) { this.evaluatePath = evaluatePath; }
+        public String getBearerToken() { return bearerToken; }
+        public void setBearerToken(String bearerToken) { this.bearerToken = bearerToken; }
+        public long getConnectTimeoutMs() { return connectTimeoutMs; }
+        public void setConnectTimeoutMs(long connectTimeoutMs) { this.connectTimeoutMs = connectTimeoutMs; }
+        public long getReadTimeoutMs() { return readTimeoutMs; }
+        public void setReadTimeoutMs(long readTimeoutMs) { this.readTimeoutMs = readTimeoutMs; }
+    }
+
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
     public String getEngineId() { return engineId; }
@@ -105,4 +128,5 @@ public class CaseManagementProperties {
     public Engine getEngine() { return engine; }
     public Events getEvents() { return events; }
     public Schedulers getSchedulers() { return schedulers; }
+    public WorkerPermissions getWorkerPermissions() { return workerPermissions; }
 }

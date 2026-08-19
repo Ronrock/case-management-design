@@ -159,8 +159,8 @@ public class ActionPolicy {
     }
 
     /**
-     * Case-level collaboration: adding a comment, and starting a BPMN process correlated to the
-     * case.
+     * Case-level collaboration: adding a comment, linking/removing document references, and
+     * starting a BPMN process correlated to the case.
      *
      * <p>Added by Task 24 fix round 1 (review finding, Critical). These endpoints previously had
      * no rule at all and were gated by authentication alone, so any authenticated user could
@@ -182,6 +182,8 @@ public class ActionPolicy {
         }
         String base = "/cases/" + snapshot.caseInstance().id();
         actions.add(AvailableAction.post("comment", base + "/comments"));
+        actions.add(AvailableAction.post("add-document", base + "/documents"));
+        actions.add(AvailableAction.delete("remove-document", base + "/documents/{documentId}"));
         actions.add(AvailableAction.post("start-process", base + "/processes"));
         return actions;
     }

@@ -104,7 +104,7 @@ class SearchApiHttpTest extends CaseApiHttpTestBase {
         assertThat(searchItems(query)).hasSize(1);
         assertThat((List<Map<String, Object>>) providers.getBody().get("providers"))
                 .extracting(status -> status.get("id"))
-                .containsExactly("case-projection");
+                .contains("case-projection", "document-metadata");
         assertThat((List<Map<String, Object>>) suggestions.getBody().get("items"))
                 .extracting(item -> item.get("suggestionType"))
                 .containsExactly("case");

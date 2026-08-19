@@ -4,14 +4,17 @@ import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-public record SearchQuery(String tenantId, String q, List<SearchScope> scopes,
-                          Map<String, Object> filters, List<String> facets,
-                          int page, int pageSize, boolean includeProviderStatus) {
+public record SearchQuery(String tenantId, String workerId, List<String> groups, String q,
+                          List<SearchScope> scopes, Map<String, Object> filters,
+                          List<String> facets, int page, int pageSize,
+                          boolean includeProviderStatus) {
 
     public SearchQuery {
         if (tenantId == null || tenantId.isBlank()) {
             throw new IllegalArgumentException("Search requires a tenant");
         }
+        workerId = workerId == null || workerId.isBlank() ? null : workerId.trim();
+        groups = groups == null ? List.of() : List.copyOf(groups);
         q = q == null || q.isBlank() ? null : q.trim();
         scopes = scopes == null || scopes.isEmpty()
                 ? List.of(SearchScope.CASES)
@@ -32,8 +35,15 @@ public record SearchQuery(String tenantId, String q, List<SearchScope> scopes,
         pageSize = Math.clamp(pageSize, 1, 200);
     }
 
-    public SearchQuery withPage(int newPage, int newPageSize) {
-        return new SearchQuery(tenantId, q, scopes, filters, facets, newPage, newPageSize,
+    public SearchQuery(String tenantId, String q, List<SearchScope> scopes,
+                       Map<String, Object> filters, List<String> facets,
+                       int page, int pageSize, boolean includeProviderStatus) {
+        this(tenantId, null, List.of(), q, scopes, filters, facets, page, pageSize,
                 includeProviderStatus);
+    }
+
+    public SearchQuery withPage(int newPage, int newPageSize) {
+        return new SearchQuery(tenantId, workerId, groups, q, scopes, filters, facets, newPage,
+                newPageSize, includeProviderStatus);
     }
 }

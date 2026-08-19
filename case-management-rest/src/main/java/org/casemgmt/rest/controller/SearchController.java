@@ -1,6 +1,9 @@
 package org.casemgmt.rest.controller;
 
 import org.casemgmt.domain.CaseState;
+import org.casemgmt.permissions.PermissionActions;
+import org.casemgmt.permissions.ResourceTypes;
+import org.casemgmt.permissions.WorkerPermissionEvaluator;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.dto.Dtos.SearchFacetsResponse;
 import org.casemgmt.rest.dto.Dtos.SearchProviderStatusResponse;
@@ -28,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/case-api/v2/search")
@@ -35,10 +39,13 @@ public class SearchController {
 
     private final SearchOrchestrator search;
     private final CallerResolver callers;
+    private final WorkerPermissionEvaluator permissions;
 
-    public SearchController(SearchOrchestrator search, CallerResolver callers) {
+    public SearchController(SearchOrchestrator search, CallerResolver callers,
+                            WorkerPermissionEvaluator permissions) {
         this.search = search;
         this.callers = callers;
+        this.permissions = permissions;
     }
 
     @GetMapping("/cases")
@@ -53,7 +60,9 @@ public class SearchController {
                                 Authentication authentication) {
         Actor actor = callers.actor(authentication);
         Map<String, Object> filters = filters(state, status, caseDefinitionKey, businessKey, assignee);
-        SearchQuery query = new SearchQuery(callers.tenantId(actor), q, List.of(SearchScope.CASES),
+        assertSearchAllowed(actor, List.of(SearchScope.CASES), q);
+        SearchQuery query = new SearchQuery(callers.tenantId(actor), actor.userId(),
+                actor.groups(), q, List.of(SearchScope.CASES),
                 filters, List.of(), page, pageSize, true);
         return SearchResponse.of(search.search(query));
     }
@@ -69,9 +78,11 @@ public class SearchController {
                 ? Map.of()
                 : new LinkedHashMap<>(effective.filters());
         validateCaseStateFilter(filters);
+        List<SearchScope> requestedScopes = scopes(effective.scopes());
+        assertSearchAllowed(actor, requestedScopes, effective.q());
 
-        SearchQuery query = new SearchQuery(callers.tenantId(actor), effective.q(),
-                scopes(effective.scopes()), filters,
+        SearchQuery query = new SearchQuery(callers.tenantId(actor), actor.userId(),
+                actor.groups(), effective.q(), requestedScopes, filters,
                 effective.facets(), valueOr(effective.page(), 0),
                 valueOr(effective.pageSize(), CaseController.DEFAULT_PAGE_SIZE),
                 effective.includeProviderStatus() == null || effective.includeProviderStatus());
@@ -80,7 +91,8 @@ public class SearchController {
 
     @GetMapping("/providers")
     public SearchProvidersResponse providers(Authentication authentication) {
-        callers.actor(authentication);
+        Actor actor = callers.actor(authentication);
+        assertSearchAllowed(actor, List.of(), null);
         return new SearchProvidersResponse(search.providerStatuses().stream()
                 .map(SearchProviderStatusResponse::of)
                 .toList());
@@ -96,7 +108,9 @@ public class SearchController {
         }
         Actor actor = callers.actor(authentication);
         SearchScope searchScope = scope(scope);
-        SearchQuery query = new SearchQuery(callers.tenantId(actor), q, List.of(searchScope),
+        assertSearchAllowed(actor, List.of(searchScope), q);
+        SearchQuery query = new SearchQuery(callers.tenantId(actor), actor.userId(),
+                actor.groups(), q, List.of(searchScope),
                 Map.of(), List.of(), 0, Math.clamp(limit, 1, 25), false);
         return new SearchSuggestionsResponse(search.search(query).items().stream()
                 .map(item -> new SearchSuggestionResponse(item.id(), item.title(),
@@ -111,11 +125,13 @@ public class SearchController {
                                        Authentication authentication) {
         Actor actor = callers.actor(authentication);
         SearchScope searchScope = scope(scope);
+        assertSearchAllowed(actor, List.of(searchScope), q);
         Map<String, Object> filters = new LinkedHashMap<>();
         if (caseDefinitionKey != null && !caseDefinitionKey.isBlank()) {
             filters.put("caseDefinitionKey", caseDefinitionKey.trim());
         }
-        SearchQuery query = new SearchQuery(callers.tenantId(actor), q, List.of(searchScope),
+        SearchQuery query = new SearchQuery(callers.tenantId(actor), actor.userId(),
+                actor.groups(), q, List.of(searchScope),
                 filters, List.of(), 0, CaseController.DEFAULT_PAGE_SIZE, true);
         org.casemgmt.search.SearchResponse response = search.search(query);
         List<SearchWarningResponse> warnings = response.warnings().stream()
@@ -196,5 +212,20 @@ public class SearchController {
 
     private static int valueOr(Integer value, int fallback) {
         return value == null ? fallback : value;
+    }
+
+    private void assertSearchAllowed(Actor actor, List<SearchScope> scopes, String q) {
+        String tenant = callers.tenantId(actor);
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("scopes", scopes == null ? List.of()
+                : scopes.stream().map(SearchScope::wireName).toList());
+        if (q != null && !q.isBlank()) {
+            context.put("hasQuery", true);
+        }
+        String resourceId = scopes == null || scopes.isEmpty()
+                ? "providers"
+                : scopes.stream().map(SearchScope::wireName).collect(Collectors.joining(","));
+        permissions.assertAllowed(actor, tenant, PermissionActions.SEARCH_EXECUTE,
+                ResourceTypes.SEARCH, resourceId, context);
     }
 }

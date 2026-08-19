@@ -113,6 +113,17 @@ public class ProblemDetailHandler extends ResponseEntityExceptionHandler {
         return problem(HttpStatus.FORBIDDEN, "forbidden", e.getMessage(), Map.of());
     }
 
+    @ExceptionHandler(AuthorizationDeniedException.class)
+    public ProblemDetail onAuthorizationDenied(AuthorizationDeniedException e) {
+        return problem(HttpStatus.FORBIDDEN, "forbidden", e.getMessage(), Map.of());
+    }
+
+    @ExceptionHandler(AuthorizationUnavailableException.class)
+    public ProblemDetail onAuthorizationUnavailable(AuthorizationUnavailableException e) {
+        return problem(HttpStatus.SERVICE_UNAVAILABLE, "authorization-unavailable",
+                e.getMessage(), Map.of());
+    }
+
     /**
      * Request values this layer parses itself — today, enums (fix round 1, I5). Scoped to our own
      * type for exactly the reason {@link #onMalformedETag} is: a blanket

@@ -90,6 +90,8 @@ All four actions funnel through a single `act` method — the only route to `Pla
 | Method | Path | Notes |
 |---|---|---|
 | `GET` / `POST` | `/cases/{caseId}/comments` | |
+| `GET` / `POST` | `/cases/{caseId}/documents` | Document metadata references; binary content remains in DMS/S3 |
+| `DELETE` | `/cases/{caseId}/documents/{documentId}` | Removes the case document reference |
 | `GET` | `/cases/{caseId}/milestones` | |
 | `POST` | `/cases/{caseId}/milestones/{milestoneId}/achieve` | Requires `If-Match` |
 | `GET` / `POST` | `/cases/{caseId}/processes` | `POST` accepts `planItemId`; requires `If-Match` |
@@ -133,8 +135,10 @@ All four actions funnel through a single `act` method — the only route to `Pla
 | `GET` | `/search/providers` | Provider capabilities, status and freshness |
 
 Search is provider-based rather than a direct dependency from the REST layer to every searchable
-module. The first provider searches the local case projection; task, document, timeline,
-enterprise-reference and semantic providers are extension points. See
+module. The first providers search the local case projection and document metadata references.
+The document provider calls the Worker Permissions port before returning document results and
+fails closed with an `authorization-unavailable` warning when authorization cannot be evaluated.
+Task, timeline, enterprise-reference and semantic providers are extension points. See
 [`search-architecture.md`](search-architecture.md).
 
 ---
@@ -185,8 +189,8 @@ disagree — but **enforcement lives in the service layer too**, because a clien
 directly never reads the projection.
 
 Action vocabulary: `update`, `close`, `cancel`, `enable`, `start`, `complete`, `terminate`,
-`claim`, `comment`, `achieve`, `pause`, `resume`, `start-process`, `deploy-case-definition`,
-`subscribe-webhook`.
+`claim`, `comment`, `add-document`, `remove-document`, `achieve`, `pause`, `resume`,
+`start-process`, `deploy-case-definition`, `subscribe-webhook`.
 
 **TODO** — document the intended role model for a real deployment; the PoC's is minimal.
 
@@ -223,8 +227,9 @@ yet materialised (issue #2).
 
 ### 5.3 Services
 
-`CaseService`, `PlanItemService`, `CaseTaskService`, `CommentService`, `MilestoneService`,
-`LinkedProcessService`, `WebhookService`, `CaseDefinitionService`, `SlaService`.
+`CaseService`, `PlanItemService`, `CaseTaskService`, `CommentService`, `DocumentService`,
+`MilestoneService`, `LinkedProcessService`, `WebhookService`, `CaseDefinitionService`,
+`SlaService`.
 
 The module pattern for a mutation is **row + event + audit in one transaction**, applied via
 `TransitionApplier`. `case-management-core` has a real `DataSourceTransactionManager`, so
@@ -262,8 +267,9 @@ Events are CloudEvents. `source` is hard-set from the configured engine id.
 
 Event types: `case.created`, `case.updated`, `case.closed`, `case.cancelled`,
 `case.planitem.transitioned`, `case.task.created`, `case.task.claimed`, `case.task.completed`,
-`case.comment.added`, `case.milestone.achieved`, `case.process.started`, `case.sla.started`,
-`case.sla.paused`, `case.sla.resumed`, `case.sla.warning`, `case.sla.breached`.
+`case.comment.added`, `case.document.added`, `case.document.removed`,
+`case.milestone.achieved`, `case.process.started`, `case.sla.started`, `case.sla.paused`,
+`case.sla.resumed`, `case.sla.warning`, `case.sla.breached`.
 
 ### 7.2 Webhook delivery
 

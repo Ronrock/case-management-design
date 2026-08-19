@@ -17,4 +17,8 @@ public record AvailableAction(String action, String href, String method, String 
     public static AvailableAction patch(String action, String href) {
         return new AvailableAction(action, href, "PATCH", null);
     }
+
+    public static AvailableAction delete(String action, String href) {
+        return new AvailableAction(action, href, "DELETE", null);
+    }
 }

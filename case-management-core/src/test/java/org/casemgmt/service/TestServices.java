@@ -63,6 +63,13 @@ public final class TestServices {
         return new CommentService(new CommentRepository(jdbc), new CaseRepository(jdbc), publisher);
     }
 
+    public static DocumentService documentService(DataSource dataSource) {
+        JdbcClient jdbc = JdbcClient.create(dataSource);
+        var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "eng-test");
+        return new DocumentService(new DocumentRepository(jdbc), new CaseRepository(jdbc), publisher);
+    }
+
     public static MilestoneService milestoneService(DataSource dataSource) {
         JdbcClient jdbc = JdbcClient.create(dataSource);
         var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),

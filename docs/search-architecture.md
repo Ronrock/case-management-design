@@ -37,6 +37,7 @@ flowchart LR
   orchestrator["Search Orchestrator"]
   planner["Query planner"]
   auth["Authorization and field policy"]
+  wp["Worker Permissions API"]
   merge["Merge, rank, deduplicate"]
 
   subgraph Providers["Search providers"]
@@ -49,7 +50,9 @@ flowchart LR
   end
 
   oracle["Oracle DBaaS projections"]
-  documentService["Document service"]
+  documentService["Document reference service"]
+  dms["Document Management System"]
+  extractor["Optional text extraction adapter"]
   enterpriseServices["Enterprise services"]
   vector["Optional search/vector index"]
 
@@ -59,6 +62,7 @@ flowchart LR
   component --> client --> api --> orchestrator
   orchestrator --> planner
   orchestrator --> auth
+  auth --> wp
   planner --> cases
   planner --> tasks
   planner --> docs
@@ -69,6 +73,9 @@ flowchart LR
   tasks --> oracle
   timeline --> oracle
   docs --> documentService
+  documentService --> dms
+  extractor --> dms
+  extractor --> oracle
   enterprise --> enterpriseServices
   semantic --> vector
   cases --> merge
@@ -149,8 +156,64 @@ resources or fields the caller cannot access.
 The current implementation starts with `CaseProjectionSearchProvider`, which searches the local
 case projection by tenant, state, assignee, case definition key, exact case id, exact or partial
 business key and title. User input is treated as literal text: Oracle `LIKE` wildcard characters
-such as `%`, `_` and `~` are escaped before query execution. Task, document, timeline, enterprise
-reference and semantic providers are extension points.
+such as `%`, `_` and `~` are escaped before query execution. Task, timeline, enterprise reference
+and semantic providers are extension points.
+
+The document provider follows the same contract, but with an additional rule: document results are
+filtered through the Worker Permissions port before they are returned. Missing or unavailable
+authorization produces an `authorization-unavailable` warning and no document results.
+
+## Document Search and Extraction
+
+The platform does not store document binaries in the case database. A case stores document
+references and approved metadata in `CM_DOCUMENT`; the binary remains in a DMS, object store or
+domain-owned content service. Search works in layers:
+
+1. Metadata search over local Oracle rows: document id, filename, category, MIME type, case id,
+   linked timestamp and external content reference.
+2. Optional extracted-text search over a separate projection owned by a document extraction adapter.
+3. Optional semantic search over approved extracted text or summaries, disabled by default.
+
+```mermaid
+sequenceDiagram
+  participant Worker
+  participant UI as Lit Search UI
+  participant API as Search API
+  participant Provider as Document Metadata Provider
+  participant Oracle as Oracle CM_DOCUMENT
+  participant WP as Worker Permissions API
+  participant DMS as Document Management System
+  participant Extractor as Text Extraction Adapter
+
+  Worker->>UI: Search document text or metadata
+  UI->>API: POST /search/query scopes=[documents]
+  API->>Provider: Tenant, worker id, groups, query
+  Provider->>Oracle: Candidate metadata query
+  Oracle-->>Provider: Candidate document references
+  Provider->>WP: Batch document.read decisions
+  WP-->>Provider: Per-document allow/deny and field policy
+  Provider-->>API: Only authorized metadata results
+  opt Content extraction for richer search
+    Extractor->>DMS: Retrieve approved binary/content stream
+    Extractor->>Oracle: Store searchable text projection and freshness offset
+  end
+```
+
+Document content extraction is deliberately outside the transaction that links a document to a
+case. The transaction writes the document reference, a domain event and an audit record. Extraction
+workers consume that event or run a rebuild, retrieve content from the DMS through an approved
+adapter, apply classification/masking rules, and write only approved searchable text or derived
+metadata into a rebuildable projection. Search must remain useful when extraction is delayed by
+returning metadata results with explicit freshness and provider status.
+
+Document search authorization requirements:
+
+- Evaluate `document.read` through Worker Permissions before returning document results.
+- Treat missing permission decisions as deny.
+- Fail closed when Worker Permissions is unavailable.
+- Do not return, count, suggest or highlight unauthorized documents.
+- Do not expose extracted snippets unless the field policy allows the caller to read that field.
+- Keep DMS download URLs or content references out of unauthenticated redirects and logs.
 
 ## API Surface
 
@@ -201,13 +264,16 @@ This repository currently implements the first slice:
 
 - `SearchProvider` and `SearchOrchestrator` in core.
 - Local case projection provider with exact id, exact/partial business-key and title matching.
+- Document metadata provider over `CM_DOCUMENT`, with Worker Permissions filtering and
+  fail-closed authorization warnings.
+- Document reference endpoints for linking, listing and removing DMS-backed metadata records.
 - Search REST endpoints for cases, orchestrated queries, provider status, suggestions and facets.
 - Tenant scope derived from the principal.
 
 Still to implement:
 
 - Task/worklist provider.
-- Document metadata provider.
+- Extracted document-text provider.
 - Timeline/comment provider.
 - Facet-producing projections.
 - External search platform integration.

@@ -52,6 +52,9 @@ public final class Dtos {
 
     public record CommentRequest(String text, String visibility) {}
 
+    public record DocumentRequest(String name, String category, String mimeType, Long sizeBytes,
+                                  String contentUrl) {}
+
     /**
      * {@code planItemId} is the spec's "optional plan item this process fulfils" (fix round 1,
      * review finding I6). It is not decoration: {@code LinkedProcessService.start} already takes
