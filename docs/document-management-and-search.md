@@ -22,7 +22,7 @@ it must not be treated as proof that the caller may download the document.
 
 ```mermaid
 flowchart LR
-  UI["Lit UI in IRIS, IB Portal or standalone shell"]
+  UI["Lit UI in embedded enterprise portal or standalone shell"]
   API["Case API"]
   Service["DocumentService"]
   Oracle["Oracle CM_DOCUMENT"]

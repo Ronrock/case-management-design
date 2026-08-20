@@ -7,7 +7,7 @@ import java.util.stream.Collectors;
  * Port for the enterprise Worker Permissions API.
  *
  * <p>The case-management modules use this interface as a policy decision point client without
- * coupling core code to any ING-specific transport, token exchange or entitlement shape.
+ * coupling core code to any organization-specific transport, token exchange or entitlement shape.
  */
 @FunctionalInterface
 public interface WorkerPermissionsClient {

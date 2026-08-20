@@ -17,7 +17,7 @@ reference providers and semantic/vector search are extension points, not MVP dep
 | Authorization before disclosure | Search may match on sensitive fields only when policy permits returning, counting or highlighting them. |
 | Rebuildable indexes | Search indexes are read models and must be rebuildable from reliable events or agreed authoritative state. |
 | Explicit freshness | Search results include provider status and warning metadata when projections or providers are stale or partial. |
-| Portal neutral | IRIS, IB Portal and standalone shells consume the same Search API and typed client. |
+| Host neutral | Embedded enterprise portals and standalone shells consume the same Search API and typed client. |
 | Optional federation | Cross-domain search is an event-fed projection concern, not central ownership of domain case data. |
 | Controlled semantic search | AI/vector search is optional and only over approved indexed content with audit and masking controls. |
 
@@ -26,8 +26,8 @@ reference providers and semantic/vector search are extension points, not MVP dep
 ```mermaid
 flowchart LR
   subgraph Hosts["Frontend hosts"]
-    iris["IRIS Retail"]
-    ib["IB Portal Wholesale"]
+    embeddedA["Embedded enterprise portal"]
+    embeddedB["Alternative enterprise host"]
     shell["Standalone shell"]
   end
 
@@ -56,8 +56,8 @@ flowchart LR
   enterpriseServices["Enterprise services"]
   vector["Optional search/vector index"]
 
-  iris --> component
-  ib --> component
+  embeddedA --> component
+  embeddedB --> component
   shell --> component
   component --> client --> api --> orchestrator
   orchestrator --> planner
