@@ -289,8 +289,8 @@ case-shaped URL), and fills forms from JSON Schema **shape** only — `required`
 reach `CLOSED`.
 
 So the contract is *sufficient* to drive a UI. That is the claim §8 obligation 1 makes, and it
-holds. A Lit Web Components shell now exists under `case-management-web-components` with standalone,
-IRIS and IB Portal adapters; it is an integration scaffold, not a production workflow UI.
+holds. A Lit Web Components shell now exists under `case-management-web-components` with standalone
+and generic embedded-host adapters; it is an integration scaffold, not a production workflow UI.
 
 ### Where the contract fell short
 
