@@ -25,7 +25,7 @@ declarative **case definition** rather than by code. The engine is used for huma
 sub-processes; the case lifecycle itself is owned by this service.
 
 **UI scope:** the backend remains the main implemented surface, but a Lit Web Components package
-now provides the standalone shell and portal-adapter contract for IRIS and IB Portal embedding.
+now provides the standalone shell and a generic enterprise portal-adapter contract.
 Detailed product UX and form-rendering decisions remain outside this PoC.
 
 ---
@@ -40,7 +40,7 @@ Detailed product UX and form-rendering decisions remain outside this PoC.
 | `case-management-rest` | HTTP layer: controllers, authorization policy, problem+json, ETag, idempotency | core |
 | `case-management-spring-boot-starter` | Auto-configuration, properties, schedulers, architecture rules | core, rest, both gateways (optional) |
 | `case-management-poc-app` | Runnable demo application and the complaint case type | starter |
-| `case-management-web-components` | Lit shell, generated-client entry point and portal adapters for standalone, IRIS and IB Portal hosting | API contract |
+| `case-management-web-components` | Lit shell, generated-client entry point and adapters for standalone and embedded enterprise portal hosting | API contract |
 
 **Architectural invariant, enforced by ArchUnit:** `case-management-core` must not depend on any
 `org.operaton.bpm.engine` type. The one exception is `org.operaton.bpm.impl.juel` — an expression
@@ -51,7 +51,7 @@ library, not the engine. Enforced repo-wide by `CrossModuleArchitectureTest` in 
 
 ```mermaid
 flowchart LR
-    web["Lit Web Components\nstandalone shell / IRIS adapter / IB Portal adapter"]
+    web["Lit Web Components\nstandalone shell / embedded-host adapter"]
     rest["case-management-rest\nHTTP API, policy, ETags, idempotency"]
     core["case-management-core\ncase model, services, repositories, events, SLA"]
     starter["spring-boot-starter\nautoconfiguration and schedulers"]
