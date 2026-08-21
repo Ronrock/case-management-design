@@ -1,6 +1,6 @@
 import type { PortalAdapter, PortalUser } from "./portal-adapter";
 
-interface IrisGlobal {
+interface EmbeddedHostGlobal {
   auth?: { getAccessToken?: () => Promise<string> };
   user?: { getProfile?: () => Promise<PortalUser> };
   router?: { navigate?: (path: string) => void };
@@ -8,19 +8,19 @@ interface IrisGlobal {
 
 declare global {
   interface Window {
-    ING_IRIS?: IrisGlobal;
+    CASE_MANAGEMENT_HOST?: EmbeddedHostGlobal;
   }
 }
 
-export class IrisPortalAdapter implements PortalAdapter {
-  readonly kind = "iris" as const;
+export class EmbeddedPortalAdapter implements PortalAdapter {
+  readonly kind = "embedded" as const;
 
   async getAccessToken(): Promise<string | undefined> {
-    return window.ING_IRIS?.auth?.getAccessToken?.();
+    return window.CASE_MANAGEMENT_HOST?.auth?.getAccessToken?.();
   }
 
   async getUser(): Promise<PortalUser> {
-    return await window.ING_IRIS?.user?.getProfile?.() ?? { id: "iris-user" };
+    return await window.CASE_MANAGEMENT_HOST?.user?.getProfile?.() ?? { id: "embedded-user" };
   }
 
   async getTenantId(): Promise<string | undefined> {
@@ -28,6 +28,6 @@ export class IrisPortalAdapter implements PortalAdapter {
   }
 
   navigate(path: string): void {
-    window.ING_IRIS?.router?.navigate?.(path);
+    window.CASE_MANAGEMENT_HOST?.router?.navigate?.(path);
   }
 }

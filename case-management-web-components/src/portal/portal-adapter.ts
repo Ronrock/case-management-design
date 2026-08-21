@@ -6,7 +6,7 @@ export interface PortalUser {
 }
 
 export interface PortalAdapter {
-  readonly kind: "standalone" | "iris" | "ib-portal";
+  readonly kind: "standalone" | "embedded";
   getAccessToken(): Promise<string | undefined>;
   getUser(): Promise<PortalUser>;
   getTenantId(): Promise<string | undefined>;

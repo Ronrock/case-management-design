@@ -1,14 +1,10 @@
 import { hasPortalGlobal, type PortalAdapter } from "./portal-adapter";
-import { IrisPortalAdapter } from "./iris-adapter";
-import { IbPortalAdapter } from "./ib-portal-adapter";
+import { EmbeddedPortalAdapter } from "./embedded-portal-adapter";
 import { StandalonePortalAdapter } from "./standalone-adapter";
 
 export function detectPortalAdapter(): PortalAdapter {
-  if (hasPortalGlobal("ING_IRIS")) {
-    return new IrisPortalAdapter();
-  }
-  if (hasPortalGlobal("IB_PORTAL")) {
-    return new IbPortalAdapter();
+  if (hasPortalGlobal("CASE_MANAGEMENT_HOST")) {
+    return new EmbeddedPortalAdapter();
   }
   return new StandalonePortalAdapter();
 }
