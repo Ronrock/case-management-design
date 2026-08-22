@@ -4,9 +4,13 @@ We already have a declarative *behavioral* case model. This document maps the ga
 *presentation* model — where the front-end renders most case logic from the model, with pro-code
 escape hatches — surveys how five competitors solved it, and puts forward three architectures.
 
-Status: for discussion. Revision 3 (security, contract, caching, extension-governance, and
-operability requirements added after architecture review; vendor-neutral portal integration from
-PR #86 / commit `1a51cea` retained).
+The target authoring structure, canonical field model, search profiles and artifact boundaries are
+defined in [`declarative-case-model-architecture.md`](declarative-case-model-architecture.md). The UI
+manifest is one artifact in that bundle; it is not another source of data or authorization truth.
+
+Status: for discussion. Revision 4 (composable model bundle, canonical field vocabulary,
+permission-aware search contracts, generated projection plans, and prior security, portal,
+extension-governance, caching, and operability requirements incorporated).
 
 ## What we have today — and what "declarative" currently stops at
 
@@ -67,6 +71,10 @@ are three defensible positions on that axis.
   keys, and semantic formatting hints rather than preformatted web strings.
 - **Governed extension model:** custom components and composers are trusted, registered deployment
   units with bounded capabilities, versioned contracts, and observable failure behavior.
+- **One canonical field model:** forms, views, search, events, projections and policies reference
+  stable field ids from the case-data catalog instead of copying types, paths or classifications.
+- **Descriptor-driven discovery:** search and related-resource controls render from a caller-specific
+  Search Descriptor compiled by the server from search profiles and field policy.
 
 The three proposals differ in exactly one thing: *where* the case model, live instance state, and
 worker permissions are composed into a renderable UI — in the client (A), in the server per request
@@ -93,24 +101,31 @@ flowchart LR
 **Thesis:** extend the case definition with a presentation section; the Lit shell becomes a generic
 interpreter of it.
 
-The definition JSON (or a versioned sibling artifact deployed with it) gains a `ui` section: a
-typed data schema for `vars`, a summary layout, detail sections, worklist columns, per-form
-uiSchema, and action placement. The shell stops being two hand-coded panels and becomes one
-renderer that walks the manifest, calls the existing REST API for state, and honors
+The model bundle gains a view-manifest artifact containing summary layout, detail sections, worklist
+columns, per-form `uiSchema`, search-profile placement and action placement. The canonical case-data
+schema remains a separate bundle artifact; its governance annotations compile into the shared field
+catalog used by UI, search, policy, and contract tooling. The shell stops being two hand-coded panels
+and becomes one renderer that walks the manifest, calls the existing REST API for state, and honors
 `AvailableAction` for every button it draws.
 
 ```json
 {
+  "data": {
+    "schemaRef": "schemas/case-data.schema.json"
+  },
   "ui": {
-    "dataSchema": { "amount": {"type":"number","format":"currency"},
-                    "customerId": {"type":"string","label":"Customer"} },
-    "summary":   { "fields": ["businessKey","state","amount","slaStatus"] },
+    "summary":   { "fields": ["system:business-key", "system:state",
+                                 "field:amount", "system:sla-status"] },
     "sections": [
       { "id":"work",  "title":"Work",     "component":"plan-tree" },
       { "id":"docs",  "title":"Documents","component":"document-list" },
-      { "id":"risk",  "title":"Risk",     "component":"risk-panel" }
+      { "id":"risk",  "title":"Risk",     "component":"risk-panel" },
+      { "id":"related", "title":"Related cases", "component":"search",
+        "searchProfile":"related-cases" }
     ],
-    "worklist":  { "columns": ["businessKey","title","assignee","slaStatus"] },
+    "worklist":  { "searchProfile":"case-workbench",
+                    "columns": ["system:business-key", "system:title",
+                                "system:assignee", "system:sla-status"] },
     "forms":     { "reviewForm": { "uiSchema": { "note": {"widget":"textarea"} } } }
   }
 }
@@ -176,6 +191,14 @@ may be introduced only after the centralized authorization prerequisite below is
       "slaStatus": "WARNING"
     },
     "planItems": ["..."],
+    "searchDescriptors": {
+      "related-cases": {
+        "profile": "related-cases",
+        "parameters": ["relationship", "state"],
+        "sorts": ["updated-at-desc"],
+        "pagination": "cursor"
+      }
+    },
     "actions": [
       { "id": "start-review", "action": "start", "href": "...", "method": "POST" }
     ]
@@ -193,6 +216,7 @@ may be introduced only after the centralized authorization prerequisite below is
       ] },
       { "type": "planTree", "itemsBind": "/data/planItems",
         "actionRefs": ["start-review"] },
+      { "type": "search", "descriptorBind": "/data/searchDescriptors/related-cases" },
       { "type": "extension", "componentId": "risk-panel",
         "contractVersion": "1", "props": { "caseId": "case-42" } }
     ]
@@ -270,6 +294,28 @@ validation linkage, accessible names, responsive behavior, and design-token hook
 reject unsupported major versions predictably and show an auditable compatibility error rather than
 silently dropping required content.
 
+### Search and discovery integration
+
+Search is a first-class view primitive backed by the declarative model's versioned search profiles.
+The UI manifest chooses a profile and placement; it does not list database fields, operators, facets,
+providers, or authorization rules.
+
+For each caller, the server compiles a Search Descriptor from the active profile, canonical field
+catalog, provider capabilities, and Worker Permissions decisions. The descriptor exposes only the
+parameters, operators, facets, sorts, result fields, and relationship expansions the caller may use.
+The same descriptor drives a global workbench, related-cases section, document evidence picker, or
+reference-data selector in standalone and embedded hosts.
+
+Search requests use stable parameter ids and a typed expression tree. Raw JSON paths and arbitrary
+provider-specific filter maps are not public contracts. Search results pass through centralized
+resource and field projection before being attached to a view; matched-field metadata, highlights,
+facets, suggestions, and counts follow the same disclosure rules as ordinary search responses.
+
+The Search Descriptor is caller-specific and initially non-cacheable. A future validator includes
+the search-profile, provider, model, locale, and authorization-policy revisions. Detailed model,
+activation, and projection requirements are defined in
+[`declarative-case-model-architecture.md`](declarative-case-model-architecture.md).
+
 ### Strengths
 
 - Once the authorization prerequisite is complete, permissions and masking are enforced once,
@@ -303,7 +349,7 @@ app is a starting point the team edits; regeneration flows through git as an ord
 
 ```text
 $ casemgmt generate --definition widget-review@7 --out apps/widget-review
-  ✓ types/WidgetReviewVars.ts        # from ui.dataSchema
+  ✓ types/WidgetReviewVars.ts        # from the canonical case-data schema
   ✓ forms/ReviewForm.ts              # from forms.reviewForm JSON Schema
   ✓ pages/case-page.ts, worklist.ts  # composed from @casemgmt/sdk primitives
   → edit anything; `generate --update` merges model changes as a git diff
@@ -346,14 +392,14 @@ UI, OutSystems-style scaffolding.
 
 ## Recommendation
 
-**Take B as the destination, A as the authoring format, and the component registry as the shared
-escape hatch.** The manifest of Proposal A becomes the *input* the Proposal B composer consumes —
-authored at design time, versioned with the definition, but merged with state and permissions on
-the server. `AvailableAction` already provides a strong runtime contract. Worker Permissions provides
-the authorization foundation, but field projection must first become centralized, fail closed, and
-complete across all response types. Proposal C's headless SDK is worth building regardless (the thin
-renderer needs it anyway), but as an integration option for teams that opt out — not the platform's
-main path.
+**Take B as the destination, A's view manifest as an artifact in the model bundle, and the component
+registry as the shared escape hatch.** The view manifest becomes one input the Proposal B composer
+consumes alongside the canonical data schema, field catalog, commands, search profiles, state, and
+permissions. `AvailableAction` already provides a strong runtime contract. Worker Permissions
+provides the authorization foundation, but field projection must first become centralized, fail
+closed, and complete across all response types. Proposal C's headless SDK is worth building
+regardless (the thin renderer needs it anyway), but as an integration option for teams that opt out —
+not the platform's main path.
 
 This is deliberately the Pega-shaped answer with a ServiceNow-shaped authoring story. For a regulated
 platform, the decisive property is that *a field a worker may not see never reaches the browser*.
@@ -362,9 +408,9 @@ inside the same projection boundary.
 
 | Phase | Scope |
 |---|---|
-| 0 | Define canonical field paths and read/write semantics; make missing or empty field decisions deny by default; implement one central projection service across case, task, document, collaboration, search, and error DTOs; add negative authorization conformance tests before exposing a composed view. |
-| 1 | Define and publish JSON Schemas for the versioned `ui` authoring manifest and runtime descriptor; add typed `dataSchema` for `vars`; separately validate criterion expressions against declared variable and plan-item symbols at deploy time. |
-| 2 | Implement the orchestrated composer service and `/view` endpoints with canonical data separated from presentation bindings; reauthorize every action at execution; publish OpenAPI and start with `Cache-Control: private, no-store`. |
+| 0 | Publish the model-bundle meta-schema, canonical case-data schema and stable field vocabulary; define read/write/discovery semantics; make missing or empty field decisions deny by default; implement one central projection service across case, task, document, collaboration, search, view, and error DTOs. |
+| 1 | Publish JSON Schemas for the view manifest, View Descriptor, search parameters, search profiles, and Search Descriptor; statically validate field, command, criterion, projection, search, and view references; generate negative authorization conformance fixtures. |
+| 2 | Implement the orchestrated composer and search-capability services, `/view` and Search Descriptor endpoints, typed search expressions, generated projection plans, and governed shadow-index activation; reauthorize every action at execution and start caller-specific descriptors with `Cache-Control: private, no-store`. |
 | 3 | Replace the hand-coded Lit panels with a thin renderer for the bounded primitive vocabulary; implement localization, accessibility, responsive behavior, design-token mapping, unsupported-version handling, and embedded/standalone conformance tests. |
 | 4 | Add the allowlisted, versioned component registry and bounded `ViewComposer` SPI; implement schema validation, timeout and failure isolation, tracing, post-composition projection, and security tests for extension output. Export and document the normalized host contract for platform integration, while custom components receive only a scoped capability facade. |
 | 5 | Extract the headless `@casemgmt/sdk` from the renderer for opt-out teams; add optional code generation only if adoption evidence justifies its lifecycle and migration cost. |
@@ -385,6 +431,9 @@ The following decisions must be recorded before implementation starts:
 - **Availability behavior:** classify core and optional composers, define page-level latency and
   availability objectives, and agree which failures produce a partial view versus a fail-closed
   response.
+- **Search contract:** confirm stable parameter naming, typed operators, cursor semantics, sensitive-
+  identifier handling, profile approval, shadow-index activation, and whether Search Descriptors are
+  served directly or embedded in composed views.
 
 ## Vendor-neutral portal reassessment
 
@@ -416,8 +465,7 @@ over community or third-party architecture summaries.
   [Custom components](https://www.servicenow.com/docs/r/application-development/ui-builder/component-builder.html)
 - Appian — [Case Management Studio overview](https://docs.appian.com/suite/help/25.4/case-management-studio-overview.html) ·
   [Low-code configurations](https://docs.appian.com/suite/help/24.3/cms-low-code-configurations.html)
-- Salesforce — [OmniStudio FlexCards](https://trailhead.salesforce.com/content/learn/modules/omnistudio-flexcard-fundamentals/get-to-know-omnistudio-flexcards) ·
-  [FlexCard component reference](https://developer.salesforce.com/docs/platform/lightning-component-reference/guide/lightning-omnistudio-flexcard.html)
+- Salesforce — [OmniStudio FlexCards](https://trailhead.salesforce.com/content/learn/modules/omnistudio-flexcard-fundamentals/get-to-know-omnistudio-flexcards)
 - Flowable — [Case Views](https://documentation.flowable.com/latest/reactmodel/cmmn/concept/case-view) ·
   [CMMN solution](https://www.flowable.com/solutions/cmmn)
 - Backbase — [Micro-frontends at Backbase](https://engineering.backbase.com/2024/05/15/maintaining-legacy-code-with-micro-frontends/)
