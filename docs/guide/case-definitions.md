@@ -3,6 +3,10 @@
 A definition is one JSON document. Deploying it mints a new version; the id is
 `{tenant}:{key}:{version}`.
 
+This guide documents the format accepted by the current runtime. The proposed composable bundle,
+canonical field catalog, commands, search profiles and view manifests are described separately in
+[`declarative-case-model-architecture.md`](../declarative-case-model-architecture.md).
+
 ## Top level
 
 | Field | Required | Meaning |
@@ -42,9 +46,9 @@ Criteria are JUEL, evaluated in a sandbox with no access to arbitrary Java. Two 
 | `items` | Other plan items by `defKey` | `${items.assess.state == 'COMPLETED'}` |
 | `vars` | Case variables | `${vars.amount > 1000}` |
 
-> **Typos fail silently.** A criterion referencing a `defKey` that doesn't exist evaluates against a
-> null and simply never fires — no error at deploy time, none at runtime. Check your `defKey`s.
-> ([Issue #28](https://github.com/Ronrock/case-management-design/issues/28).)
+> **Reference validation:** deployment rejects criteria that reference an unknown plan-item
+> `defKey`. Case-variable references remain untyped and are not statically validated in the current
+> format; the target canonical data schema closes that remaining gap.
 
 ## Forms
 

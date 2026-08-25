@@ -2,8 +2,6 @@
 
 Documentation for building on the case management library.
 
-**Searchable version:** https://claude.ai/code/artifact/fc27b66e-85fd-4899-8d06-f7f8e0b47087
-
 | Guide | Read it when |
 |---|---|
 | [Quick start](quickstart.md) | You want a running case in 15 minutes |
@@ -13,6 +11,8 @@ Documentation for building on the case management library.
 | [Operations](operations.md) | You're deploying, integrating or debugging |
 | [Search architecture](../search-architecture.md) | You're implementing or integrating search providers |
 | [Document management and search](../document-management-and-search.md) | You're linking documents or adding document search/extraction |
+| [Declarative model architecture](../declarative-case-model-architecture.md) | You're designing the target model bundle, field catalog, search profiles or generated artifacts |
+| [Declarative UI proposal](../declarative-case-ui-proposal.md) | You're evaluating model-driven views and the server-composed View API |
 
 Reference material lives elsewhere: [`openapi-specs.md`](../../openapi-specs.md) is the API
 contract, [`db-design.sql`](../../db-design.sql) is the schema, [`FINDINGS.md`](../../FINDINGS.md)

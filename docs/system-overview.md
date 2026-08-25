@@ -8,7 +8,10 @@
 > [`openapi-specs.md`](../openapi-specs.md) (the published API contract),
 > [`db-design.md`](../db-design.md) / [`db-design.sql`](../db-design.sql) (schema),
 > [`design principles.md`](../design%20principles.md) (design rationale),
-> [`search-architecture.md`](search-architecture.md) (search provider architecture).
+> [`search-architecture.md`](search-architecture.md) (search provider architecture),
+> [`declarative-case-model-architecture.md`](declarative-case-model-architecture.md) (target model
+> bundle and discovery contract), and
+> [`declarative-case-ui-proposal.md`](declarative-case-ui-proposal.md) (target presentation model).
 
 ---
 
@@ -26,7 +29,9 @@ sub-processes; the case lifecycle itself is owned by this service.
 
 **UI scope:** the backend remains the main implemented surface, but a Lit Web Components package
 now provides the standalone shell and a generic enterprise portal-adapter contract.
-Detailed product UX and form-rendering decisions remain outside this PoC.
+Detailed product UX and form-rendering decisions remain outside this PoC. The model bundle,
+server-composed View API, Search Descriptor and generic renderer are target architecture and are not
+implemented by the current runtime.
 
 ---
 
@@ -166,6 +171,10 @@ The document provider calls the Worker Permissions port before returning documen
 fails closed with an `authorization-unavailable` warning when authorization cannot be evaluated.
 Task, timeline, enterprise-reference and semantic providers are extension points. See
 [`search-architecture.md`](search-architecture.md).
+
+The target declarative contract adds stable search parameters and profiles, a permission-aware Search
+Descriptor, typed query expressions and generated projection/index plans. These remain proposed
+capabilities; current requests use the implemented provider and filter contracts described above.
 
 ---
 
