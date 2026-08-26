@@ -23,6 +23,7 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <version.operaton>2.1.3</version.operaton>
+    <version.spring-boot>4.0.7</version.spring-boot>
     <!-- DO NOT downgrade below 1.21.4 - that is the floor, not a whim.
          1.21.3's DockerClientProviderStrategy hardcodes the connectivity-probe API version
          at v1.32; Docker Engine 29.x raised its MinAPIVersion to 1.40, so every probe against

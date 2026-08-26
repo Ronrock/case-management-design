@@ -4,9 +4,18 @@ import org.casemgmt.engine.EngineCommandDispatcher;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
 import org.casemgmt.engine.remote.RemoteEngineGateway;
+import org.casemgmt.engine.remote.RemoteObservationPoller;
+import org.casemgmt.engine.remote.RemoteProcessActivityClassifier;
+import org.casemgmt.orchestration.OrchestrationDeploymentPort;
+import org.casemgmt.orchestration.OutboxOrchestrationDeploymentPort;
 import org.casemgmt.repo.CaseTaskRepository;
+import org.casemgmt.repo.CaseDefinitionReleaseRepository;
+import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.EngineCommandRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
+import org.casemgmt.projection.ActiveBpmnCaseRepository;
+import org.casemgmt.projection.CaseProjectionPort;
+import org.casemgmt.projection.RemotePollingCheckpointRepository;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -128,6 +137,22 @@ public class RemoteEngineAutoConfiguration {
         return new RemoteEngineGateway(engineRestClient);
     }
 
+    @Bean
+    public RemoteObservationPoller remoteObservationPoller(
+            RestClient engineRestClient, CaseProjectionPort projections,
+            RemotePollingCheckpointRepository checkpoints,
+            ActiveBpmnCaseRepository activeCases,
+            RemoteProcessActivityClassifier classifier) {
+        return new RemoteObservationPoller(engineRestClient, projections, checkpoints, activeCases,
+                classifier);
+    }
+
+    @Bean
+    public RemoteProcessActivityClassifier remoteProcessActivityClassifier(
+            RestClient engineRestClient) {
+        return new RemoteProcessActivityClassifier(engineRestClient);
+    }
+
     /**
      * What the services get: writes commands in the local transaction (spec §3.5).
      *
@@ -146,6 +171,12 @@ public class RemoteEngineAutoConfiguration {
     @Primary
     public EngineGateway outboxEngineGateway(EngineCommandRepository commands) {
         return new OutboxEngineGateway(commands, id -> { });
+    }
+
+    @Bean
+    public OrchestrationDeploymentPort remoteOrchestrationDeploymentPort(
+            EngineCommandRepository commands) {
+        return new OutboxOrchestrationDeploymentPort(commands);
     }
 
     /**
@@ -167,12 +198,18 @@ public class RemoteEngineAutoConfiguration {
     public EngineCommandDispatcher engineCommandDispatcher(EngineCommandRepository commands,
                                                             RemoteEngineGateway delegate,
                                                             CaseTaskRepository tasks,
-                                                            LinkedProcessRepository linkedProcesses) {
+                                                            LinkedProcessRepository linkedProcesses,
+                                                            CaseDefinitionReleaseRepository releases,
+                                                            CaseDefinitionVersionBindingRepository bindings) {
         return new EngineCommandDispatcher(commands, delegate,
                 (correlationKey, sync, engineId) -> {
                     tasks.findByPlanItemId(correlationKey)
                             .ifPresent(t -> tasks.markSync(t.id(), sync, engineId));
                     linkedProcesses.markSync(correlationKey, sync, engineId);
+                },
+                (releaseId, status, deploymentId, failure) -> {
+                    releases.markDeployment(releaseId, status, deploymentId, failure);
+                    bindings.markDeploymentByRelease(releaseId, status);
                 });
     }
 }

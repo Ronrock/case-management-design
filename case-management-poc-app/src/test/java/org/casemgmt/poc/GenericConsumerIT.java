@@ -82,8 +82,13 @@ class GenericConsumerIT extends PocAppEmbeddedTestBase {
 
         // ---- discover which case type exists, and what its plan model says (generically) ----
         List<Map<String, Object>> definitions = list(http, "/case-definitions?tenantId=t1");
-        assertThat(definitions).as("exactly one case type is deployed in this PoC").hasSize(1);
-        String definitionKey = (String) definitions.get(0).get("key");
+        assertThat(definitions).extracting(definition -> definition.get("key"))
+                .contains("complaint", "complaint-bpmn");
+        // This characterization journey intentionally continues to prove the preserved legacy
+        // plan-model mode; BpmnComplaintResourcesTest and the BPMN API journey cover the new mode.
+        String definitionKey = definitions.stream()
+                .filter(definition -> "complaint".equals(definition.get("key")))
+                .findFirst().orElseThrow().get("key").toString();
 
         Map<String, Object> definitionDetail = map(http, "/case-definitions/" + definitionKey);
         List<Map<String, Object>> planItemDefs =

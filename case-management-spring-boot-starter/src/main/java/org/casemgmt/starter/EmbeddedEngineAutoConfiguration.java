@@ -2,14 +2,23 @@ package org.casemgmt.starter;
 
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
+import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
+import org.casemgmt.engine.embedded.ProcessCaseCorrelation;
+import org.casemgmt.engine.embedded.EmbeddedOrchestrationDeploymentPort;
+import org.casemgmt.engine.embedded.ProcessActivityClassifier;
+import org.casemgmt.engine.embedded.RepositoryProcessActivityClassifier;
+import org.casemgmt.orchestration.OrchestrationDeploymentPort;
+import org.casemgmt.projection.CaseProjectionPort;
 import org.operaton.bpm.engine.ProcessEngine;
 import org.operaton.bpm.engine.RuntimeService;
+import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.TaskService;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -74,6 +83,8 @@ public class EmbeddedEngineAutoConfiguration {
      */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(ProcessEngine.class)
+    @ConditionalOnProperty(prefix = "casemgmt.engine", name = "mode", havingValue = "embedded",
+            matchIfMissing = true)
     static class EmbeddedEngineGatewayConfiguration {
 
         @Bean
@@ -82,6 +93,52 @@ public class EmbeddedEngineAutoConfiguration {
                 matchIfMissing = true)
         EngineGateway embeddedEngineGateway(TaskService taskService, RuntimeService runtimeService) {
             return new EmbeddedEngineGateway(taskService, runtimeService);
+        }
+
+        @Bean
+        @ConditionalOnBean(RuntimeService.class)
+        ProcessCaseCorrelation processCaseCorrelation(RuntimeService runtimeService) {
+            return processInstanceId -> {
+                // Task create events are published from inside Operaton's start command,
+                // before the new runtime row is necessarily visible to a query. The caseId
+                // process variable is already present in the command context, however, so it
+                // is the reliable correlation source on this path. Keep the business-key
+                // lookup as a fallback for observations that do not carry that variable.
+                Object caseId = runtimeService.getVariable(
+                        processInstanceId, EmbeddedEngineGateway.CASE_ID_VARIABLE);
+                if (caseId != null) {
+                    return caseId.toString();
+                }
+                var instance = runtimeService.createProcessInstanceQuery()
+                        .processInstanceId(processInstanceId).singleResult();
+                return instance == null ? null : instance.getBusinessKey();
+            };
+        }
+
+        @Bean
+        EmbeddedEngineEventBridge embeddedEngineEventBridge(
+                CaseProjectionPort projections, ProcessCaseCorrelation correlation,
+                ProcessActivityClassifier classifier) {
+            // Do not guard this with @ConditionalOnBean(CaseProjectionPort.class).
+            // This auto-configuration deliberately runs before CaseManagementAutoConfiguration,
+            // which imports the repository configuration that declares that port. Evaluating
+            // the condition here therefore skips the bridge even though the dependency exists
+            // by bean-instantiation time. Required method parameters provide the correct
+            // fail-fast behaviour without making registration order observable.
+            return new EmbeddedEngineEventBridge(projections, correlation, classifier);
+        }
+
+        @Bean
+        @ConditionalOnBean(RepositoryService.class)
+        ProcessActivityClassifier processActivityClassifier(RepositoryService repositoryService) {
+            return new RepositoryProcessActivityClassifier(repositoryService);
+        }
+
+        @Bean
+        @ConditionalOnBean(RepositoryService.class)
+        OrchestrationDeploymentPort embeddedOrchestrationDeploymentPort(
+                RepositoryService repositoryService) {
+            return new EmbeddedOrchestrationDeploymentPort(repositoryService);
         }
     }
 

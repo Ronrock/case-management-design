@@ -2,6 +2,7 @@ package org.casemgmt.rest.policy;
 
 import org.casemgmt.domain.*;
 import org.casemgmt.error.CaseConflictException;
+import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.rules.CaseSnapshot;
 import org.casemgmt.rules.PlanModelFixtures;
 import org.junit.jupiter.api.Test;
@@ -39,6 +40,17 @@ class ActionPolicyTest {
                 PlanItemState.COMPLETED)), Map.of());
     }
 
+    private CaseSnapshot activeBpmnCaseFullyDone() {
+        CaseDefinition planModel = activeCaseFullyDone().definition();
+        CaseDefinition bpmn = new CaseDefinition(
+                planModel.id(), planModel.key(), planModel.versionNo(), planModel.name(),
+                planModel.tenantId(), planModel.description(), planModel.slaPolicyId(),
+                planModel.roles(), planModel.attachmentCategories(), planModel.forms(),
+                planModel.planItems(), OrchestrationMode.BPMN, planModel.deployedAt(),
+                planModel.deployedBy());
+        return snapshot(bpmn, activeCaseFullyDone().planItems(), Map.of());
+    }
+
     @Test
     void ownerOfAnActiveCaseMaySeeCloseOnlyWhenNothingBlocks() {
         assertThat(policy.listForCase(activeCaseWithOpenRequiredItem(), Set.of("owner")))
@@ -46,6 +58,18 @@ class ActionPolicyTest {
 
         assertThat(policy.listForCase(activeCaseFullyDone(), Set.of("owner")))
                 .extracting(AvailableAction::action).contains("close");
+    }
+
+    @Test
+    void bpmnCaseNeverOffersExplicitCloseBecauseItsRootProcessControlsCompletion() {
+        CaseSnapshot snapshot = activeBpmnCaseFullyDone();
+
+        assertThat(policy.listForCase(snapshot, Set.of("owner")))
+                .extracting(AvailableAction::action)
+                .contains("update", "cancel")
+                .doesNotContain("close");
+        assertThatThrownBy(() -> policy.assertAllowed(snapshot, Set.of("owner"), "close"))
+                .isInstanceOf(CaseConflictException.class);
     }
 
     @Test

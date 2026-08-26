@@ -85,6 +85,13 @@ public class OutboxEngineGateway implements EngineGateway {
                 Map.of("processInstanceId", processInstanceId, "reason", reason == null ? "" : reason));
     }
 
+    @Override
+    public void correlateMessage(MessageCorrelationRequest request) {
+        enqueue(EngineCommand.Type.CORRELATE_MESSAGE, request.caseId(),
+                Map.of("messageName", request.messageName(), "variables",
+                        request.variables() == null ? Map.of() : request.variables()));
+    }
+
     /**
      * Queries are NOT deferred: reading a remote engine synchronously is safe, and the worklist
      * is served from CM_TASK anyway.

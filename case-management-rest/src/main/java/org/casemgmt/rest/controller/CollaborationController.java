@@ -471,9 +471,7 @@ public class CollaborationController {
     }
 
     private static boolean fieldAllowed(PermissionDecision decision, String field) {
-        return decision.allowedFields().isEmpty()
-                || decision.allowedFields().contains("*")
-                || decision.allowedFields().contains(field);
+        return decision.allowsField(field);
     }
 
     private static void putIfAllowed(Map<String, Object> target, PermissionDecision decision,

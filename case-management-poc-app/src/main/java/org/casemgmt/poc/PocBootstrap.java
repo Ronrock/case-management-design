@@ -3,6 +3,9 @@ package org.casemgmt.poc;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.SlaRepository;
 import org.casemgmt.service.CaseDefinitionService;
+import org.casemgmt.service.CaseDefinitionReleaseService;
+import org.casemgmt.service.CaseDefinitionVersionService;
+import org.casemgmt.release.ReleaseKind;
 import org.operaton.bpm.engine.IdentityService;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.identity.Group;
@@ -34,12 +37,14 @@ public class PocBootstrap {
     @Bean
     public ApplicationRunner seed(IdentityService identity, RepositoryService repository,
                                   CaseDefinitionService definitions, CaseDefinitionRepository defRepo,
-                                  SlaRepository sla) {
+                                  CaseDefinitionReleaseService releases,
+                                  CaseDefinitionVersionService versions, SlaRepository sla) {
         return args -> {
             seedUsers(identity);
             seedProcesses(repository);
             seedSla(sla);
             seedDefinition(definitions, defRepo);
+            seedBpmnDefinition(defRepo, releases, versions);
         };
     }
 
@@ -162,5 +167,30 @@ public class PocBootstrap {
         String json = new String(new ClassPathResource("definitions/complaint-v1.json")
                 .getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         definitions.deploy(json, "system", TENANT_ID);
+    }
+
+    /** Scenario-A/BPMN demonstration while the original plan-model complaint remains compatible. */
+    private void seedBpmnDefinition(CaseDefinitionRepository definitions,
+                                    CaseDefinitionReleaseService releases,
+                                    CaseDefinitionVersionService versions) throws Exception {
+        String key = "complaint-bpmn";
+        if (definitions.findLatest(key, TENANT_ID).isPresent()) {
+            return;
+        }
+        byte[] bpmn = resource("processes/complaint-bpmn.bpmn");
+        byte[] contract = resource("definitions/complaint-bpmn-contract.json");
+        byte[] presentation = resource("definitions/complaint-bpmn-presentation.json");
+        var orchestrationRelease = releases.publish(key, TENANT_ID, ReleaseKind.ORCHESTRATION,
+                "application/bpmn+xml", bpmn, "system");
+        var contractRelease = releases.publish(key, TENANT_ID, ReleaseKind.CONTRACT,
+                "application/json", contract, "system");
+        var presentationRelease = releases.publish(key, TENANT_ID, ReleaseKind.PRESENTATION,
+                "application/json", presentation, "system");
+        versions.bind(key, TENANT_ID, orchestrationRelease.id(), contractRelease.id(),
+                presentationRelease.id(), "system");
+    }
+
+    private static byte[] resource(String path) throws Exception {
+        return new ClassPathResource(path).getInputStream().readAllBytes();
     }
 }

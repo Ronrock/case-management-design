@@ -81,9 +81,8 @@
 
   <build>
     <plugins>
-      <!-- Publishes only EngineGatewayContract so case-management-engine-embedded and
-           case-management-engine-remote can subclass the shared contract without receiving
-           every core test class in their dependency graph. -->
+      <!-- Publishes only the shared fixture classes and definition consumed by downstream
+           reactor tests, rather than exposing every core test class and resource. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
@@ -94,6 +93,9 @@
             <configuration>
               <includes>
                 <include>org/casemgmt/engine/EngineGatewayContract.class</include>
+                <include>org/casemgmt/OracleTestBase.class</include>
+                <include>org/casemgmt/rules/PlanModelFixtures.class</include>
+                <include>definitions/test-definition.json</include>
               </includes>
             </configuration>
           </execution>

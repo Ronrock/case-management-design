@@ -16,7 +16,8 @@ public class CaseTaskRepository {
     private static final String COLUMNS = """
             ID_, CASE_ID_, PLAN_ITEM_ID_, CAMUNDA_TASK_ID_, NAME_, DESCRIPTION_, STATE_,
             ASSIGNEE_, DELEGATED_BY_, CAND_GROUPS_JSON_, FORM_KEY_, PRIORITY_, DUE_AT_,
-            OUTCOME_, ENGINE_SYNC_, VERSION_, CREATED_AT_, UPDATED_AT_, COMPLETED_AT_""";
+            OUTCOME_, ENGINE_SYNC_, VERSION_, CREATED_AT_, UPDATED_AT_, COMPLETED_AT_,
+            PROJECTION_STATUS_, LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_""";
 
     private final JdbcClient jdbc;
 
@@ -183,7 +184,8 @@ public class CaseTaskRepository {
 
         return new CaseTask(t.id(), t.caseId(), t.planItemId(), t.engineTaskId(), t.name(), t.description(),
                 t.state(), t.assignee(), t.delegatedBy(), t.candidateGroups(), t.formKey(), t.priority(),
-                t.dueAt(), t.outcome(), t.engineSync(), expectedVersion + 1, t.createdAt(), updatedAt, completedAt);
+                t.dueAt(), t.outcome(), t.engineSync(), expectedVersion + 1, t.createdAt(), updatedAt,
+                completedAt, t.projectionStatus(), t.lastEngineUpdateAt(), t.lastProjectedAt());
     }
 
     /**
@@ -233,6 +235,9 @@ public class CaseTaskRepository {
                 rs.getLong("VERSION_"),
                 rs.getObject("CREATED_AT_", OffsetDateTime.class),
                 rs.getObject("UPDATED_AT_", OffsetDateTime.class),
-                rs.getObject("COMPLETED_AT_", OffsetDateTime.class));
+                rs.getObject("COMPLETED_AT_", OffsetDateTime.class),
+                org.casemgmt.projection.ProjectionStatus.valueOf(rs.getString("PROJECTION_STATUS_")),
+                rs.getObject("LAST_ENGINE_UPDATE_AT_", OffsetDateTime.class),
+                rs.getObject("LAST_PROJECTED_AT_", OffsetDateTime.class));
     }
 }

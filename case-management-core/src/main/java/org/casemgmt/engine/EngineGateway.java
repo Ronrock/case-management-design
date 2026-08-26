@@ -22,5 +22,9 @@ public interface EngineGateway {
 
     void cancelProcess(String processInstanceId, String reason);
 
+    default void correlateMessage(MessageCorrelationRequest request) {
+        throw new EngineException("Configured engine does not support message correlation");
+    }
+
     List<EngineTaskRef> findTasks(EngineTaskQuery query);
 }

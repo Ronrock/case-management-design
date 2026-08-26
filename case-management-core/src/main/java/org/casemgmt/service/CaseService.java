@@ -6,6 +6,10 @@ import org.casemgmt.error.NotFoundException;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
+import org.casemgmt.orchestration.CaseOrchestration;
+import org.casemgmt.orchestration.CaseOrchestrationRegistry;
+import org.casemgmt.orchestration.OrchestrationMode;
+import org.casemgmt.orchestration.PlanModelOrchestration;
 import org.casemgmt.repo.*;
 import org.casemgmt.rules.*;
 import org.slf4j.Logger;
@@ -59,8 +63,7 @@ public class CaseService {
     private final PlanItemRepository planItems;
     private final MilestoneRepository milestones;
     private final ParticipantRepository participants;
-    private final PlanModelEvaluator evaluator;
-    private final PlanModelInstantiator instantiator;
+    private final CaseOrchestrationRegistry orchestrations;
     private final StageCompletion stageCompletion;
     private final TransitionApplier applier;
     private final EventPublisher publisher;
@@ -76,8 +79,25 @@ public class CaseService {
         this.planItems = planItems;
         this.milestones = milestones;
         this.participants = participants;
-        this.evaluator = evaluator;
-        this.instantiator = instantiator;
+        this.orchestrations = new CaseOrchestrationRegistry(List.of(
+                new PlanModelOrchestration(evaluator, instantiator)));
+        this.stageCompletion = stageCompletion;
+        this.applier = applier;
+        this.publisher = publisher;
+        this.engineId = engineId;
+    }
+
+    public CaseService(CaseRepository cases, CaseDefinitionRepository definitions,
+                       PlanItemRepository planItems, MilestoneRepository milestones,
+                       ParticipantRepository participants, CaseOrchestrationRegistry orchestrations,
+                       StageCompletion stageCompletion, TransitionApplier applier,
+                       EventPublisher publisher, String engineId) {
+        this.cases = cases;
+        this.definitions = definitions;
+        this.planItems = planItems;
+        this.milestones = milestones;
+        this.participants = participants;
+        this.orchestrations = orchestrations;
         this.stageCompletion = stageCompletion;
         this.applier = applier;
         this.publisher = publisher;
@@ -98,7 +118,9 @@ public class CaseService {
         cases.insert(created);
 
         participants.insert(CaseIds.newId(), created.id(), actor.userId(), null, "owner");
-        instantiator.initialItems(created.id(), def).forEach(planItems::insert);
+        CaseOrchestration orchestration = orchestration(def);
+        orchestration.initialItems(created.id(), def).forEach(planItems::insert);
+        orchestration.onCaseCreated(created, def);
 
         publisher.publish(event(created, EventTypes.CASE_CREATED, Map.of(
                 "caseDefinitionKey", def.key(), "state", created.state().name(),
@@ -106,9 +128,12 @@ public class CaseService {
         publisher.audit(created.id(), tenantId, actor.userId(), "case.create", "Case",
                 created.id(), null, Map.of("state", created.state().name(), "title", title));
 
-        // reevaluate() only ever touches CM_PLAN_ITEM/CM_TASK/CM_MILESTONE, never CM_CASE, so
-        // `created` already IS the case row's final state for this call — no re-read needed.
         reevaluate(created.id(), actor);
+        // Starting BPMN binds the root process and projection state onto CM_CASE. Return that
+        // orchestrated row so the create response does not expose the pre-start snapshot.
+        if (orchestration.mode() == OrchestrationMode.BPMN) {
+            return cases.require(created.id());
+        }
         return created;
     }
 
@@ -242,6 +267,10 @@ public class CaseService {
         requireTransitionAllowed(current, CaseState.CLOSED, "close");
 
         CaseSnapshot snapshot = snapshot(caseId);
+        if (!orchestration(snapshot.definition()).allowsExplicitClose()) {
+            throw new CaseConflictException("explicit-close-not-supported",
+                    "BPMN cases close when their root process completes", List.of("cancel"));
+        }
         List<PlanItem> blockers = stageCompletion.caseBlockers(snapshot);
         if (!blockers.isEmpty()) {
             throw new CaseConflictException("required-items-open",
@@ -282,6 +311,8 @@ public class CaseService {
     public CaseInstance cancel(String caseId, long expectedVersion, String reason, Actor actor) {
         CaseInstance current = cases.require(caseId);
         requireTransitionAllowed(current, CaseState.CANCELLED, "cancel");
+
+        orchestration(definitions.require(current.caseDefId())).onCaseCancelled(current, reason);
 
         // Same gap as close()'s sweep: terminates the plan item, not any CM_TASK row or live
         // engine task an ACTIVE HUMAN_TASK already has. See sweepOpenPlanItems' Javadoc.
@@ -333,13 +364,14 @@ public class CaseService {
      */
     void reevaluate(String caseId, Actor actor) {
         CaseSnapshot snapshot = snapshot(caseId);
-        List<Transition> transitions = evaluator.evaluate(snapshot);
+        CaseOrchestration orchestration = orchestration(snapshot.definition());
+        List<Transition> transitions = orchestration.evaluate(snapshot);
         if (!transitions.isEmpty()) {
             applier.apply(snapshot, transitions, actor);
         }
 
         CaseSnapshot postTransition = snapshot(caseId);
-        for (PlanItemDefinition repeatable : evaluator.repeatable(postTransition)) {
+        for (PlanItemDefinition repeatable : orchestration.repeatable(postTransition)) {
             PlanItem latest = postTransition.latest(repeatable.defKey());
             if (latest.repetitionNo() >= MAX_REPETITIONS_PER_ITEM) {
                 // Loud enough to notice a genuine runaway (a stuck repetition count is otherwise
@@ -353,8 +385,12 @@ public class CaseService {
                         caseId, repeatable.defKey(), MAX_REPETITIONS_PER_ITEM);
                 continue;
             }
-            planItems.insert(instantiator.repeat(latest, repeatable));
+            planItems.insert(orchestration.repeat(latest, repeatable));
         }
+    }
+
+    private CaseOrchestration orchestration(CaseDefinition definition) {
+        return orchestrations.require(definition.orchestrationMode());
     }
 
     /**

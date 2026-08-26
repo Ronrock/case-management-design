@@ -1,0 +1,43 @@
+[
+  {
+    "$schema": "https://unpkg.com/@camunda/element-templates-json-schema/resources/schema.json",
+    "name": "Case root process",
+    "id": "org.casemgmt.root-process",
+    "version": 1,
+    "appliesTo": ["bpmn:Process"],
+    "properties": [
+      { "label": "Case definition key", "type": "String", "binding": { "type": "property", "name": "id" }, "constraints": { "notEmpty": true } }
+    ]
+  },
+  {
+    "$schema": "https://unpkg.com/@camunda/element-templates-json-schema/resources/schema.json",
+    "name": "Case user task",
+    "id": "org.casemgmt.user-task",
+    "version": 1,
+    "appliesTo": ["bpmn:UserTask"],
+    "properties": [
+      { "label": "Contract form", "type": "String", "binding": { "type": "property", "name": "camunda:formKey" } },
+      { "label": "Candidate groups", "type": "String", "binding": { "type": "property", "name": "camunda:candidateGroups" } }
+    ]
+  },
+  {
+    "$schema": "https://unpkg.com/@camunda/element-templates-json-schema/resources/schema.json",
+    "name": "Case stage",
+    "id": "org.casemgmt.stage",
+    "version": 1,
+    "appliesTo": ["bpmn:SubProcess"],
+    "properties": [
+      { "type": "Hidden", "value": "true", "binding": { "type": "property", "name": "casemgmt:stage" } }
+    ]
+  },
+  {
+    "$schema": "https://unpkg.com/@camunda/element-templates-json-schema/resources/schema.json",
+    "name": "Case milestone",
+    "id": "org.casemgmt.milestone",
+    "version": 1,
+    "appliesTo": ["bpmn:IntermediateThrowEvent", "bpmn:EndEvent"],
+    "properties": [
+      { "label": "Milestone id", "type": "String", "binding": { "type": "property", "name": "casemgmt:milestoneId" }, "constraints": { "notEmpty": true } }
+    ]
+  }
+]

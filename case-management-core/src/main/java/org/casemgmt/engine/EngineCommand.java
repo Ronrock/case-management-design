@@ -15,7 +15,15 @@ import java.util.Map;
 public record EngineCommand(String id, String caseId, Type type, Map<String, Object> payload,
                             String status, int attempts, OffsetDateTime nextAttemptAt, String lastError) {
 
-    public enum Type { CREATE_TASK, CLAIM_TASK, COMPLETE_TASK, START_PROCESS, CANCEL_PROCESS }
+    public enum Type {
+        CREATE_TASK,
+        CLAIM_TASK,
+        COMPLETE_TASK,
+        START_PROCESS,
+        CANCEL_PROCESS,
+        DEPLOY_ORCHESTRATION,
+        CORRELATE_MESSAGE
+    }
 
     /** Shared with the webhook dispatcher (Task 20): 1m, 5m, 25m, 2h, 10h, then dead. */
     public static final List<Duration> BACKOFF = List.of(

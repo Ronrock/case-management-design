@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://casemgmt.org/schemas/presentation-manifest-v1.schema.json",
+  "title": "Presentation manifest v1",
+  "type": "object",
+  "required": ["version", "sections"],
+  "properties": {
+    "version": { "type": "string", "pattern": "^1(\\.[0-9]+)?$" },
+    "localeNamespace": { "type": "string" },
+    "sections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "primitive"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "primitive": {
+            "enum": ["summary-fields", "field-grid", "plan-tree", "task-list",
+              "document-list", "milestone-list", "sla-list", "search", "form",
+              "actions", "extension-slot"]
+          },
+          "title": { "type": "string" },
+          "fields": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "actions": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+          "formId": { "type": "string" },
+          "searchProfileId": { "type": "string" },
+          "component": { "type": "string", "pattern": "^[a-z][a-z0-9-]*@[1-9][0-9]*$" },
+          "props": { "type": "object" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

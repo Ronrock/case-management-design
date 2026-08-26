@@ -15,4 +15,13 @@ public record PermissionDecision(String resourceId, boolean allowed, List<String
     public static PermissionDecision deny(String resourceId) {
         return new PermissionDecision(resourceId, false, List.of());
     }
+
+    /**
+     * Returns whether an allowed resource decision also permits the named response field.
+     * An absent or empty field decision is deliberately fail-closed: callers must receive
+     * either an explicit field name or the wildcard.
+     */
+    public boolean allowsField(String field) {
+        return allowed && (allowedFields.contains("*") || allowedFields.contains(field));
+    }
 }

@@ -1,6 +1,10 @@
 package org.casemgmt;
 
+import org.casemgmt.projection.ProjectionStatus;
+import org.casemgmt.projection.RemotePollingCheckpointRepository;
 import org.junit.jupiter.api.Test;
+
+import java.time.OffsetDateTime;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -14,9 +18,10 @@ class SchemaMigrationTest extends OracleTestBase {
     void createsAllDesignAndPocInfrastructureTables() {
         Integer tables = jdbc().sql("SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME LIKE 'CM!_%' ESCAPE '!'")
                 .query(Integer.class).single();
-        // 25 from db-design.sql + CM_ENGINE_COMMAND + CM_EVENT_APPEND_LOCK from PoC changesets.
+        // 25 from db-design.sql + CM_ENGINE_COMMAND, CM_EVENT_APPEND_LOCK,
+        // CM_CASE_DEF_RELEASE, CM_CASE_DEF_BINDING, and CM_ENGINE_POLL_CHECKPOINT from changesets.
         // DATABASECHANGELOG* do not match the CM_ prefix.
-        assertThat(tables).isEqualTo(27);
+        assertThat(tables).isEqualTo(30);
     }
 
     @Test
@@ -51,5 +56,20 @@ class SchemaMigrationTest extends OracleTestBase {
             .single();
 
         assertThat(defaultValue.trim()).isEqualTo("5");
+    }
+
+    @Test
+    void storesAnInitialRemotePollingFailureWithNoSuccessTimestamp() {
+        RemotePollingCheckpointRepository checkpoints =
+                new RemotePollingCheckpointRepository(jdbc());
+
+        checkpoints.failed("operaton-history", "engine unavailable");
+
+        RemotePollingCheckpointRepository.Checkpoint checkpoint =
+                checkpoints.find("operaton-history").orElseThrow();
+        assertThat(checkpoint.status()).isEqualTo(ProjectionStatus.STALE);
+        assertThat(checkpoint.lastError()).isEqualTo("engine unavailable");
+        assertThat(checkpoint.lastSuccessAt()).isNull();
+        assertThat(checkpoint.watermark()).isBeforeOrEqualTo(OffsetDateTime.now());
     }
 }

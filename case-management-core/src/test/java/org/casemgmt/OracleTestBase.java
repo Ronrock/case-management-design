@@ -225,6 +225,9 @@ public abstract class OracleTestBase {
     // extending class.
     private static void deleteAllCaseManagementData() {
         List<String> tablesChildToParent = List.of(
+                "CM_CASE_DEF_BINDING",
+                "CM_CASE_DEF_RELEASE",
+                "CM_ENGINE_POLL_CHECKPOINT",
                 "CM_TASK",
                 "CM_MILESTONE",
                 "CM_SLA_RECORD",

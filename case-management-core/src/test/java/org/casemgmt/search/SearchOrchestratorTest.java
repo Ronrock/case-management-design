@@ -3,6 +3,7 @@ package org.casemgmt.search;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.time.OffsetDateTime;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -152,6 +153,21 @@ class SearchOrchestratorTest {
                 List.of(SearchScope.CASES), Map.of(), List.of(), Integer.MAX_VALUE, 200, false))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("10,000");
+    }
+
+    @Test
+    void resultWindowErrorUsesStableFormattingRegardlessOfServerLocale() {
+        Locale previous = Locale.getDefault();
+        try {
+            Locale.setDefault(Locale.forLanguageTag("en-NL"));
+
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> new SearchQuery("t1", "BK",
+                    List.of(SearchScope.CASES), Map.of(), List.of(), 50, 200, false))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("Search result window exceeds 10,000 items");
+        } finally {
+            Locale.setDefault(previous);
+        }
     }
 
     private static SearchProvider provider(String id, int cost, List<SearchResultItem> items) {

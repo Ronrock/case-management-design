@@ -33,6 +33,18 @@ public class LinkedProcessRepository {
             .param("engineSync", engineSync.name()).update();
     }
 
+    public void insertRoot(String id, String caseId, String procInstId, String procDefKey,
+                           CaseTask.EngineSync engineSync) {
+        insert(id, caseId, null, procInstId, procDefKey, engineSync);
+        jdbc.sql("""
+                UPDATE CM_CASE SET ROOT_PROC_INST_ID_ = :processInstanceId,
+                    PROJECTION_STATUS_ = :status, LAST_PROJECTED_AT_ = SYSTIMESTAMP
+                WHERE ID_ = :caseId""")
+                .param("processInstanceId", procInstId)
+                .param("status", engineSync == CaseTask.EngineSync.PENDING ? "PENDING" : "CURRENT")
+                .param("caseId", caseId).update();
+    }
+
     public void markState(String procInstId, String state) {
         jdbc.sql("""
                 UPDATE CM_LINKED_PROCESS SET STATE_ = :state,

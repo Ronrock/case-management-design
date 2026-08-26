@@ -17,7 +17,8 @@ public class CaseRepository {
             ID_, ENGINE_ID_, TENANT_ID_, CASE_DEF_ID_, CASE_DEF_KEY_, CASE_DEF_VER_,
             BUSINESS_KEY_, TITLE_, STATE_, PRIORITY_, ASSIGNEE_, QUEUE_ID_, INITIATOR_,
             SLA_STATUS_, OUTCOME_, CANCEL_REASON_, VARIABLES_JSON_, VERSION_,
-            CREATED_AT_, UPDATED_AT_, CLOSED_AT_""";
+            CREATED_AT_, UPDATED_AT_, CLOSED_AT_, ROOT_PROC_INST_ID_, PROJECTION_STATUS_,
+            LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_""";
 
     private final JdbcClient jdbc;
 
@@ -141,7 +142,9 @@ public class CaseRepository {
         return new CaseInstance(c.id(), c.engineId(), c.tenantId(), c.caseDefId(), c.caseDefKey(),
                 c.caseDefVersion(), c.businessKey(), c.title(), c.state(), c.priority(),
                 c.assignee(), c.queueId(), c.initiator(), slaStatus, c.outcome(), c.cancelReason(),
-                c.variables(), expectedVersion + 1, c.createdAt(), updatedAt, c.closedAt());
+                c.variables(), expectedVersion + 1, c.createdAt(), updatedAt, c.closedAt(),
+                c.rootProcessInstanceId(), c.projectionStatus(), c.lastEngineUpdateAt(),
+                c.lastProjectedAt());
     }
 
     /**
@@ -392,6 +395,10 @@ public class CaseRepository {
                 rs.getLong("VERSION_"),
                 rs.getObject("CREATED_AT_", OffsetDateTime.class),
                 rs.getObject("UPDATED_AT_", OffsetDateTime.class),
-                rs.getObject("CLOSED_AT_", OffsetDateTime.class));
+                rs.getObject("CLOSED_AT_", OffsetDateTime.class),
+                rs.getString("ROOT_PROC_INST_ID_"),
+                org.casemgmt.projection.ProjectionStatus.valueOf(rs.getString("PROJECTION_STATUS_")),
+                rs.getObject("LAST_ENGINE_UPDATE_AT_", OffsetDateTime.class),
+                rs.getObject("LAST_PROJECTED_AT_", OffsetDateTime.class));
     }
 }

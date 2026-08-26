@@ -254,6 +254,40 @@ class CaseApiIT extends PocAppEmbeddedTestBase {
         assertThat((List) finalCase.getBody().get("availableActions")).isEmpty();
     }
 
+    @Test
+    void bpmnComplaintClosesAutomaticallyWhenItsRootProcessEnds() {
+        ResponseEntity<Map> created = client("alice").post().uri("/case-api/v2/cases")
+                .header("Idempotency-Key", "bpmn-poc-it-" + UUID.randomUUID())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("caseDefinitionKey", "complaint-bpmn", "tenantId", "t1",
+                        "title", "BPMN complaint", "priority", "HIGH"))
+                .retrieve().toEntity(Map.class);
+        assertThat(created.getStatusCode().value()).isEqualTo(201);
+        String caseId = created.getBody().get("id").toString();
+        assertThat(created.getBody().get("rootProcessInstanceId")).isNotNull();
+        assertThat((List<Map<String, Object>>) created.getBody().get("availableActions"))
+                .extracting(action -> action.get("action")).doesNotContain("close");
+
+        Map<String, Object> register = findTask(caseId, "Register complaint");
+        assertThat(register.get("formKey")).isEqualTo("registerForm");
+        assertThat((List<String>) register.get("candidateGroups")).contains("intake");
+        claimAndComplete(register.get("id").toString(),
+                Map.of("channel", "web", "summary", "BPMN journey"));
+
+        assertThat(findMilestone(caseId, "Acknowledged").get("achieved")).isEqualTo(true);
+        Map<String, Object> assess = findTask(caseId, "Assess complaint");
+        claimAndComplete(assess.get("id").toString(), Map.of("outcome", "upheld"));
+        assertThat(findMilestone(caseId, "Decided").get("achieved")).isEqualTo(true);
+
+        Map<String, Object> close = findTask(caseId, "Close complaint");
+        claimAndComplete(close.get("id").toString(), Map.of("outcome", "resolved"));
+
+        Map<String, Object> finished = client("alice").get()
+                .uri("/case-api/v2/cases/{id}", caseId).retrieve().toEntity(Map.class).getBody();
+        assertThat(finished.get("state")).isEqualTo("CLOSED");
+        assertThat(finished.get("projectionStatus")).isEqualTo("CURRENT");
+    }
+
     // ---- helpers (this file, and only this file, may know complaint's own shape) ----
 
     private Map<String, Object> findTask(String caseId, String name) {

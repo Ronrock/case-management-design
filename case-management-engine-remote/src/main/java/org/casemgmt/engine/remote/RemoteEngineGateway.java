@@ -1,7 +1,10 @@
 package org.casemgmt.engine.remote;
 
 import org.casemgmt.engine.*;
+import org.casemgmt.orchestration.OrchestrationDeploymentClient;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.MediaType;
+import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
@@ -18,7 +21,7 @@ import java.util.*;
  * Calls here are NOT in the case transaction. Callers must therefore reach this
  * class through the command outbox (Task 13), never directly from a request thread.
  */
-public class RemoteEngineGateway implements EngineGateway {
+public class RemoteEngineGateway implements EngineGateway, OrchestrationDeploymentClient {
 
     public static final String CASE_ID_VARIABLE = "caseId";
     private static final String PLAN_ITEM_VARIABLE = "planItemId";
@@ -46,13 +49,62 @@ public class RemoteEngineGateway implements EngineGateway {
     }
 
     @Override
+    public String deploy(String releaseId, String definitionKey, String tenantId, byte[] content,
+                         String mediaType) {
+        String fileName = definitionKey + ("application/zip".equals(mediaType) ? ".zip" : ".bpmn");
+        var body = new LinkedMultiValueMap<String, Object>();
+        body.add("deployment-name", "case-release:" + releaseId);
+        body.add("deployment-source", "case-management");
+        body.add("enable-duplicate-filtering", "true");
+        body.add("deploy-changed-only", "true");
+        if (tenantId != null) {
+            body.add("tenant-id", tenantId);
+        }
+        body.add(fileName, new ByteArrayResource(content) {
+            @Override
+            public String getFilename() {
+                return fileName;
+            }
+        });
+        try {
+            Map<String, Object> response = client.post().uri("/deployment/create")
+                    .contentType(MediaType.MULTIPART_FORM_DATA)
+                    .body(body)
+                    .retrieve()
+                    .body(Map.class);
+            Object id = response == null ? null : response.get("id");
+            if (id == null || id.toString().isBlank()) {
+                throw new EngineException("deployOrchestration returned no deployment id");
+            }
+            return id.toString();
+        } catch (RestClientResponseException e) {
+            throw new EngineException("deployOrchestration (POST /deployment/create) failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException("deployOrchestration (POST /deployment/create) failed: "
+                    + e.getMessage(), e);
+        }
+    }
+
+    @Override
     public EngineTaskRef createHumanTask(HumanTaskRequest request) {
         // POST /task/create returns 204 No Content — no body, so the created task's id
         // cannot be read back from the response. It DOES accept a client-supplied "id",
         // however, so a client-generated id is used and then confirmed by reading the task
         // straight back (both to recover engine-assigned fields like "created", and to fail
         // fast/loud if the id was silently ignored rather than honoured).
-        String taskId = UUID.randomUUID().toString();
+        // Outbox retries carry the command id as requestId, so a crash after the remote POST
+        // cannot create a second task on redelivery. Direct synchronous callers still receive
+        // a fresh id. Operaton's client-supplied task id makes duplicate delivery fail closed
+        // against the same engine resource instead of creating another one.
+        String taskId = request.requestId() == null
+                ? UUID.randomUUID().toString() : "cm-command-" + request.requestId();
+        if (request.requestId() != null) {
+            Map<String, Object> existing = getIfPresent("/task/" + taskId);
+            if (existing != null) {
+                return toRef(existing, request.caseId());
+            }
+        }
         Map<String, Object> createBody = new LinkedHashMap<>();
         createBody.put("id", taskId);
         createBody.put("name", request.name());
@@ -120,6 +172,16 @@ public class RemoteEngineGateway implements EngineGateway {
             // transient network blip must surface as one, not escape as a raw Spring exception.
             throw new EngineException("cancelProcess (DELETE " + path + ") failed: " + e.getMessage(), e);
         }
+    }
+
+    @Override
+    public void correlateMessage(MessageCorrelationRequest request) {
+        post("correlateMessage", "/message", Map.of(
+                "messageName", request.messageName(),
+                "businessKey", request.caseId(),
+                "processVariables", typed(request.variables() == null
+                        ? Map.of() : request.variables()),
+                "resultEnabled", false));
     }
 
     @Override
@@ -231,6 +293,21 @@ public class RemoteEngineGateway implements EngineGateway {
                     + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
         } catch (RestClientException e) {
             throw new EngineException(operation + " (GET " + path + ") failed: " + e.getMessage(), e);
+        }
+    }
+
+    private Map<String, Object> getIfPresent(String path) {
+        try {
+            return client.get().uri(path).retrieve().body(Map.class);
+        } catch (RestClientResponseException e) {
+            if (e.getStatusCode().value() == 404) {
+                return null;
+            }
+            throw new EngineException("idempotency lookup (GET " + path + ") failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException("idempotency lookup (GET " + path + ") failed: "
+                    + e.getMessage(), e);
         }
     }
 

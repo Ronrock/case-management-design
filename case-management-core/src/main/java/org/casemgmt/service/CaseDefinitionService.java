@@ -5,12 +5,14 @@ import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.error.InvalidCaseDefinitionException;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.JsonCodec;
+import org.casemgmt.orchestration.OrchestrationMode;
 import org.springframework.dao.DuplicateKeyException;
 
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -48,7 +50,37 @@ public class CaseDefinitionService {
      */
     @SuppressWarnings("unchecked")
     public CaseDefinition deploy(String json, String deployedBy, String tenantId) {
-        Map<String, Object> doc = JsonCodec.toMap(json);
+        return deploy(JsonCodec.toMap(json), deployedBy, tenantId, OrchestrationMode.PLAN_MODEL);
+    }
+
+    public CaseDefinition deployBpmn(String key, String contractJson, String deployedBy,
+                                     String tenantId) {
+        Map<String, Object> contract = new LinkedHashMap<>(JsonCodec.toMap(contractJson));
+        Object declaredKey = contract.get("key");
+        if (declaredKey != null && !key.equals(declaredKey.toString())) {
+            throw invalid(key, "Contract release key '" + declaredKey
+                    + "' does not match definition key '" + key + "'");
+        }
+        contract.put("key", key);
+        contract.put("planItems", List.of());
+        // Contract v1 keeps uiSchema beside each JSON Schema. The legacy runtime definition
+        // stores only schemas because task completion validates against this map; presentation
+        // metadata remains available from the independently pinned contract release.
+        if (contract.get("forms") instanceof Map<?, ?> forms) {
+            Map<String, Object> schemas = new LinkedHashMap<>();
+            forms.forEach((formId, value) -> {
+                Object schema = value instanceof Map<?, ?> form && form.get("schema") != null
+                        ? form.get("schema") : value;
+                schemas.put(String.valueOf(formId), schema);
+            });
+            contract.put("forms", schemas);
+        }
+        return deploy(contract, deployedBy, tenantId, OrchestrationMode.BPMN);
+    }
+
+    @SuppressWarnings("unchecked")
+    private CaseDefinition deploy(Map<String, Object> doc, String deployedBy, String tenantId,
+                                  OrchestrationMode orchestrationMode) {
         String key = required(doc, "key");
         List<Map<String, Object>> raw = (List<Map<String, Object>>) doc.getOrDefault("planItems", List.of());
         List<String> roles = strings(doc, "roles");
@@ -77,7 +109,7 @@ public class CaseDefinitionService {
                     (String) doc.get("description"), (String) doc.get("slaPolicyId"),
                     roles, strings(doc, "attachmentCategories"),
                     (Map<String, Object>) doc.getOrDefault("forms", Map.of()),
-                    items, OffsetDateTime.now(), deployedBy);
+                    items, orchestrationMode, OffsetDateTime.now(), deployedBy);
 
             try {
                 repo.insert(def);

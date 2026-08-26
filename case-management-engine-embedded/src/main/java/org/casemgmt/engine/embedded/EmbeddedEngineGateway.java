@@ -115,6 +115,18 @@ public class EmbeddedEngineGateway implements EngineGateway {
     }
 
     @Override
+    public void correlateMessage(MessageCorrelationRequest request) {
+        try {
+            runtimeService.createMessageCorrelation(request.messageName())
+                    .processInstanceBusinessKey(request.caseId())
+                    .setVariables(request.variables() == null ? Map.of() : request.variables())
+                    .correlate();
+        } catch (ProcessEngineException e) {
+            throw new EngineException("Could not correlate message " + request.messageName(), e);
+        }
+    }
+
+    @Override
     public List<EngineTaskRef> findTasks(EngineTaskQuery query) {
         try {
             TaskQuery q = taskService.createTaskQuery();

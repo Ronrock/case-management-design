@@ -174,4 +174,122 @@
                      columnDataType="NUMBER(3)"
                      defaultValueNumeric="5"/>
   </changeSet>
+
+  <!-- Independently published, immutable orchestration/contract/presentation artifacts. -->
+  <changeSet id="cm-case-definition-releases" author="casemgmt">
+    <createTable tableName="CM_CASE_DEF_RELEASE">
+      <column name="ID_" type="VARCHAR2(96)"><constraints primaryKey="true" nullable="false"/></column>
+      <column name="CASE_DEF_KEY_" type="VARCHAR2(255)"><constraints nullable="false"/></column>
+      <column name="TENANT_ID_" type="VARCHAR2(64)"/>
+      <column name="KIND_" type="VARCHAR2(30)"><constraints nullable="false"/></column>
+      <column name="MEDIA_TYPE_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
+      <column name="CONTENT_" type="BLOB"><constraints nullable="false"/></column>
+      <column name="SHA256_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="STATUS_" type="VARCHAR2(20)"><constraints nullable="false"/></column>
+      <column name="ENGINE_DEPLOYMENT_ID_" type="VARCHAR2(128)"/>
+      <column name="FAILURE_DETAIL_" type="VARCHAR2(2000)"/>
+      <column name="PUBLISHED_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="PUBLISHED_BY_" type="VARCHAR2(255)"><constraints nullable="false"/></column>
+    </createTable>
+    <sql>
+      ALTER TABLE CM_CASE_DEF_RELEASE ADD CONSTRAINT CK_CM_CDR_KIND
+        CHECK (KIND_ IN ('ORCHESTRATION','CONTRACT','PRESENTATION'))
+    </sql>
+    <sql>
+      ALTER TABLE CM_CASE_DEF_RELEASE ADD CONSTRAINT CK_CM_CDR_STATUS
+        CHECK (STATUS_ IN ('DEPLOYING','ACTIVE','FAILED'))
+    </sql>
+    <createIndex tableName="CM_CASE_DEF_RELEASE" indexName="IX_CM_CDR_LOOKUP">
+      <column name="TENANT_ID_"/><column name="CASE_DEF_KEY_"/><column name="KIND_"/>
+      <column name="PUBLISHED_AT_"/>
+    </createIndex>
+    <addUniqueConstraint tableName="CM_CASE_DEF_RELEASE"
+                         columnNames="TENANT_ID_,CASE_DEF_KEY_,KIND_,SHA256_"
+                         constraintName="UQ_CM_CDR_DIGEST"/>
+  </changeSet>
+
+  <changeSet id="cm-case-definition-version-bindings" author="casemgmt">
+    <addColumn tableName="CM_CASE_DEF">
+      <column name="ORCHESTRATION_MODE_" type="VARCHAR2(20)" defaultValue="PLAN_MODEL">
+        <constraints nullable="false"/>
+      </column>
+    </addColumn>
+    <sql>
+      ALTER TABLE CM_CASE_DEF ADD CONSTRAINT CK_CM_CASE_DEF_MODE
+        CHECK (ORCHESTRATION_MODE_ IN ('PLAN_MODEL','BPMN'))
+    </sql>
+    <createTable tableName="CM_CASE_DEF_BINDING">
+      <column name="CASE_DEF_ID_" type="VARCHAR2(64)"><constraints primaryKey="true" nullable="false"/></column>
+      <column name="ORCH_RELEASE_ID_" type="VARCHAR2(96)"><constraints nullable="false"/></column>
+      <column name="ORCH_SHA256_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="CONTRACT_RELEASE_ID_" type="VARCHAR2(96)"><constraints nullable="false"/></column>
+      <column name="CONTRACT_SHA256_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="PRESENT_RELEASE_ID_" type="VARCHAR2(96)"><constraints nullable="false"/></column>
+      <column name="PRESENT_SHA256_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="DEPLOY_STATUS_" type="VARCHAR2(20)"><constraints nullable="false"/></column>
+      <column name="BOUND_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="BOUND_BY_" type="VARCHAR2(255)"><constraints nullable="false"/></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="CM_CASE_DEF_BINDING" baseColumnNames="CASE_DEF_ID_"
+                             referencedTableName="CM_CASE_DEF" referencedColumnNames="ID_"
+                             constraintName="FK_CM_CDB_DEF" onDelete="CASCADE"/>
+    <addForeignKeyConstraint baseTableName="CM_CASE_DEF_BINDING" baseColumnNames="ORCH_RELEASE_ID_"
+                             referencedTableName="CM_CASE_DEF_RELEASE" referencedColumnNames="ID_"
+                             constraintName="FK_CM_CDB_ORCH"/>
+    <addForeignKeyConstraint baseTableName="CM_CASE_DEF_BINDING" baseColumnNames="CONTRACT_RELEASE_ID_"
+                             referencedTableName="CM_CASE_DEF_RELEASE" referencedColumnNames="ID_"
+                             constraintName="FK_CM_CDB_CONTRACT"/>
+    <addForeignKeyConstraint baseTableName="CM_CASE_DEF_BINDING" baseColumnNames="PRESENT_RELEASE_ID_"
+                             referencedTableName="CM_CASE_DEF_RELEASE" referencedColumnNames="ID_"
+                             constraintName="FK_CM_CDB_PRESENT"/>
+    <sql>
+      ALTER TABLE CM_CASE_DEF_BINDING ADD CONSTRAINT CK_CM_CDB_STATUS
+        CHECK (DEPLOY_STATUS_ IN ('DEPLOYING','ACTIVE','FAILED'))
+    </sql>
+  </changeSet>
+
+  <changeSet id="cm-bpmn-projection-metadata" author="casemgmt">
+    <addColumn tableName="CM_CASE">
+      <column name="ROOT_PROC_INST_ID_" type="VARCHAR2(128)"/>
+      <column name="PROJECTION_STATUS_" type="VARCHAR2(20)" defaultValue="CURRENT"><constraints nullable="false"/></column>
+      <column name="LAST_ENGINE_UPDATE_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="LAST_PROJECTED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <addColumn tableName="CM_PLAN_ITEM">
+      <column name="ENGINE_ACTIVITY_ID_" type="VARCHAR2(128)"/>
+      <column name="PROJECTION_STATUS_" type="VARCHAR2(20)" defaultValue="CURRENT"><constraints nullable="false"/></column>
+      <column name="LAST_ENGINE_UPDATE_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="LAST_PROJECTED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <addColumn tableName="CM_TASK">
+      <column name="PROJECTION_STATUS_" type="VARCHAR2(20)" defaultValue="CURRENT"><constraints nullable="false"/></column>
+      <column name="LAST_ENGINE_UPDATE_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="LAST_PROJECTED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <addColumn tableName="CM_LINKED_PROCESS">
+      <column name="PROJECTION_STATUS_" type="VARCHAR2(20)" defaultValue="CURRENT"><constraints nullable="false"/></column>
+      <column name="LAST_ENGINE_UPDATE_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="LAST_PROJECTED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <addUniqueConstraint tableName="CM_PLAN_ITEM" columnNames="ENGINE_ACTIVITY_ID_"
+                         constraintName="UQ_CM_PI_ENGINE_ACTIVITY"/>
+    <addUniqueConstraint tableName="CM_TASK" columnNames="CAMUNDA_TASK_ID_"
+                         constraintName="UQ_CM_TASK_ENGINE_ID"/>
+  </changeSet>
+  <changeSet id="cm-remote-polling-checkpoint" author="casemgmt">
+    <createTable tableName="CM_ENGINE_POLL_CHECKPOINT">
+      <column name="NAME_" type="VARCHAR2(100)"><constraints primaryKey="true" nullable="false"/></column>
+      <column name="WATERMARK_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="STATUS_" type="VARCHAR2(20)"><constraints nullable="false"/></column>
+      <column name="LAST_ERROR_" type="VARCHAR2(2000)"/>
+      <column name="LAST_SUCCESS_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="UPDATED_AT_" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="SYSTIMESTAMP">
+        <constraints nullable="false"/>
+      </column>
+    </createTable>
+  </changeSet>
+  <changeSet id="cm-projected-milestone-idempotency" author="casemgmt">
+    <addUniqueConstraint tableName="CM_MILESTONE" columnNames="PLAN_ITEM_ID_"
+                         constraintName="UQ_CM_MS_PLAN_ITEM"/>
+  </changeSet>
 </databaseChangeLog>

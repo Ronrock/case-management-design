@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "localeNamespace": "complaint",
+  "sections": [
+    {"id": "summary", "primitive": "summary-fields", "title": "Complaint",
+     "fields": ["system:title", "system:state", "channel", "summary", "amount"]},
+    {"id": "plan", "primitive": "plan-tree", "title": "Progress"},
+    {"id": "tasks", "primitive": "task-list", "title": "Work"},
+    {"id": "milestones", "primitive": "milestone-list", "title": "Milestones"},
+    {"id": "search", "primitive": "search", "searchProfileId": "complaints"},
+    {"id": "actions", "primitive": "actions", "actions": ["cancel", "investigate-aspect"]}
+  ]
+}

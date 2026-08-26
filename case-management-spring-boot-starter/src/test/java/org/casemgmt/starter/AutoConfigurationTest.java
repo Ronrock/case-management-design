@@ -3,6 +3,7 @@ package org.casemgmt.starter;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
+import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.event.WebhookSecretStore;
@@ -18,6 +19,7 @@ import org.casemgmt.service.WebhookService;
 import org.casemgmt.sla.SlaSweeper;
 import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.ProcessEngine;
+import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.TaskService;
 import org.springframework.aop.support.AopUtils;
@@ -170,6 +172,21 @@ class AutoConfigurationTest {
                     assertThat(context).hasSingleBean(CaseService.class);
                     assertThat(context.getBean(EngineGateway.class))
                             .isInstanceOf(OutboxEngineGateway.class);
+                });
+    }
+
+    @Test
+    void embeddedModeRegistersTheSpringEventProjectionBridgeAfterItsPort() {
+        runner.withBean(TaskService.class, () -> mock(TaskService.class))
+                .withBean(RuntimeService.class, () -> mock(RuntimeService.class))
+                .withBean(RepositoryService.class, () -> mock(RepositoryService.class))
+                .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=embedded",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(EmbeddedEngineEventBridge.class);
                 });
     }
 

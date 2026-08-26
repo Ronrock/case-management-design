@@ -1,9 +1,15 @@
 package org.casemgmt.starter;
 
 import org.casemgmt.engine.EngineGateway;
+import org.casemgmt.orchestration.BpmnOrchestration;
+import org.casemgmt.orchestration.CaseOrchestration;
+import org.casemgmt.orchestration.CaseOrchestrationRegistry;
+import org.casemgmt.orchestration.PlanModelOrchestration;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.repo.AuditRepository;
 import org.casemgmt.repo.CaseDefinitionRepository;
+import org.casemgmt.repo.CaseDefinitionReleaseRepository;
+import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.CommentRepository;
@@ -18,6 +24,8 @@ import org.casemgmt.rules.PlanModelEvaluator;
 import org.casemgmt.rules.PlanModelInstantiator;
 import org.casemgmt.rules.StageCompletion;
 import org.casemgmt.service.CaseDefinitionService;
+import org.casemgmt.service.CaseDefinitionReleaseService;
+import org.casemgmt.service.CaseDefinitionVersionService;
 import org.casemgmt.service.CaseService;
 import org.casemgmt.service.CaseTaskService;
 import org.casemgmt.service.CommentService;
@@ -27,9 +35,14 @@ import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.service.MilestoneService;
 import org.casemgmt.service.PlanItemService;
 import org.casemgmt.service.TransitionApplier;
+import org.casemgmt.service.AdHocActionService;
+import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.ObjectProvider;
+import org.casemgmt.orchestration.OrchestrationDeploymentPort;
+import org.casemgmt.rules.CriterionEvaluator;
 
 @Configuration(proxyBeanMethods = false)
 public class CaseManagementServiceConfiguration {
@@ -57,17 +70,70 @@ public class CaseManagementServiceConfiguration {
     @Bean(name = "caseManagementCaseService")
     public CaseService caseService(CaseRepository cases, CaseDefinitionRepository definitions,
                                    PlanItemRepository planItems, MilestoneRepository milestones,
-                                   ParticipantRepository participants, PlanModelEvaluator evaluator,
-                                   PlanModelInstantiator instantiator, StageCompletion completion,
+                                   ParticipantRepository participants,
+                                   CaseOrchestrationRegistry orchestrations, StageCompletion completion,
                                    TransitionApplier applier, EventPublisher publisher,
                                    CaseManagementProperties props) {
-        return new CaseService(cases, definitions, planItems, milestones, participants, evaluator,
-                instantiator, completion, applier, publisher, props.getEngineId());
+        return new CaseService(cases, definitions, planItems, milestones, participants,
+                orchestrations, completion, applier, publisher, props.getEngineId());
+    }
+
+    @Bean
+    public PlanModelOrchestration planModelOrchestration(
+            PlanModelEvaluator evaluator, PlanModelInstantiator instantiator) {
+        return new PlanModelOrchestration(evaluator, instantiator);
+    }
+
+    @Bean
+    public BpmnOrchestration bpmnOrchestration(
+            EngineGateway engine, LinkedProcessRepository processes) {
+        return new BpmnOrchestration(engine, processes);
+    }
+
+    @Bean
+    public CaseOrchestrationRegistry caseOrchestrationRegistry(
+            java.util.List<CaseOrchestration> orchestrations) {
+        return new CaseOrchestrationRegistry(orchestrations);
     }
 
     @Bean
     public CaseDefinitionService caseDefinitionService(CaseDefinitionRepository repo) {
         return new CaseDefinitionService(repo);
+    }
+
+    @Bean
+    public CaseDefinitionReleaseService caseDefinitionReleaseService(
+            CaseDefinitionReleaseRepository repo,
+            ObjectProvider<OrchestrationDeploymentPort> deployments) {
+        OrchestrationDeploymentPort deployment = deployments.getIfAvailable(() ->
+                (releaseId, definitionKey, tenantId, content, mediaType) ->
+                        OrchestrationDeploymentPort.DeploymentResult.active(null));
+        return new CaseDefinitionReleaseService(repo, deployment);
+    }
+
+    @Bean
+    public CaseDefinitionVersionService caseDefinitionVersionService(
+            CaseDefinitionReleaseRepository releases,
+            CaseDefinitionVersionBindingRepository bindings,
+            CaseDefinitionService definitions) {
+        return new CaseDefinitionVersionService(releases, bindings, definitions);
+    }
+
+    @Bean
+    public CombinedCaseDefinitionDeploymentService combinedCaseDefinitionDeploymentService(
+            CaseDefinitionReleaseService releases, CaseDefinitionVersionService versions) {
+        return new CombinedCaseDefinitionDeploymentService(releases, versions);
+    }
+
+    @Bean
+    public AdHocActionService adHocActionService(
+            CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
+            CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
+            PlanItemRepository planItems, CaseTaskRepository tasks,
+            LinkedProcessService linkedProcesses, EngineGateway engine,
+            CriterionEvaluator criteria, EventPublisher publisher) {
+        return new AdHocActionService(cases, bindings, releases, participants,
+                planItems, tasks, linkedProcesses, engine, criteria, publisher);
     }
 
     @Bean

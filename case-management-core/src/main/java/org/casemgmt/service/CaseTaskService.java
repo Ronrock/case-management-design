@@ -8,6 +8,7 @@ import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
+import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
@@ -179,10 +180,15 @@ public class CaseTaskService {
         publisher.audit(task.caseId(), c.tenantId(), actor.userId(), "task.complete", "Task", taskId,
                 Map.of("state", task.state().name()), Map.of("state", "COMPLETED"));
 
-        // Completing the task completes the plan item behind it, which re-evaluates the model
-        // (PlanItemService.complete already handles persistence, side effects and re-evaluation).
-        PlanItem planItem = planItemRepo.require(task.planItemId());
-        planItems.complete(task.caseId(), planItem.id(), planItem.version(), actor);
+        // Legacy tasks drive their plan model explicitly. For BPMN cases, Operaton's task
+        // completion event has already terminalized the projected task and plan item in this
+        // same transaction; invoking PlanItemService would try to complete that ended item a
+        // second time and, more importantly, would let the legacy evaluator participate in a
+        // lifecycle owned by the root BPMN process.
+        if (definitions.require(c.caseDefId()).orchestrationMode() == OrchestrationMode.PLAN_MODEL) {
+            PlanItem planItem = planItemRepo.require(task.planItemId());
+            planItems.complete(task.caseId(), planItem.id(), planItem.version(), actor);
+        }
 
         return saved;
     }

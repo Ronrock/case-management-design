@@ -1810,12 +1810,18 @@ components:
       type: string
       enum: [CREATED, ACTIVE, SUSPENDED, CLOSED, CANCELLED]
 
+    ProjectionStatus:
+      type: string
+      description: Currency of the case-management projection relative to the BPMN engine
+      enum: [PENDING, CURRENT, STALE, FAILED]
+
     Case:
       type: object
       properties:
         id: {type: string, description: 'Globally unique: {engineId}:{uuid}'}
         engineId: {type: string}
         tenantId: {type: string}
+        caseDefinitionId: {type: string}
         caseDefinitionKey: {type: string}
         caseDefinitionVersion: {type: integer}
         businessKey: {type: string, nullable: true}
@@ -1835,6 +1841,10 @@ components:
         createdAt: {type: string, format: date-time}
         updatedAt: {type: string, format: date-time}
         closedAt: {type: string, format: date-time, nullable: true}
+        rootProcessInstanceId: {type: string, nullable: true}
+        projectionStatus: {$ref: '#/components/schemas/ProjectionStatus'}
+        lastEngineUpdateAt: {type: string, format: date-time, nullable: true}
+        lastProjectedAt: {type: string, format: date-time, nullable: true}
         availableActions:
           type: array
           items: {$ref: '#/components/schemas/AvailableAction'}
@@ -1961,6 +1971,10 @@ components:
         adHoc: {type: boolean}
         taskId: {type: string, nullable: true}
         processInstanceId: {type: string, nullable: true}
+        engineActivityId: {type: string, nullable: true}
+        projectionStatus: {$ref: '#/components/schemas/ProjectionStatus'}
+        lastEngineUpdateAt: {type: string, format: date-time, nullable: true}
+        lastProjectedAt: {type: string, format: date-time, nullable: true}
         availableActions:
           type: array
           items: {$ref: '#/components/schemas/AvailableAction'}
@@ -2003,6 +2017,9 @@ components:
         # difference — availableActions is empty until it reads SYNCED.
         state: {type: string, enum: [OPEN, CLAIMED, COMPLETED, TERMINATED]}
         engineSync: {type: string, enum: [PENDING, SYNCED, FAILED]}
+        projectionStatus: {$ref: '#/components/schemas/ProjectionStatus'}
+        lastEngineUpdateAt: {type: string, format: date-time, nullable: true}
+        lastProjectedAt: {type: string, format: date-time, nullable: true}
         version: {type: integer, format: int64}
         availableActions:
           type: array

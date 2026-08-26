@@ -38,9 +38,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * it exists. Nothing has to be remembered.
  *
  * <p><b>How plain lowercase tokens are handled.</b> Distinctive identifiers are searched in all
- * source text. Plain lowercase words such as {@code intake} or {@code decision} are searched only
- * when they occur as quoted literals, where they are most likely to become executable case-type
- * coupling and least likely to be ordinary prose.
+ * source text. The case-definition key is also searched as a quoted literal. Other plain words
+ * such as {@code intake} or {@code decision} are not case-type knowledge by themselves and are
+ * ignored; treating them as leaks makes generic BPMN/DMN vocabulary fail this architecture test.
  */
 class NoCaseTypeVocabularyTest {
 
@@ -88,6 +88,7 @@ class NoCaseTypeVocabularyTest {
     @Test
     void noModuleOutsideThePocApplicationMentionsTheCaseType() throws IOException {
         Set<String> vocabulary = caseTypeVocabulary();
+        String caseTypeKey = String.valueOf(deployedDefinition().get("key"));
         List<String> leaks = new ArrayList<>();
 
         for (String module : MODULES_THAT_MUST_STAY_GENERIC) {
@@ -101,7 +102,7 @@ class NoCaseTypeVocabularyTest {
                         String lowercase = line.toLowerCase(Locale.ROOT);
                         Set<String> literalTokens = quotedLiteralTokens(line);
                         for (String token : vocabulary) {
-                            if (mentionsToken(lowercase, literalTokens, token)) {
+                            if (mentionsToken(lowercase, literalTokens, token, caseTypeKey)) {
                                 leaks.add(REPOSITORY_ROOT.relativize(file) + ":" + (i + 1)
                                         + " mentions '" + token + "'");
                             }
@@ -126,14 +127,7 @@ class NoCaseTypeVocabularyTest {
      */
     @SuppressWarnings("unchecked")
     private Set<String> caseTypeVocabulary() {
-        String document;
-        try {
-            document = Files.readString(Path.of("src/main/resources/definitions/complaint-v1.json"),
-                    StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new AssertionError("Could not read the deployed case definition", e);
-        }
-        Map<String, Object> definition = JsonCodec.toMap(document);
+        Map<String, Object> definition = deployedDefinition();
 
         Set<String> candidates = new LinkedHashSet<>();
         candidates.add(String.valueOf(definition.get("key")));
@@ -157,6 +151,17 @@ class NoCaseTypeVocabularyTest {
         return vocabulary;
     }
 
+    private Map<String, Object> deployedDefinition() {
+        try {
+            String document = Files.readString(
+                    Path.of("src/main/resources/definitions/complaint-v1.json"),
+                    StandardCharsets.UTF_8);
+            return JsonCodec.toMap(document);
+        } catch (IOException e) {
+            throw new AssertionError("Could not read the deployed case definition", e);
+        }
+    }
+
     /**
      * A token is searchable when it cannot plausibly occur as ordinary English: it carries an
      * interior capital (camelCase identifier) or a hyphen (kebab-case key). Single lowercase
@@ -171,11 +176,12 @@ class NoCaseTypeVocabularyTest {
                 || token.chars().skip(1).anyMatch(Character::isUpperCase);
     }
 
-    private boolean mentionsToken(String lowercaseLine, Set<String> literalTokens, String token) {
+    private boolean mentionsToken(String lowercaseLine, Set<String> literalTokens, String token,
+                                  String caseTypeKey) {
         String lowercaseToken = token.toLowerCase(Locale.ROOT);
         return isDistinctive(token)
                 ? lowercaseLine.contains(lowercaseToken)
-                : literalTokens.contains(lowercaseToken);
+                : token.equalsIgnoreCase(caseTypeKey) && literalTokens.contains(lowercaseToken);
     }
 
     private Set<String> quotedLiteralTokens(String document) {

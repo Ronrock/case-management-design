@@ -1,119 +1,417 @@
 # Writing a case definition
 
-A definition is one JSON document. Deploying it mints a new version; the id is
-`{tenant}:{key}:{version}`.
+This chapter takes you from a process idea to a publishable BPMN case-definition version. Read
+[Core concepts](concepts.md) first if “user task”, “token”, or “root process” is unfamiliar.
 
-## Top level
+## Start with a small process
 
-| Field | Required | Meaning |
-|---|---|---|
-| `key` | yes | Stable identifier across versions. |
-| `name` | yes | Human-readable label. |
-| `tenantId` | no | If present it must equal the caller's tenant. |
-| `roles` | no | Case-level role vocabulary, e.g. `owner`, `handler`. |
-| `forms` | no | Map of form key → JSON Schema. |
-| `slaPolicyId` | no | Attaches SLA targets to cases of this type. |
-| `planItems` | yes | The work model. |
+For your first model, choose a happy path with two or three human tasks. Avoid parallel gateways,
+timers, messages, call activities, and multi-instance work until the basic path runs.
 
-## Plan item fields
+Write the flow in plain language before opening a modeler:
 
-| Field | Applies to | Meaning |
-|---|---|---|
-| `defKey` | all | Unique within the definition. **This is what criteria reference.** |
-| `type` | all | `STAGE` · `HUMAN_TASK` · `MILESTONE` · `PROCESS_TASK` |
-| `name` | all | Display label. |
-| `parentStageKey` | all | Nests this item inside a stage. Must resolve, or the deploy is rejected. |
-| `sortOrder` | all | Deterministic ordering. Ties break on `defKey`. |
-| `required` | all | Blocks parent/case completion until finished. |
-| `manualActivation` | all | Discretionary — waits in `ENABLED` for a human. |
-| `repetition` | all | Can recur while its criteria keep holding. |
-| `entryCriteria` | all | Array of JUEL expressions, ANDed. |
-| `exitCriteria` | all | Ends the item early when satisfied. |
-| `formKey` | `HUMAN_TASK` | Names a schema in `forms`. Validated on complete. |
-| `candidateGroups` | `HUMAN_TASK` | Identity groups that may claim it. |
-| `processDefinitionKey` | `PROCESS_TASK` | BPMN process key. *Stored, not yet acted on.* |
+```text
+Receive request -> Review request -> Record decision -> End
+```
 
-## Expression language
+Then decide:
 
-Criteria are JUEL, evaluated in a sandbox with no access to arbitrary Java. Two roots:
+- Which steps require a person?
+- Which group can claim each task?
+- Which data must each person submit?
+- Which sections should appear as stages?
+- Which events matter enough to record as milestones?
+- Which optional work should be available outside the normal token flow?
 
-| Root | Gives you | Example |
-|---|---|---|
-| `items` | Other plan items by `defKey` | `${items.assess.state == 'COMPLETED'}` |
-| `vars` | Case variables | `${vars.amount > 1000}` |
+## Install a BPMN modeler
 
-> **Typos fail silently.** A criterion referencing a `defKey` that doesn't exist evaluates against a
-> null and simply never fires — no error at deploy time, none at runtime. Check your `defKey`s.
-> ([Issue #28](https://github.com/Ronrock/case-management-design/issues/28).)
+Use a BPMN 2.0 desktop modeler compatible with Operaton extension attributes. The
+[Operaton download documentation](https://docs.operaton.org/docs/documentation/introduction/downloading-operaton/)
+describes the supported modeling tool.
 
-## Forms
+Import the checked-in element-template catalog:
 
-Each entry in `forms` is a JSON Schema. When a task carrying that `formKey` is completed, the
-payload is validated against it. A failure returns `422` with RFC 6901 pointers:
+```text
+modeler-templates/case-management.json
+```
+
+The template helps authors enter case-management metadata consistently. Studio is planned but is
+not yet the production authoring path, so Desktop Modeler remains the supported starting point.
+
+## The artifact set
+
+Create a folder for one case type:
+
+```text
+my-request/
+├── contract.json
+├── presentation.json
+└── processes/
+    └── my-request.bpmn
+```
+
+Optional `.dmn` files can sit under any relative subdirectory. The root archive paths
+`contract.json` and `presentation.json` are fixed.
+
+The contract `key` and root BPMN process ID must be the same stable key. Use lowercase words and
+hyphens, for example `my-request`. Do not change the key when publishing a new version.
+
+## 1. Draw the orchestration
+
+Create one executable BPMN process:
+
+```xml
+<bpmn:process id="my-request" name="My request" isExecutable="true">
+```
+
+Add one start event, your tasks in sequence, and an end event. Give every element a stable,
+meaningful ID. IDs are used for migration and observation; changing them casually makes future
+process migration harder.
+
+### User tasks
+
+For each human step, use a BPMN user task:
+
+```xml
+<bpmn:userTask id="review-request"
+               name="Review request"
+               operaton:formKey="reviewForm"
+               operaton:candidateGroups="reviewers"/>
+```
+
+- `id` is the stable BPMN element ID.
+- `name` is shown to users.
+- `operaton:formKey` must match a form in `contract.json`.
+- `operaton:candidateGroups` must use groups declared by the contract and identity provider.
+
+See Operaton's [user-task reference](https://docs.operaton.org/docs/documentation/reference/bpmn20/tasks/user-task/)
+for the underlying BPMN extension attributes. In this project, the form key points to a contract
+JSON Schema rendered by the Scenario A UI; it is not an Operaton Tasklist HTML form.
+
+### Stages
+
+Use an embedded subprocess when several activities form a meaningful stage. Apply the
+case-management stage marker:
+
+```xml
+<bpmn:subProcess id="review" name="Review" casemgmt:stage="true">
+```
+
+Each runtime occurrence projects as a `STAGE` plan item. Keep the marker on a subprocess, not on an
+arbitrary task.
+
+### Milestones
+
+Use an intermediate throw event for a point-in-time milestone:
+
+```xml
+<bpmn:intermediateThrowEvent id="reviewed"
+                            name="Reviewed"
+                            casemgmt:milestoneId="reviewed"/>
+```
+
+Milestone IDs must be unique in the orchestration release. Re-observing the same occurrence is
+idempotent and does not create another achievement.
+
+### Root process rules
+
+- Exactly one process must be the root process whose ID equals the contract key.
+- The root process must be executable.
+- Root completion closes the case.
+- A called or ad-hoc child process ending must not close the case.
+- Static call-activity and DMN decision references must resolve inside the orchestration release.
+
+## 2. Write the contract
+
+The contract is the server-enforced vocabulary shared by BPMN, API, and UI. Use
+[`case-contract-v1.schema.json`](../schemas/case-contract-v1.schema.json) as the machine-readable
+reference.
+
+A small example:
 
 ```json
 {
-  "type": "…/form-invalid", "code": "form-invalid", "status": 422,
-  "violations": [ { "pointer": "/decision", "message": "is required" } ]
+  "key": "my-request",
+  "name": "My request",
+  "version": "1.0",
+  "roles": ["owner", "handler", "watcher"],
+  "candidateGroups": ["reviewers"],
+  "fields": {
+    "requestSummary": {"schema": {"type": "string"}},
+    "decision": {"schema": {"type": "string"}},
+    "rationale": {"schema": {"type": "string"}}
+  },
+  "forms": {
+    "reviewForm": {
+      "schema": {
+        "type": "object",
+        "required": ["decision"],
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": ["approve", "reject"]
+          },
+          "rationale": {"type": "string"}
+        }
+      },
+      "uiSchema": {
+        "rationale": {"widget": "textarea"}
+      }
+    }
+  },
+  "searchProfiles": {
+    "requests": {"scopes": ["cases", "documents"]}
+  },
+  "adHocActions": []
 }
 ```
 
-A pointer of `""` (empty string) means the whole document — that's what a missing required field at
-the root produces. It is RFC-correct; don't "fix" it to `"/"`.
+### Fields
 
-A `formKey` naming a schema that doesn't exist fails loudly at completion time rather than skipping
-validation.
+`fields` is the canonical field catalog. The key is the stable field ID used by forms and
+presentation sections. Put validation rules under `schema`.
 
-## Patterns
+Field values are not automatically public. Worker Permissions decide which values reach case,
+task, document, collaboration, search, error, and extension-component DTOs. Missing or empty field
+decisions deny values.
 
-### Sequential work
+### Forms
 
-The second item waits on the first:
+Each form contains:
+
+- `schema`: JSON Schema used by the server on task/action execution.
+- `uiSchema`: optional bounded presentation hints for the Lit renderer.
+
+The BPMN form key is a reference, not a duplicate schema. If the task says
+`operaton:formKey="reviewForm"`, the contract must contain `forms.reviewForm`.
+
+### Roles and candidate groups
+
+Declare every role used by ad-hoc actions and every candidate group used by BPMN user tasks.
+Contract vocabulary and real identity-provider groups must match exactly, including case.
+
+### SLA bindings
+
+An SLA reference on BPMN must resolve to a contract `slaBindings` entry. The referenced policy and
+calendar must exist operationally before cases depend on it.
+
+### Ad-hoc actions
+
+Ad-hoc work is deliberately outside the BPMN token flow. Supported types are:
+
+| Type | Required reference | Effect |
+|---|---|---|
+| `TASK` | Optional `formRef` and candidate groups | Creates a projected discretionary task |
+| `PROCESS` | `processDefinitionKey` | Starts a linked discretionary process |
+| `MESSAGE` | `messageName` | Correlates a message through orchestration |
+
+Every action needs an ID, type, at least one role, and an availability expression. Execution
+reauthorizes, validates the form, checks optimistic locking, audits, and publishes events.
+
+Example:
 
 ```json
-{ "defKey": "register", "type": "HUMAN_TASK", "required": true, "sortOrder": 10 },
-{ "defKey": "approve",  "type": "HUMAN_TASK", "required": true, "sortOrder": 20,
-  "entryCriteria": ["${items.register.state == 'COMPLETED'}"] }
+{
+  "id": "request-more-information",
+  "type": "TASK",
+  "name": "Request more information",
+  "roles": ["handler"],
+  "formRef": "requestInformationForm",
+  "candidateGroups": ["reviewers"],
+  "availabilityExpression": "${case.state == 'ACTIVE'}"
+}
 ```
 
-### A milestone marking progress
+## 3. Write the Scenario A presentation manifest
 
-Milestones carry no work — they record that something became true, and they emit an event:
+Scenario A means the Lit shell interprets a server-published manifest and fetches ordinary REST
+resources. There is no composed `/view` endpoint and no `ViewComposer`.
+
+Use [`presentation-manifest-v1.schema.json`](../schemas/presentation-manifest-v1.schema.json) as the
+reference:
 
 ```json
-{ "defKey": "acknowledged", "type": "MILESTONE", "name": "Acknowledged",
-  "entryCriteria": ["${items.registerComplaint.state == 'COMPLETED'}"], "sortOrder": 30 }
+{
+  "version": "1.0",
+  "localeNamespace": "my-request",
+  "sections": [
+    {
+      "id": "summary",
+      "primitive": "summary-fields",
+      "title": "Request",
+      "fields": ["system:title", "system:state", "requestSummary", "decision"]
+    },
+    {"id": "progress", "primitive": "plan-tree", "title": "Progress"},
+    {"id": "tasks", "primitive": "task-list", "title": "Work"},
+    {"id": "milestones", "primitive": "milestone-list", "title": "Milestones"},
+    {"id": "search", "primitive": "search", "searchProfileId": "requests"},
+    {"id": "actions", "primitive": "actions", "actions": ["cancel"]}
+  ]
+}
 ```
 
-### Optional investigation, repeatable
+The manifest may reference only fields, forms, actions, search profiles, and extension components
+allowed by the pinned contract/runtime. The shell renders only server-returned
+`availableActions`; listing an action in the manifest does not grant it.
 
-A discretionary stage a handler may open, containing a task they can run many times:
+Unsupported major manifest versions are rejected predictably. Custom elements must come from the
+allowlisted, versioned registry and receive masked props plus a case-scoped capability facade—never
+tokens, an unrestricted API client, or a raw portal adapter.
+
+## 4. Validate the artifact set mentally
+
+Before publishing, check:
+
+- [ ] Contract `key` equals the root BPMN process ID.
+- [ ] There is exactly one root process.
+- [ ] Every BPMN user-task form key exists in `forms`.
+- [ ] Every BPMN candidate group exists in `candidateGroups`.
+- [ ] Every milestone ID is unique.
+- [ ] Every BPMN SLA reference exists in `slaBindings`.
+- [ ] Static DMN and call-activity references resolve within the orchestration release.
+- [ ] Every presentation field exists in the field catalog or starts with `system:`.
+- [ ] Every presentation form, action, and search profile exists in the contract.
+- [ ] Every ad-hoc action uses declared roles/groups and has the fields required by its type.
+- [ ] XML contains no `DOCTYPE` or entity declarations.
+
+The server repeats these checks. Client-side validation improves feedback but never replaces
+server validation.
+
+## 5. Publish with one combined ZIP
+
+From the directory containing `contract.json`, `presentation.json`, and `processes/`:
+
+```bash
+zip -r my-request.zip contract.json presentation.json processes
+```
+
+Publish as the PoC admin:
+
+```bash
+curl --fail --silent --show-error \
+  --user olivia:olivia \
+  --request POST \
+  --header 'Content-Type: application/zip' \
+  --data-binary @my-request.zip \
+  http://localhost:8080/case-api/v2/case-definitions | jq
+```
+
+The server safely unpacks the archive, publishes all three immutable releases, performs
+cross-artifact validation, deploys orchestration, and binds a new definition version.
+
+The ZIP accepts:
+
+- `contract.json` at the archive root.
+- `presentation.json` at the archive root.
+- At least one `.bpmn` file at any safe relative path.
+- Optional `.dmn` files at safe relative paths.
+
+It rejects absolute/backslash/`..` paths, normalized aliases, duplicate paths, unsupported file
+types, XML entities, more than 100 files, and more than 25 MiB decompressed content.
+
+Embedded publication returns an `ACTIVE` binding immediately. Remote publication can return
+`DEPLOYING`; it later becomes `ACTIVE` or `FAILED` after outbox delivery.
+
+## 6. Publish releases independently
+
+Use independent publication when only one artifact changes or when release management publishes
+and approves artifacts separately.
+
+### Publish orchestration
+
+```bash
+curl --user olivia:olivia --request POST \
+  --header 'Content-Type: application/bpmn+xml' \
+  --data-binary @processes/my-request.bpmn \
+  http://localhost:8080/case-api/v2/case-definitions/my-request/orchestration-releases
+```
+
+Use `application/zip` instead when orchestration contains multiple BPMN/DMN resources.
+
+### Publish the contract
+
+```bash
+curl --user olivia:olivia --request POST \
+  --header 'Content-Type: application/json' \
+  --data-binary @contract.json \
+  http://localhost:8080/case-api/v2/case-definitions/my-request/contract-releases
+```
+
+### Publish the presentation
+
+```bash
+curl --user olivia:olivia --request POST \
+  --header 'Content-Type: application/json' \
+  --data-binary @presentation.json \
+  http://localhost:8080/case-api/v2/case-definitions/my-request/presentation-releases
+```
+
+Capture each response's `id`. Then bind exact releases:
+
+```bash
+curl --user olivia:olivia --request POST \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "orchestrationReleaseId": "ORCHESTRATION_RELEASE_ID",
+    "contractReleaseId": "CONTRACT_RELEASE_ID",
+    "presentationReleaseId": "PRESENTATION_RELEASE_ID"
+  }' \
+  http://localhost:8080/case-api/v2/case-definitions/my-request/versions
+```
+
+Binding is the point where cross-artifact references are validated. Publication stores one
+artifact immutably; it cannot know which other releases you intend to combine until binding.
+
+## Release immutability and versioning
+
+Content is hashed with SHA-256. Republishing identical content for the same tenant, definition key,
+and release kind resolves to the immutable release rather than creating mutable history.
+
+Use this versioning rule:
+
+- BPMN/DMN change: publish a new orchestration release.
+- Field/form/action/SLA contract change: publish a new contract release.
+- Layout/localization/component placement change: publish a new presentation release.
+- Runnable combination change: create a new case-definition version binding exact releases.
+
+Never modify a previously published release in the database.
+
+## Legacy plan-model JSON
+
+Legacy definitions remain supported with `POST /case-api/v2/case-definitions` and
+`Content-Type: application/json`. They deploy as `PLAN_MODEL` and are not automatically migrated.
+
+The legacy document contains `forms` plus `planItems` such as `HUMAN_TASK`, `STAGE`, `MILESTONE`,
+and `PROCESS_TASK`. JUEL `entryCriteria` and `exitCriteria` drive local evaluation:
 
 ```json
-{ "defKey": "investigation", "type": "STAGE", "name": "Investigation",
-  "manualActivation": true, "sortOrder": 60 },
-
-{ "defKey": "investigateAspect", "type": "HUMAN_TASK", "name": "Investigate aspect",
-  "parentStageKey": "investigation", "manualActivation": true, "repetition": true,
-  "formKey": "investigateForm", "candidateGroups": ["handlers"], "sortOrder": 70 }
+{
+  "key": "legacy-request",
+  "name": "Legacy request",
+  "roles": ["owner", "handler"],
+  "forms": {},
+  "planItems": [
+    {
+      "defKey": "register",
+      "type": "HUMAN_TASK",
+      "name": "Register",
+      "required": true,
+      "candidateGroups": ["handlers"],
+      "sortOrder": 10
+    },
+    {
+      "defKey": "approve",
+      "type": "HUMAN_TASK",
+      "name": "Approve",
+      "required": true,
+      "candidateGroups": ["handlers"],
+      "entryCriteria": ["${items.register.state == 'COMPLETED'}"],
+      "sortOrder": 20
+    }
+  ]
+}
 ```
 
-Neither is `required`, so neither blocks closing. The stage sits in `ENABLED` until somebody starts
-it; the task then runs as many times as there are aspects to examine.
-
-### Conditional on a variable
-
-```json
-{ "defKey": "seniorReview", "type": "HUMAN_TASK", "required": true,
-  "candidateGroups": ["seniors"], "sortOrder": 55,
-  "entryCriteria": ["${items.assess.state == 'COMPLETED' && vars.amount > 1000}"] }
-```
-
-## Authoring checklist
-
-- [ ] Every `defKey` referenced in a criterion actually exists — spelling included.
-- [ ] Every `parentStageKey` resolves to a `STAGE`.
-- [ ] Every `formKey` on a `HUMAN_TASK` has a matching entry in `forms`.
-- [ ] `candidateGroups` match the identity groups your principals really carry.
-- [ ] Work that must happen is `required`; work that's optional is not.
-- [ ] `sortOrder` set on everything, so ordering is deterministic.
+Unlike BPMN, a legacy case is explicitly closed after required work ends. Keep using this format
+for existing case types that depend on its evaluator semantics; use BPMN and the three-release
+model for new BPMN-first types.

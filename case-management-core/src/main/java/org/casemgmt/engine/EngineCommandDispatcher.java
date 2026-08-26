@@ -1,8 +1,11 @@
 package org.casemgmt.engine;
 
 import org.casemgmt.domain.CaseTask;
+import org.casemgmt.orchestration.OrchestrationDeploymentClient;
+import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.repo.EngineCommandRepository;
 
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -37,15 +40,28 @@ public class EngineCommandDispatcher {
         void report(String correlationKey, CaseTask.EngineSync sync, String engineId);
     }
 
+    public interface DeploymentReporter {
+        void report(String releaseId, ReleaseStatus status, String engineDeploymentId,
+                    String failureDetail);
+    }
+
     private final EngineCommandRepository commands;
     private final EngineGateway delegate;
     private final SyncReporter syncReporter;
+    private final DeploymentReporter deploymentReporter;
 
     public EngineCommandDispatcher(EngineCommandRepository commands, EngineGateway delegate,
                                    SyncReporter syncReporter) {
+        this(commands, delegate, syncReporter, (release, status, deployment, failure) -> { });
+    }
+
+    public EngineCommandDispatcher(EngineCommandRepository commands, EngineGateway delegate,
+                                   SyncReporter syncReporter,
+                                   DeploymentReporter deploymentReporter) {
         this.commands = commands;
         this.delegate = delegate;
         this.syncReporter = syncReporter;
+        this.deploymentReporter = deploymentReporter;
     }
 
     public int drainOnce() {
@@ -57,7 +73,7 @@ public class EngineCommandDispatcher {
             } catch (RuntimeException e) {
                 if (EngineCommand.exhausted(command.attempts())) {
                     commands.markDead(command.id(), e.getMessage());
-                    reportFailure(command);
+                    reportFailure(command, e.getMessage());
                 } else {
                     commands.markRetry(command.id(), e.getMessage(),
                             EngineCommand.nextAttempt(command.attempts()));
@@ -74,7 +90,7 @@ public class EngineCommandDispatcher {
                 EngineTaskRef ref = delegate.createHumanTask(new HumanTaskRequest(
                         command.caseId(), str(p, "planItemId"), str(p, "name"),
                         blankToNull(str(p, "assignee")), strings(p.get("candidateGroups")),
-                        blankToNull(str(p, "formKey")), map(p.get("variables"))));
+                        blankToNull(str(p, "formKey")), map(p.get("variables")), command.id()));
                 syncReporter.report(str(p, "planItemId"), CaseTask.EngineSync.SYNCED, ref.engineTaskId());
             }
             case CLAIM_TASK -> delegate.claimTask(str(p, "engineTaskId"), str(p, "userId"));
@@ -87,6 +103,19 @@ public class EngineCommandDispatcher {
                         ref.processInstanceId());
             }
             case CANCEL_PROCESS -> delegate.cancelProcess(str(p, "processInstanceId"), str(p, "reason"));
+            case DEPLOY_ORCHESTRATION -> {
+                if (!(delegate instanceof OrchestrationDeploymentClient deploymentClient)) {
+                    throw new EngineException("Configured engine does not support orchestration deployment");
+                }
+                String releaseId = str(p, "releaseId");
+                String deploymentId = deploymentClient.deploy(releaseId,
+                        str(p, "definitionKey"), blankToNull(str(p, "tenantId")),
+                        Base64.getDecoder().decode(str(p, "contentBase64")),
+                        str(p, "mediaType"));
+                deploymentReporter.report(releaseId, ReleaseStatus.ACTIVE, deploymentId, null);
+            }
+            case CORRELATE_MESSAGE -> delegate.correlateMessage(new MessageCorrelationRequest(
+                    command.caseId(), str(p, "messageName"), map(p.get("variables"))));
         }
     }
 
@@ -99,7 +128,7 @@ public class EngineCommandDispatcher {
      * for an absent value (an ad hoc linked process's {@code planItemId}, in particular) from
      * being reported as a real correlation key.
      */
-    private void reportFailure(EngineCommand command) {
+    private void reportFailure(EngineCommand command, String failureDetail) {
         Map<String, Object> p = command.payload();
         switch (command.type()) {
             case CREATE_TASK -> {
@@ -114,6 +143,8 @@ public class EngineCommandDispatcher {
                     syncReporter.report(correlationId, CaseTask.EngineSync.FAILED, null);
                 }
             }
+            case DEPLOY_ORCHESTRATION -> deploymentReporter.report(
+                    str(p, "releaseId"), ReleaseStatus.FAILED, null, failureDetail);
             default -> {
                 // No local task/process row waits for sync state on these command types.
             }

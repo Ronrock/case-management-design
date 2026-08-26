@@ -18,7 +18,8 @@ public class PlanItemRepository {
     private static final String COLUMNS = """
             ID_, CASE_ID_, PI_DEF_ID_, TYPE_, NAME_, STATE_, PARENT_STAGE_ID_, AD_HOC_,
             REPETITION_NO_, CAMUNDA_TASK_ID_, PROC_INST_ID_, TERM_REASON_, VERSION_,
-            CREATED_AT_, UPDATED_AT_, ENDED_AT_""";
+            CREATED_AT_, UPDATED_AT_, ENDED_AT_, ENGINE_ACTIVITY_ID_, PROJECTION_STATUS_,
+            LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_""";
 
     private final JdbcClient jdbc;
 
@@ -118,7 +119,8 @@ public class PlanItemRepository {
 
         return new PlanItem(p.id(), p.caseId(), p.planItemDefId(), p.type(), p.name(), p.state(),
                 p.parentStageId(), p.adHoc(), p.repetitionNo(), p.engineTaskId(), p.processInstanceId(),
-                p.terminationReason(), expectedVersion + 1, p.createdAt(), updatedAt, endedAt);
+                p.terminationReason(), expectedVersion + 1, p.createdAt(), updatedAt, endedAt,
+                p.engineActivityId(), p.projectionStatus(), p.lastEngineUpdateAt(), p.lastProjectedAt());
     }
 
     public void bindEngineTask(String planItemId, String engineTaskId) {
@@ -140,6 +142,10 @@ public class PlanItemRepository {
                 rs.getString("TERM_REASON_"), rs.getLong("VERSION_"),
                 rs.getObject("CREATED_AT_", OffsetDateTime.class),
                 rs.getObject("UPDATED_AT_", OffsetDateTime.class),
-                rs.getObject("ENDED_AT_", OffsetDateTime.class));
+                rs.getObject("ENDED_AT_", OffsetDateTime.class),
+                rs.getString("ENGINE_ACTIVITY_ID_"),
+                org.casemgmt.projection.ProjectionStatus.valueOf(rs.getString("PROJECTION_STATUS_")),
+                rs.getObject("LAST_ENGINE_UPDATE_AT_", OffsetDateTime.class),
+                rs.getObject("LAST_PROJECTED_AT_", OffsetDateTime.class));
     }
 }

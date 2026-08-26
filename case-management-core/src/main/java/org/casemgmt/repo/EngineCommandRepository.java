@@ -140,6 +140,32 @@ public class EngineCommandRepository {
             .param("error", truncate(error)).param("id", id).update();
     }
 
+    public List<EngineCommand> findDead(int limit) {
+        return jdbc.sql("""
+                SELECT ID_, CASE_ID_, TYPE_, PAYLOAD_JSON_, STATUS_, ATTEMPTS_,
+                       NEXT_ATTEMPT_AT_, LAST_ERROR_
+                FROM CM_ENGINE_COMMAND WHERE STATUS_ = 'DEAD'
+                ORDER BY CREATED_AT_ FETCH FIRST :limit ROWS ONLY""")
+                .param("limit", Math.clamp(limit, 1, 200))
+                .query((rs, n) -> new EngineCommand(rs.getString("ID_"), rs.getString("CASE_ID_"),
+                        EngineCommand.Type.valueOf(rs.getString("TYPE_")),
+                        JsonCodec.toMap(rs.getString("PAYLOAD_JSON_")), rs.getString("STATUS_"),
+                        rs.getInt("ATTEMPTS_"),
+                        rs.getObject("NEXT_ATTEMPT_AT_", OffsetDateTime.class),
+                        rs.getString("LAST_ERROR_")))
+                .list();
+    }
+
+    /** Administrative retry is explicit and only valid for a command already parked DEAD. */
+    public boolean retryDead(String id) {
+        return jdbc.sql("""
+                UPDATE CM_ENGINE_COMMAND SET STATUS_ = 'PENDING', ATTEMPTS_ = 0,
+                    NEXT_ATTEMPT_AT_ = SYSTIMESTAMP, LAST_ERROR_ = NULL,
+                    CLAIM_TOKEN_ = NULL, CLAIMED_AT_ = NULL
+                WHERE ID_ = :id AND STATUS_ = 'DEAD'""")
+                .param("id", id).update() == 1;
+    }
+
     private static String truncate(String s) {
         return s == null ? null : s.length() > 1990 ? s.substring(0, 1990) : s;
     }

@@ -3,6 +3,7 @@ package org.casemgmt.rest.controller;
 import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.repo.CaseDefinitionRepository;
+import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.JsonCodec;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
@@ -41,13 +42,16 @@ public class CaseDefinitionController {
 
     private final CaseDefinitionService service;
     private final CaseDefinitionRepository repo;
+    private final CaseDefinitionVersionBindingRepository bindings;
     private final ActionPolicy policy;
     private final CallerResolver callers;
 
     public CaseDefinitionController(CaseDefinitionService service, CaseDefinitionRepository repo,
+                                    CaseDefinitionVersionBindingRepository bindings,
                                     ActionPolicy policy, CallerResolver callers) {
         this.service = service;
         this.repo = repo;
+        this.bindings = bindings;
         this.policy = policy;
         this.callers = callers;
     }
@@ -91,6 +95,7 @@ public class CaseDefinitionController {
         body.put("id", deployed.id());
         body.put("key", deployed.key());
         body.put("version", deployed.versionNo());
+        body.put("orchestrationMode", deployed.orchestrationMode().name());
         body.put("tenantId", deployed.tenantId());
         body.put("planItems", deployed.planItems().size());
         body.put("availableActions", policy.listForAdministration(callers.groups(actor)));
@@ -115,6 +120,8 @@ public class CaseDefinitionController {
             row.put("id", def.id());
             row.put("key", def.key());
             row.put("version", def.versionNo());
+            row.put("orchestrationMode", def.orchestrationMode().name());
+            bindings.find(def.id()).ifPresent(binding -> putReleaseReferences(row, binding));
             row.put("name", def.name());
             row.put("tenantId", def.tenantId());
             row.put("availableActions", actions);
@@ -135,6 +142,8 @@ public class CaseDefinitionController {
         body.put("id", def.id());
         body.put("key", def.key());
         body.put("version", def.versionNo());
+        body.put("orchestrationMode", def.orchestrationMode().name());
+        bindings.find(def.id()).ifPresent(binding -> putReleaseReferences(body, binding));
         body.put("name", def.name());
         body.put("tenantId", def.tenantId());
         body.put("roles", def.roles());
@@ -154,6 +163,37 @@ public class CaseDefinitionController {
             return item;
         }).toList());
         return body;
+    }
+
+    @GetMapping("/{key}/versions/{version}")
+    public Map<String, Object> getVersion(@PathVariable String key, @PathVariable int version,
+                                          @RequestParam(required = false) String tenantId,
+                                          Authentication authentication) {
+        Actor actor = callers.actor(authentication);
+        String tenant = callers.requireTenant(actor, tenantId);
+        CaseDefinition def = repo.findVersion(key, version, tenant)
+                .orElseThrow(() -> new NotFoundException("CaseDefinition", key + ":" + version));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", def.id());
+        body.put("key", def.key());
+        body.put("version", def.versionNo());
+        body.put("orchestrationMode", def.orchestrationMode().name());
+        bindings.find(def.id()).ifPresent(binding -> putReleaseReferences(body, binding));
+        body.put("name", def.name());
+        body.put("tenantId", def.tenantId());
+        return body;
+    }
+
+    private static void putReleaseReferences(
+            Map<String, Object> body,
+            org.casemgmt.release.CaseDefinitionVersionBinding binding) {
+        body.put("orchestrationReleaseId", binding.orchestrationReleaseId());
+        body.put("orchestrationSha256", binding.orchestrationSha256());
+        body.put("contractReleaseId", binding.contractReleaseId());
+        body.put("contractSha256", binding.contractSha256());
+        body.put("presentationReleaseId", binding.presentationReleaseId());
+        body.put("presentationSha256", binding.presentationSha256());
+        body.put("deploymentStatus", binding.deploymentStatus().name());
     }
 
     @GetMapping(value = "/{key}/forms/{formKey}", produces = "application/schema+json")
