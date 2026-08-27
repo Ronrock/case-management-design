@@ -8,9 +8,12 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The publication-time contract for {@link CaseContractValidator} (Workstream 1, Task 1).
@@ -380,13 +383,33 @@ class JsonSchemaCaseContractValidatorTest {
 
     /**
      * The schema is executed from the classpath, not read from {@code docs/}: a deployed
-     * artifact validates with the schema it shipped with.
+     * artifact validates with the schema it shipped with, not with whatever the working tree
+     * happens to contain.
      */
     @Test
     void executesTheSchemaPublishedOnTheClasspath() {
         assertThat(getClass().getResourceAsStream("/schemas/case-contract-v1.schema.json"))
                 .as("case-contract-v1.schema.json must ship on the core classpath")
                 .isNotNull();
+    }
+
+    /**
+     * {@code docs/schemas} is what model authors and tooling read. It is a copy of the executed
+     * schema rather than the source of it, so this asserts the copy has not drifted — a
+     * documented rule the runtime does not actually enforce is worse than no rule.
+     */
+    @Test
+    void keepsThePublishedDocumentationCopyIdenticalToTheExecutedSchema() throws Exception {
+        Path published = Path.of("..", "docs", "schemas", "case-contract-v1.schema.json");
+        assumeTrue(Files.exists(published), "docs/ is not present in this checkout");
+
+        try (var executed = getClass()
+                .getResourceAsStream("/schemas/case-contract-v1.schema.json")) {
+            assertThat(Files.readString(published, StandardCharsets.UTF_8))
+                    .as("docs/schemas/case-contract-v1.schema.json has drifted from the "
+                            + "schema on the classpath")
+                    .isEqualTo(new String(executed.readAllBytes(), StandardCharsets.UTF_8));
+        }
     }
 
     // ------------------------------------------------------------------ helpers
