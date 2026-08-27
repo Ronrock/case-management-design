@@ -23,6 +23,29 @@ public final class BpmnReleaseValidator {
     public static final int MAX_FILES = 100;
     public static final int MAX_DECOMPRESSED_BYTES = 25 * 1024 * 1024;
 
+    /** Engine-owned BPMN extensions. */
+    public static final String OPERATON_NS = "http://operaton.org/schema/1.0/bpmn";
+    /** Platform-owned BPMN extensions. */
+    public static final String CASEMGMT_NS = "https://casemgmt.org/bpmn";
+
+    /**
+     * Extension attributes this platform reads, and the namespace that must carry each one.
+     *
+     * <p>A prefix is arbitrary in XML, so the URI is the identity. Matching on local name alone
+     * meant {@code foo:formKey} was indexed as though the author had written
+     * {@code operaton:formKey} — the model published cleanly and only diverged once a live case
+     * reached the element.
+     */
+    private static final Map<String, String> VOCABULARY = Map.of(
+            "formKey", OPERATON_NS,
+            "candidateGroups", OPERATON_NS,
+            "decisionRef", OPERATON_NS,
+            "milestoneId", CASEMGMT_NS,
+            "slaTargetId", CASEMGMT_NS);
+
+    /** Retired spellings, mapped to the name that replaced them. */
+    private static final Map<String, String> RETIRED = Map.of("slaRef", "slaTargetId");
+
     public record Index(Set<String> processIds, Set<String> formRefs,
                         Set<String> milestoneIds, Set<String> decisionIds,
                         Set<String> candidateGroups, Set<String> slaRefs) { }
@@ -142,25 +165,25 @@ public final class BpmnReleaseValidator {
         var nodes = document.getElementsByTagNameNS("*", "*");
         for (int i = 0; i < nodes.getLength(); i++) {
             if (!(nodes.item(i) instanceof Element element)) continue;
+            checkVocabularyNamespaces(key, element);
             String local = element.getLocalName();
             if ("process".equals(local)) addUnique(key, processIds, attribute(element, "id"), "process");
             if ("userTask".equals(local)) {
-                addIfText(formRefs, attributeByLocalName(element, "formKey"));
-                String groups = attributeByLocalName(element, "candidateGroups");
+                addIfText(formRefs, extension(element, "formKey"));
+                String groups = extension(element, "candidateGroups");
                 if (groups != null && !dynamic(groups)) {
                     Arrays.stream(groups.split(",")).map(String::trim).filter(v -> !v.isBlank())
                             .forEach(candidateGroups::add);
                 }
             }
             if ("callActivity".equals(local)) addIfText(calledElements, attribute(element, "calledElement"));
-            if ("businessRuleTask".equals(local)) addIfText(decisionRefs,
-                    firstText(attributeByLocalName(element, "decisionRef"), attribute(element, "decisionRef")));
-            String milestone = firstText(attributeByLocalName(element, "milestoneId"),
+            if ("businessRuleTask".equals(local)) addIfText(decisionRefs, extension(element, "decisionRef"));
+            String milestone = firstText(extension(element, "milestoneId"),
                     "milestone".equals(local) ? attribute(element, "id") : null);
             if (milestone != null && !milestones.add(milestone)) {
                 throw invalid(key, "Duplicate milestone id '" + milestone + "'");
             }
-            addIfText(slaRefs, attributeByLocalName(element, "slaRef"));
+            addIfText(slaRefs, extension(element, "slaTargetId"));
         }
     }
 
@@ -171,15 +194,51 @@ public final class BpmnReleaseValidator {
         }
     }
 
-    private static String attributeByLocalName(Element element, String localName) {
+    /**
+     * Reads a platform extension from the one namespace {@link #VOCABULARY} allows for it.
+     * Anything in another namespace has already been rejected by
+     * {@link #checkVocabularyNamespaces}, so a miss here means the author did not set it.
+     */
+    private static String extension(Element element, String localName) {
+        String namespace = VOCABULARY.get(localName);
+        return element.hasAttributeNS(namespace, localName)
+                ? element.getAttributeNS(namespace, localName) : null;
+    }
+
+    /**
+     * Fails a recognised extension carried in an unexpected namespace, and a retired spelling in
+     * any namespace.
+     *
+     * <p>Silently skipping either is what let a wrong-prefix or stale model publish clean and
+     * then behave differently at runtime, so the author gets the element id and the namespace
+     * that was expected instead of no signal at all.
+     */
+    private static void checkVocabularyNamespaces(String key, Element element) {
         NamedNodeMap attributes = element.getAttributes();
         for (int i = 0; i < attributes.getLength(); i++) {
             Node attribute = attributes.item(i);
-            if (localName.equals(attribute.getLocalName()) || localName.equals(attribute.getNodeName())) {
-                return attribute.getNodeValue();
+            String namespace = attribute.getNamespaceURI();
+            if (XMLConstants.XMLNS_ATTRIBUTE_NS_URI.equals(namespace)) continue;
+            String local = attribute.getLocalName();
+            if (local == null) continue;
+            String replacement = RETIRED.get(local);
+            if (replacement != null) {
+                throw invalid(key, "BPMN element '" + elementId(element) + "' uses retired attribute '"
+                        + local + "'; use '" + replacement + "' in namespace "
+                        + VOCABULARY.get(replacement));
+            }
+            String expected = VOCABULARY.get(local);
+            if (expected != null && !expected.equals(namespace)) {
+                throw invalid(key, "BPMN element '" + elementId(element) + "' declares '" + local
+                        + "' in namespace " + (namespace == null ? "(none)" : namespace)
+                        + "; expected " + expected);
             }
         }
-        return null;
+    }
+
+    private static String elementId(Element element) {
+        String id = attribute(element, "id");
+        return id == null || id.isBlank() ? element.getLocalName() : id;
     }
 
     private static String attribute(Element element, String name) {
