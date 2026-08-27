@@ -402,6 +402,11 @@ Schema source of truth: [`db-design.sql`](../db-design.sql), executed by an appl
 changeset and **never re-typed**. PoC-only additions go in `cm-poc-additions.xml`; an applied
 changeset is never edited.
 
+Treat changelog files as append-only once a changeset may have run in a developer, CI or shared
+environment. New corrections are added as new changesets at the end of the relevant file with a
+short rationale comment. Existing changesets are not moved merely to group related columns or tables
+together, because the changelog is also the execution timeline.
+
 **Access pattern:** Spring `JdbcClient`, no ORM. One repository per aggregate.
 
 ### 9.1 Tables with a code path
