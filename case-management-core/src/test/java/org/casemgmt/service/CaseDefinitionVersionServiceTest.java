@@ -180,7 +180,10 @@ class CaseDefinitionVersionServiceTest {
 
     private static CaseDefinitionRelease release(String id, ReleaseKind kind, String content,
                                                   String digestSeed, String mediaType) {
+        // Binding is only legal against releases that reached ACTIVE, so these fixtures say so
+        // explicitly rather than relying on a factory that used to assume it.
         return CaseDefinitionRelease.stored(id, "sample-case", "t1", kind, mediaType,
-                content.getBytes(StandardCharsets.UTF_8), digestSeed.repeat(64), "alice");
+                content.getBytes(StandardCharsets.UTF_8), digestSeed.repeat(64),
+                org.casemgmt.release.ReleaseStatus.ACTIVE, null, null, "alice");
     }
 }

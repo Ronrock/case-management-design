@@ -41,7 +41,8 @@ class CaseDefinitionReleaseServiceTest {
         byte[] content = "{\"type\":\"object\"}".getBytes(StandardCharsets.UTF_8);
         CaseDefinitionRelease existing = CaseDefinitionRelease.stored(
                 "contract:existing", "sample-case", "t1", ReleaseKind.CONTRACT,
-                "application/schema+json", content, "a".repeat(64), "alice");
+                "application/schema+json", content, "a".repeat(64),
+                org.casemgmt.release.ReleaseStatus.ACTIVE, null, null, "alice");
         CaseDefinitionReleaseRepository repository = mock(CaseDefinitionReleaseRepository.class);
         when(repository.findByDigest(eq("t1"), eq("sample-case"),
                 eq(ReleaseKind.CONTRACT), any()))
