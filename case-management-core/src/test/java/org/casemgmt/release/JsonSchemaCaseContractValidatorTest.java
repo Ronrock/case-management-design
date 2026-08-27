@@ -249,7 +249,7 @@ class JsonSchemaCaseContractValidatorTest {
     @ParameterizedTest(name = "[{index}] BPMN mode rejects {0}")
     @ValueSource(strings = {
             "\"planItems\":[{\"defKey\":\"intake\",\"type\":\"STAGE\"}]",
-            "\"sentries\":[{\"id\":\"s1\",\"onPart\":\"registerComplaint\"}]",
+            "\"sentries\":[{\"id\":\"s1\",\"onPart\":\"sampleTask\"}]",
             "\"entryCriteria\":[\"${items.intake.state == 'COMPLETED'}\"]",
             "\"exitCriteria\":[\"${case.state == 'CLOSED'}\"]",
             "\"taskActivation\":{\"review\":\"${amount > 100}\"}",
@@ -278,13 +278,13 @@ class JsonSchemaCaseContractValidatorTest {
         ValidatedCaseContract contract = validate("""
                 {
                   "key": "sample-case",
-                  "name": "Complaint Handling",
+                  "name": "Sample Handling",
                   "tenantId": "t1",
-                  "slaPolicyId": "sla-complaint",
+                  "slaPolicyId": "sla-sample",
                   "roles": ["owner", "handler"],
                   "attachmentCategories": ["evidence"],
                   "forms": {
-                    "registerForm": {
+                    "sampleForm": {
                       "type": "object",
                       "required": ["channel"],
                       "properties": {"channel": {"type": "string", "ui:widget": "textarea"}}
@@ -292,16 +292,16 @@ class JsonSchemaCaseContractValidatorTest {
                   },
                   "planItems": [
                     {"defKey": "intake", "type": "STAGE", "name": "Intake", "sortOrder": 10},
-                    {"defKey": "registerComplaint", "type": "HUMAN_TASK", "required": true,
-                     "parentStageKey": "intake", "formKey": "registerForm",
+                    {"defKey": "sampleTask", "type": "HUMAN_TASK", "required": true,
+                     "parentStageKey": "intake", "formKey": "sampleForm",
                      "candidateGroups": ["intake"],
                      "entryCriteria": ["${items.intake.state == 'ACTIVE'}"], "sortOrder": 20}
                   ]
                 }""");
 
         assertThat(contract.orchestrationMode()).isEqualTo(OrchestrationMode.PLAN_MODEL);
-        assertThat(contract.forms()).containsOnlyKeys("registerForm");
-        assertThat(contract.forms().get("registerForm").schema())
+        assertThat(contract.forms()).containsOnlyKeys("sampleForm");
+        assertThat(contract.forms().get("sampleForm").schema())
                 .containsEntry("type", "object");
         assertThat(contract.roles()).containsExactlyInAnyOrder("owner", "handler");
     }
