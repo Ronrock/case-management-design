@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The full Java reactor. Integration tests start Oracle and Operaton through Testcontainers,
+  # so this job needs the Docker daemon that ubuntu-latest already provides.
+  java:
+    name: Java reactor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+      - name: Build and test
+        run: ./mvnw --batch-mode clean install
+
+  # The published modeling vocabulary. This is a required check in its own right: a template
+  # that binds the wrong namespace produces models the validator silently ignores, and nothing
+  # in the Java reactor reads the template files.
+  modeler-templates:
+    name: Modeler templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: modeler-templates/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: modeler-templates
+      - name: Test
+        run: npm test
+        working-directory: modeler-templates
+
+  web-components:
+    name: Web components
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: case-management-web-components/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: case-management-web-components
+      - name: Build
+        run: npm run build
+        working-directory: case-management-web-components
+      - name: Test
+        run: npm test
+        working-directory: case-management-web-components
