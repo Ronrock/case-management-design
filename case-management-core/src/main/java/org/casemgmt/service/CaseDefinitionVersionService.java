@@ -7,6 +7,9 @@ import org.casemgmt.release.CaseDefinitionVersionBinding;
 import org.casemgmt.release.ReleaseKind;
 import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.release.BpmnReleaseValidator;
+import org.casemgmt.release.CaseContractValidator;
+import org.casemgmt.release.JsonSchemaCaseContractValidator;
+import org.casemgmt.release.ValidatedCaseContract;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.JsonCodec;
@@ -21,13 +24,22 @@ public class CaseDefinitionVersionService {
     private final CaseDefinitionReleaseRepository releases;
     private final CaseDefinitionVersionBindingRepository bindings;
     private final CaseDefinitionService definitions;
+    private final CaseContractValidator contracts;
 
     public CaseDefinitionVersionService(CaseDefinitionReleaseRepository releases,
                                         CaseDefinitionVersionBindingRepository bindings,
                                         CaseDefinitionService definitions) {
+        this(releases, bindings, definitions, new JsonSchemaCaseContractValidator());
+    }
+
+    public CaseDefinitionVersionService(CaseDefinitionReleaseRepository releases,
+                                        CaseDefinitionVersionBindingRepository bindings,
+                                        CaseDefinitionService definitions,
+                                        CaseContractValidator contracts) {
         this.releases = releases;
         this.bindings = bindings;
         this.definitions = definitions;
+        this.contracts = contracts;
     }
 
     @Transactional
@@ -51,46 +63,53 @@ public class CaseDefinitionVersionService {
         return binding;
     }
 
-    @SuppressWarnings("unchecked")
-    private static void validateBoundArtifacts(String key, CaseDefinitionRelease orchestration,
-                                               CaseDefinitionRelease contractRelease,
-                                               CaseDefinitionRelease presentationRelease) {
+    /**
+     * Validates the contract before anything is deployed or bound, then cross-checks the three
+     * artifacts against each other.
+     *
+     * <p>Schema validation comes first deliberately. A binding is the point where a release
+     * becomes selectable, so a contract that would fail at runtime has to fail here — before
+     * {@code deployBpmn} runs and before a binding row exists. Cross-references then read the
+     * typed {@link ValidatedCaseContract} rather than re-deriving meaning from
+     * {@code Map<String,Object>}: the shape is already guaranteed, so what remains is genuinely
+     * about whether two artifacts agree.
+     */
+    private void validateBoundArtifacts(String key, CaseDefinitionRelease orchestration,
+                                        CaseDefinitionRelease contractRelease,
+                                        CaseDefinitionRelease presentationRelease) {
+        requireDeclaredOrchestrationMode(key, contractRelease);
+        ValidatedCaseContract contract = contracts.validate(key, contractRelease.content());
+
         BpmnReleaseValidator.Index orchestrationIndex = BpmnReleaseValidator.validate(key,
                 orchestration.content(), orchestration.mediaType());
-        Map<String, Object> contract = JsonCodec.toMap(new String(contractRelease.content(),
-                StandardCharsets.UTF_8));
         Map<String, Object> presentation = JsonCodec.toMap(new String(presentationRelease.content(),
                 StandardCharsets.UTF_8));
 
-        if (!key.equals(text(contract.get("key")))) {
-            throw invalid(key, "Contract key must equal case-definition key '" + key + "'");
-        }
-
-        Set<String> forms = keys(contract.get("forms"));
+        Set<String> forms = contract.forms().keySet();
         for (String formRef : orchestrationIndex.formRefs()) {
             if (!dynamic(formRef) && !forms.contains(formRef)) {
                 throw invalid(key, "BPMN user task references unknown contract form '" + formRef + "'");
             }
         }
-        Set<String> candidateGroups = new LinkedHashSet<>(strings(contract.get("candidateGroups")));
+        Set<String> candidateGroups = contract.candidateGroups();
         for (String candidateGroup : orchestrationIndex.candidateGroups()) {
             if (!candidateGroups.contains(candidateGroup)) {
                 throw invalid(key, "BPMN user task references undeclared candidate group '"
                         + candidateGroup + "'");
             }
         }
-        Set<String> slaBindings = keys(contract.get("slaBindings"));
+        Set<String> slaTargets = contract.slaTargetIds();
         for (String slaRef : orchestrationIndex.slaRefs()) {
-            if (!dynamic(slaRef) && !slaBindings.contains(slaRef)) {
+            if (!dynamic(slaRef) && !slaTargets.contains(slaRef)) {
                 throw invalid(key, "BPMN element references unknown SLA binding '" + slaRef + "'");
             }
         }
-        validateAdHocActions(key, contract, forms, candidateGroups);
-        Set<String> fields = catalogIds(contract.getOrDefault("fields", contract.get("fieldCatalog")));
+        validateAdHocActions(key, contract);
+        Set<String> fields = contract.fields().keySet();
         Set<String> actions = new LinkedHashSet<>(Set.of("update", "cancel", "close", "claim",
                 "complete", "comment", "add-document", "remove-document", "start-process"));
-        actions.addAll(actionIds(contract.get("adHocActions")));
-        Set<String> searchProfiles = keys(contract.get("searchProfiles"));
+        contract.adHocActions().forEach(action -> actions.add(action.id()));
+        Set<String> searchProfiles = contract.searchProfileIds();
 
         Object rawSections = presentation.get("sections");
         if (!(rawSections instanceof List<?> sections)) {
@@ -120,96 +139,55 @@ public class CaseDefinitionVersionService {
         }
     }
 
-    private static void validateAdHocActions(String key, Map<String, Object> contract,
-                                             Set<String> forms, Set<String> candidateGroups) {
-        Set<String> roles = new LinkedHashSet<>(strings(contract.get("roles")));
-        for (Map<String, Object> action : actionDocuments(contract.get("adHocActions"))) {
-            String id = text(action.get("id"));
-            String type = text(action.get("type"));
-            if (id == null || type == null || strings(action.get("roles")).isEmpty()) {
-                throw invalid(key, "Every ad-hoc action requires id, type, and at least one role");
-            }
-            for (String role : strings(action.get("roles"))) {
-                if (!roles.contains(role)) {
-                    throw invalid(key, "Ad-hoc action '" + id + "' references undeclared role '"
-                            + role + "'");
+    /**
+     * Cross-checks each declared action against the rest of the contract.
+     *
+     * <p>Shape is no longer re-litigated here. The schema has already established that every
+     * action has an id, a type and at least one role, and that a {@code PROCESS} carries a
+     * process key and a {@code MESSAGE} a message name — the sealed variants make that a type
+     * guarantee rather than a switch with a {@code default} that throws. What is left is the
+     * only question this layer can answer: whether the names an action refers to are ones the
+     * contract itself declares.
+     */
+    private static void validateAdHocActions(String key, ValidatedCaseContract contract) {
+        for (ValidatedCaseContract.AdHocActionDefinition action : contract.adHocActions()) {
+            for (String role : action.roles()) {
+                if (!contract.roles().contains(role)) {
+                    throw invalid(key, "Ad-hoc action '" + action.id()
+                            + "' references undeclared role '" + role + "'");
                 }
             }
-            String form = text(action.getOrDefault("formRef", action.get("formKey")));
-            if (form != null && !forms.contains(form)) {
-                throw invalid(key, "Ad-hoc action '" + id + "' references unknown form '" + form + "'");
+            String form = action.formRef();
+            if (form != null && !contract.forms().containsKey(form)) {
+                throw invalid(key, "Ad-hoc action '" + action.id()
+                        + "' references unknown form '" + form + "'");
             }
-            for (String group : strings(action.get("candidateGroups"))) {
-                if (!candidateGroups.contains(group)) {
-                    throw invalid(key, "Ad-hoc action '" + id
+            for (String group : action.candidateGroups()) {
+                if (!contract.candidateGroups().contains(group)) {
+                    throw invalid(key, "Ad-hoc action '" + action.id()
                             + "' references undeclared candidate group '" + group + "'");
                 }
             }
-            switch (type.toUpperCase(Locale.ROOT)) {
-                case "TASK" -> { }
-                case "PROCESS" -> requireActionField(key, id, action, "processDefinitionKey");
-                case "MESSAGE" -> requireActionField(key, id, action, "messageName");
-                default -> throw invalid(key, "Ad-hoc action '" + id
-                        + "' has unsupported type '" + type + "'");
-            }
         }
     }
 
-    private static void requireActionField(String key, String id, Map<String, Object> action,
-                                           String field) {
-        if (text(action.get(field)) == null) {
-            throw invalid(key, "Ad-hoc action '" + id + "' requires " + field);
+    /**
+     * A bundle reaching a binding must say which side owns the process.
+     *
+     * <p>{@link JsonSchemaCaseContractValidator} deliberately treats an absent mode as the legacy
+     * {@code PLAN_MODEL} default, so definitions published before BPMN-first keep loading
+     * unchanged. Binding is new publication, and design §9.9 requires the mode to be declared
+     * rather than inferred from which properties happen to be present — so the requirement is
+     * enforced at this boundary rather than in the validator.
+     */
+    private static void requireDeclaredOrchestrationMode(String key,
+                                                         CaseDefinitionRelease contractRelease) {
+        Map<String, Object> raw = JsonCodec.toMap(
+                new String(contractRelease.content(), StandardCharsets.UTF_8));
+        if (text(raw.get("orchestrationMode")) == null) {
+            throw invalid(key, "Contract must declare orchestrationMode explicitly; "
+                    + "the platform does not infer it from which properties are present");
         }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static List<Map<String, Object>> actionDocuments(Object raw) {
-        if (raw instanceof List<?> list) {
-            return list.stream().filter(Map.class::isInstance)
-                    .map(item -> (Map<String, Object>) item).toList();
-        }
-        if (raw instanceof Map<?, ?> map) {
-            List<Map<String, Object>> result = new ArrayList<>();
-            map.forEach((id, value) -> {
-                if (value instanceof Map<?, ?> document) {
-                    Map<String, Object> copy = new LinkedHashMap<>((Map<String, Object>) document);
-                    copy.putIfAbsent("id", String.valueOf(id));
-                    result.add(copy);
-                }
-            });
-            return result;
-        }
-        return List.of();
-    }
-
-    private static Set<String> catalogIds(Object raw) {
-        if (raw instanceof Map<?, ?> map) return map.keySet().stream().map(String::valueOf)
-                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
-        if (raw instanceof List<?> list) {
-            Set<String> ids = new LinkedHashSet<>();
-            for (Object item : list) {
-                if (item instanceof String text) ids.add(text);
-                else if (item instanceof Map<?, ?> map && map.get("id") != null) {
-                    ids.add(String.valueOf(map.get("id")));
-                }
-            }
-            return ids;
-        }
-        return Set.of();
-    }
-
-    private static Set<String> actionIds(Object raw) {
-        if (raw instanceof Map<?, ?> map) return map.keySet().stream().map(String::valueOf)
-                .collect(java.util.stream.Collectors.toSet());
-        if (raw instanceof List<?> list) return list.stream().filter(Map.class::isInstance)
-                .map(Map.class::cast).map(value -> value.get("id")).filter(Objects::nonNull)
-                .map(String::valueOf).collect(java.util.stream.Collectors.toSet());
-        return Set.of();
-    }
-
-    private static Set<String> keys(Object raw) {
-        return raw instanceof Map<?, ?> map ? map.keySet().stream().map(String::valueOf)
-                .collect(java.util.stream.Collectors.toSet()) : Set.of();
     }
 
     private static List<String> strings(Object raw) {
