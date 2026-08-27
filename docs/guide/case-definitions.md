@@ -83,6 +83,21 @@ For each human step, use a BPMN user task:
 - `name` is shown to users.
 - `operaton:formKey` must match a form in `contract.json`.
 - `operaton:candidateGroups` must use groups declared by the contract and identity provider.
+- `casemgmt:slaTargetId` is optional and must match an entry in the contract's `slaBindings`.
+
+### Extension namespaces
+
+The prefix you bind is your own choice, but the namespace URI is not — publication reads each
+property from exactly one namespace and rejects a recognised name found anywhere else:
+
+| Property | Namespace URI |
+|---|---|
+| `formKey`, `candidateGroups`, `decisionRef` | `http://operaton.org/schema/1.0/bpmn` |
+| `stage`, `milestoneId`, `slaTargetId` | `https://casemgmt.org/bpmn` |
+
+A misspelled prefix therefore fails at publication with the element ID and the expected
+namespace, rather than being silently ignored and diverging once a live case reaches the element.
+`slaRef` was the earlier spelling of `slaTargetId` and is rejected outright.
 
 See Operaton's [user-task reference](https://docs.operaton.org/docs/documentation/reference/bpmn20/tasks/user-task/)
 for the underlying BPMN extension attributes. In this project, the form key points to a contract

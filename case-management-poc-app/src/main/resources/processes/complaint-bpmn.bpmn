@@ -31,7 +31,7 @@
     <bpmn:intermediateThrowEvent id="decided" name="Decided" casemgmt:milestoneId="decided"/>
     <bpmn:sequenceFlow id="to-close" sourceRef="decided" targetRef="close-complaint"/>
     <bpmn:userTask id="close-complaint" name="Close complaint" operaton:formKey="closeForm"
-                   operaton:candidateGroups="handlers"/>
+                   operaton:candidateGroups="handlers" casemgmt:slaTargetId="resolution"/>
     <bpmn:sequenceFlow id="to-end" sourceRef="close-complaint" targetRef="end"/>
     <bpmn:endEvent id="end"/>
   </bpmn:process>

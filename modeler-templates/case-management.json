@@ -16,8 +16,9 @@
     "version": 1,
     "appliesTo": ["bpmn:UserTask"],
     "properties": [
-      { "label": "Contract form", "type": "String", "binding": { "type": "property", "name": "camunda:formKey" } },
-      { "label": "Candidate groups", "type": "String", "binding": { "type": "property", "name": "camunda:candidateGroups" } }
+      { "label": "Contract form", "type": "String", "binding": { "type": "property", "name": "operaton:formKey" } },
+      { "label": "Candidate groups", "type": "String", "binding": { "type": "property", "name": "operaton:candidateGroups" } },
+      { "label": "SLA target", "type": "String", "binding": { "type": "property", "name": "casemgmt:slaTargetId" } }
     ]
   },
   {

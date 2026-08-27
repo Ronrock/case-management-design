@@ -1,43 +1,186 @@
 {
   "key": "complaint-bpmn",
+  "orchestrationMode": "BPMN",
   "name": "Complaint Handling (BPMN)",
   "version": "1.0",
-  "roles": ["owner", "handler", "reviewer", "watcher"],
-  "candidateGroups": ["intake", "handlers", "reviewers"],
+  "roles": [
+    "owner",
+    "handler",
+    "reviewer",
+    "watcher"
+  ],
+  "candidateGroups": [
+    "intake",
+    "handlers",
+    "reviewers"
+  ],
   "fields": {
-    "channel": {"schema": {"type": "string", "enum": ["web", "phone", "letter", "email"]}},
-    "summary": {"schema": {"type": "string"}},
-    "amount": {"schema": {"type": "integer", "minimum": 0}},
-    "outcome": {"schema": {"type": "string"}},
-    "rationale": {"schema": {"type": "string"}}
+    "channel": {
+      "schema": {
+        "type": "string",
+        "enum": [
+          "web",
+          "phone",
+          "letter",
+          "email"
+        ]
+      }
+    },
+    "summary": {
+      "schema": {
+        "type": "string"
+      }
+    },
+    "amount": {
+      "schema": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "outcome": {
+      "schema": {
+        "type": "string"
+      }
+    },
+    "rationale": {
+      "schema": {
+        "type": "string"
+      }
+    }
   },
   "forms": {
     "registerForm": {
-      "schema": {"type": "object", "required": ["channel", "summary"], "properties": {
-        "channel": {"type": "string", "enum": ["web", "phone", "letter", "email"]},
-        "summary": {"type": "string"}, "amount": {"type": "integer", "minimum": 0}}},
-      "uiSchema": {"summary": {"widget": "textarea"}}
+      "schema": {
+        "type": "object",
+        "required": [
+          "channel",
+          "summary"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "enum": [
+              "web",
+              "phone",
+              "letter",
+              "email"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "uiSchema": {
+        "summary": {
+          "widget": "textarea"
+        }
+      }
     },
     "assessForm": {
-      "schema": {"type": "object", "required": ["outcome"], "properties": {
-        "outcome": {"type": "string", "enum": ["upheld", "rejected", "needs-investigation"]},
-        "rationale": {"type": "string"}}},
-      "uiSchema": {"rationale": {"widget": "textarea"}}
+      "schema": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "upheld",
+              "rejected",
+              "needs-investigation"
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          }
+        }
+      },
+      "uiSchema": {
+        "rationale": {
+          "widget": "textarea"
+        }
+      }
     },
     "investigateForm": {
-      "schema": {"type": "object", "required": ["finding"], "properties": {
-        "aspect": {"type": "string"}, "finding": {"type": "string"}}},
-      "uiSchema": {"finding": {"widget": "textarea"}}
+      "schema": {
+        "type": "object",
+        "required": [
+          "finding"
+        ],
+        "properties": {
+          "aspect": {
+            "type": "string"
+          },
+          "finding": {
+            "type": "string"
+          }
+        }
+      },
+      "uiSchema": {
+        "finding": {
+          "widget": "textarea"
+        }
+      }
     },
     "closeForm": {
-      "schema": {"type": "object", "required": ["outcome"], "properties": {
-        "outcome": {"type": "string", "enum": ["resolved", "withdrawn", "rejected"]}}}
+      "schema": {
+        "type": "object",
+        "required": [
+          "outcome"
+        ],
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "resolved",
+              "withdrawn",
+              "rejected"
+            ]
+          }
+        }
+      }
     }
   },
-  "searchProfiles": {"complaints": {"scopes": ["cases", "documents"]}},
-  "adHocActions": [{
-    "id": "investigate-aspect", "type": "TASK", "name": "Investigate aspect",
-    "roles": ["handler"], "formRef": "investigateForm", "candidateGroups": ["handlers"],
-    "availabilityExpression": "${case.state == 'ACTIVE'}"
-  }]
+  "searchProfiles": {
+    "complaints": {
+      "scopes": [
+        "cases",
+        "documents"
+      ]
+    }
+  },
+  "adHocActions": [
+    {
+      "id": "investigate-aspect",
+      "type": "TASK",
+      "name": "Investigate aspect",
+      "roles": [
+        "handler"
+      ],
+      "formRef": "investigateForm",
+      "candidateGroups": [
+        "handlers"
+      ],
+      "availabilityExpression": "${case.state == 'ACTIVE'}"
+    }
+  ],
+  "slaBindings": {
+    "resolution": {
+      "name": "Complaint resolution",
+      "scope": "CASE",
+      "calendarId": "nl-business",
+      "duration": "P10D",
+      "startAnchor": "CASE_CREATED",
+      "meetAnchor": "CASE_CLOSED",
+      "warnings": [
+        "P8D"
+      ]
+    }
+  }
 }
