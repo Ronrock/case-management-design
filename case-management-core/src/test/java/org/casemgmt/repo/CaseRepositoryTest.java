@@ -4,6 +4,8 @@ import org.casemgmt.OracleTestBase;
 import org.casemgmt.domain.*;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.error.OptimisticLockException;
+import org.casemgmt.service.CanonicalPatch;
+import org.casemgmt.service.CaseDataMappingService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -69,6 +71,97 @@ class CaseRepositoryTest extends OracleTestBase {
         assertThatThrownBy(() -> repo.update(loaded.withState(CaseState.CANCELLED), 0L))
                 .isInstanceOf(OptimisticLockException.class)
                 .hasMessageContaining("eng-a:3");
+    }
+
+    @Test
+    void atomicallyAppliesCanonicalChangesAgainstVersionAndExpectedValues() {
+        repo.insert(newCase("eng-a:mapping"));
+        CanonicalPatch patch = new CanonicalPatch("eng-a:mapping", "reviewTask", 0L, List.of(
+                new CanonicalPatch.FieldChange("/mappings/0", "decisionVar", "decision",
+                        CanonicalPatch.WriteMode.REPLACE, false, null, "approved", false),
+                new CanonicalPatch.FieldChange("/mappings/1", "amountVar", "amount",
+                        CanonicalPatch.WriteMode.REPLACE, true, 250, 300, false)));
+
+        CaseDataMappingService.PatchResult result = repo.applyCanonicalPatch(patch);
+
+        assertThat(result.status()).isEqualTo(CaseDataMappingService.PatchStatus.APPLIED);
+        assertThat(result.caseVersion()).isEqualTo(1L);
+        assertThat(result.conflict()).isNull();
+        assertThat(repo.require("eng-a:mapping").variables())
+                .containsEntry("decision", "approved")
+                .containsEntry("amount", 300)
+                .containsEntry("channel", "web");
+    }
+
+    @Test
+    void canonicalPatchConflictReportsVersionAndChangedExpectedFieldsWithoutPartialWrites() {
+        repo.insert(newCase("eng-a:mapping-conflict"));
+        CanonicalPatch patch = new CanonicalPatch("eng-a:mapping-conflict", "reviewTask", 0L,
+                List.of(
+                        new CanonicalPatch.FieldChange("/mappings/0", "channelVar", "channel",
+                                CanonicalPatch.WriteMode.REPLACE, true, "phone", "letter", false),
+                        new CanonicalPatch.FieldChange("/mappings/1", "amountVar", "amount",
+                                CanonicalPatch.WriteMode.REPLACE, true, 250, 300, false)));
+
+        CaseDataMappingService.PatchResult result = repo.applyCanonicalPatch(patch);
+
+        assertThat(result.status()).isEqualTo(CaseDataMappingService.PatchStatus.CONFLICT);
+        assertThat(result.caseVersion()).isZero();
+        assertThat(result.conflict().expectedCaseVersion()).isZero();
+        assertThat(result.conflict().actualCaseVersion()).isZero();
+        assertThat(result.conflict().fields()).containsExactly(
+                new CaseDataMappingService.FieldConflict("channel", "phone", "web", false));
+        assertThat(repo.require("eng-a:mapping-conflict").variables())
+                .containsEntry("amount", 250)
+                .containsEntry("channel", "web")
+                .doesNotContainKey("decision");
+        assertThat(repo.require("eng-a:mapping-conflict").version()).isZero();
+    }
+
+    @Test
+    void canonicalPatchVersionConflictReturnsCurrentMetadataAndRedactsSensitiveFields() {
+        repo.insert(newCase("eng-a:mapping-stale"));
+        CaseInstance current = repo.require("eng-a:mapping-stale");
+        repo.update(current.withVariables(Map.of("amount", 250, "channel", "mobile",
+                "secret", "current-secret")), 0L);
+        CanonicalPatch stale = new CanonicalPatch("eng-a:mapping-stale", "reviewTask", 0L,
+                List.of(new CanonicalPatch.FieldChange("/mappings/0", "secretVar", "secret",
+                        CanonicalPatch.WriteMode.REPLACE, true, "expected-secret", "new-secret", true)));
+
+        CaseDataMappingService.PatchResult result = repo.applyCanonicalPatch(stale);
+
+        assertThat(result.status()).isEqualTo(CaseDataMappingService.PatchStatus.CONFLICT);
+        assertThat(result.caseVersion()).isEqualTo(1L);
+        assertThat(result.conflict().expectedCaseVersion()).isZero();
+        assertThat(result.conflict().actualCaseVersion()).isEqualTo(1L);
+        assertThat(result.conflict().fields()).containsExactly(
+                new CaseDataMappingService.FieldConflict("secret", CanonicalPatch.REDACTED,
+                        CanonicalPatch.REDACTED, true));
+        assertThat(result.toString()).doesNotContain("expected-secret", "current-secret", "new-secret");
+        assertThat(repo.require("eng-a:mapping-stale").variables().get("secret"))
+                .isEqualTo("current-secret");
+    }
+
+    @Test
+    void emptyCanonicalPatchIsANoOpAndObjectMergePreservesExistingMembers() {
+        repo.insert(newCase("eng-a:mapping-merge").withVariables(Map.of(
+                "amount", 250, "channel", "web",
+                "profile", Map.of("name", "Alice", "language", "nl"))));
+
+        CaseDataMappingService.PatchResult noChanges = repo.applyCanonicalPatch(
+                new CanonicalPatch("eng-a:mapping-merge", "reviewTask", 0L, List.of()));
+        CaseDataMappingService.PatchResult merged = repo.applyCanonicalPatch(new CanonicalPatch(
+                "eng-a:mapping-merge", "reviewTask", 0L, List.of(
+                new CanonicalPatch.FieldChange("/mappings/0", "profileVar", "profile",
+                        CanonicalPatch.WriteMode.MERGE, true,
+                        Map.of("name", "Alice", "language", "nl"),
+                        Map.of("language", "en", "verified", true), false))));
+
+        assertThat(noChanges.status()).isEqualTo(CaseDataMappingService.PatchStatus.NO_CHANGES);
+        assertThat(noChanges.caseVersion()).isZero();
+        assertThat(merged.status()).isEqualTo(CaseDataMappingService.PatchStatus.APPLIED);
+        assertThat(repo.require("eng-a:mapping-merge").variables().get("profile"))
+                .isEqualTo(Map.of("name", "Alice", "language", "en", "verified", true));
     }
 
     @Test

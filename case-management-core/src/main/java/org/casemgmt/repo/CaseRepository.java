@@ -3,12 +3,17 @@ package org.casemgmt.repo;
 import org.casemgmt.domain.*;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.error.OptimisticLockException;
+import org.casemgmt.service.CanonicalPatch;
+import org.casemgmt.service.CaseDataMappingService;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 
 public class CaseRepository {
@@ -145,6 +150,109 @@ public class CaseRepository {
                 c.variables(), expectedVersion + 1, c.createdAt(), updatedAt, c.closedAt(),
                 c.rootProcessInstanceId(), c.projectionStatus(), c.lastEngineUpdateAt(),
                 c.lastProjectedAt());
+    }
+
+    /**
+     * Atomically applies canonical fields only when both their captured values and the case
+     * version still match. This method joins the caller's transaction and never opens one.
+     */
+    public CaseDataMappingService.PatchResult applyCanonicalPatch(CanonicalPatch patch) {
+        if (patch == null) {
+            throw new IllegalArgumentException("patch must not be null");
+        }
+        CaseInstance current = require(patch.caseId());
+        if (patch.changes().isEmpty()) {
+            return CaseDataMappingService.PatchResult.noChanges(current.version());
+        }
+
+        List<CaseDataMappingService.FieldConflict> valueConflicts = conflicts(patch, current);
+        if (current.version() != patch.expectedCaseVersion() || !valueConflicts.isEmpty()) {
+            return conflict(patch, current, valueConflicts);
+        }
+
+        Map<String, Object> variables = new LinkedHashMap<>(current.variables());
+        for (CanonicalPatch.FieldChange change : patch.changes()) {
+            variables.put(change.fieldId(), apply(change, variables.get(change.fieldId())));
+        }
+        OffsetDateTime updatedAt = OffsetDateTime.now();
+        int rows = jdbc.sql("""
+                UPDATE CM_CASE
+                SET VARIABLES_JSON_ = :variables, UPDATED_AT_ = :updatedAt,
+                    VERSION_ = VERSION_ + 1
+                WHERE ID_ = :id AND VERSION_ = :expectedVersion""")
+                .param("variables", JsonCodec.toJson(variables))
+                .param("updatedAt", updatedAt)
+                .param("id", patch.caseId())
+                .param("expectedVersion", patch.expectedCaseVersion())
+                .update();
+        if (rows == 1) {
+            return CaseDataMappingService.PatchResult.applied(patch.expectedCaseVersion() + 1);
+        }
+
+        CaseInstance raced = require(patch.caseId());
+        return conflict(patch, raced, conflicts(patch, raced));
+    }
+
+    private static Object apply(CanonicalPatch.FieldChange change, Object currentValue) {
+        if (change.writeMode() == CanonicalPatch.WriteMode.REPLACE) {
+            return change.value();
+        }
+        if (!(currentValue instanceof Map<?, ?> current)) {
+            throw new IllegalArgumentException(change.mappingPath()
+                    + "/target cannot MERGE into a non-object canonical value");
+        }
+        Map<String, Object> merged = new LinkedHashMap<>();
+        current.forEach((key, value) -> merged.put(String.valueOf(key), value));
+        ((Map<?, ?>) change.value()).forEach((key, value) -> merged.put(String.valueOf(key), value));
+        return merged;
+    }
+
+    private static List<CaseDataMappingService.FieldConflict> conflicts(
+            CanonicalPatch patch, CaseInstance current) {
+        List<CaseDataMappingService.FieldConflict> conflicts = new ArrayList<>();
+        for (CanonicalPatch.FieldChange change : patch.changes()) {
+            boolean present = current.variables().containsKey(change.fieldId());
+            Object actual = current.variables().get(change.fieldId());
+            if (present != change.expectedPresent() || !jsonEquals(actual, change.expectedValue())) {
+                conflicts.add(new CaseDataMappingService.FieldConflict(change.fieldId(),
+                        change.sensitive() ? CanonicalPatch.REDACTED : change.expectedValue(),
+                        change.sensitive() ? CanonicalPatch.REDACTED : actual,
+                        change.sensitive()));
+            }
+        }
+        return List.copyOf(conflicts);
+    }
+
+    private static boolean jsonEquals(Object left, Object right) {
+        if (left instanceof Number leftNumber && right instanceof Number rightNumber) {
+            try {
+                return new BigDecimal(leftNumber.toString())
+                        .compareTo(new BigDecimal(rightNumber.toString())) == 0;
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+        if (left instanceof Map<?, ?> leftMap && right instanceof Map<?, ?> rightMap) {
+            if (!leftMap.keySet().equals(rightMap.keySet())) return false;
+            return leftMap.entrySet().stream().allMatch(entry ->
+                    jsonEquals(entry.getValue(), rightMap.get(entry.getKey())));
+        }
+        if (left instanceof List<?> leftList && right instanceof List<?> rightList) {
+            if (leftList.size() != rightList.size()) return false;
+            for (int index = 0; index < leftList.size(); index++) {
+                if (!jsonEquals(leftList.get(index), rightList.get(index))) return false;
+            }
+            return true;
+        }
+        return java.util.Objects.equals(left, right);
+    }
+
+    private static CaseDataMappingService.PatchResult conflict(
+            CanonicalPatch patch, CaseInstance current,
+            List<CaseDataMappingService.FieldConflict> valueConflicts) {
+        return CaseDataMappingService.PatchResult.conflict(current.version(),
+                new CaseDataMappingService.ConflictMetadata(patch.expectedCaseVersion(),
+                        current.version(), valueConflicts));
     }
 
     /**

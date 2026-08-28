@@ -206,11 +206,37 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
                 mode,
                 fields(root),
                 forms(root, mode),
+                mappings(root),
                 slaBindings(root),
                 adHocActions(root),
                 new LinkedHashSet<>(strings(root.get("candidateGroups"))),
                 new LinkedHashSet<>(strings(root.get("roles"))),
                 names(root.get("searchProfiles")));
+    }
+
+    private List<ValidatedCaseContract.MappingDefinition> mappings(JsonNode root) {
+        List<ValidatedCaseContract.MappingDefinition> result = new ArrayList<>();
+        JsonNode mappings = root.get("mappings");
+        if (mappings == null || !mappings.isArray()) {
+            return result;
+        }
+        for (JsonNode node : mappings) {
+            String type = text(node, "type");
+            String writeMode = text(node, "writeMode");
+            result.add(new ValidatedCaseContract.MappingDefinition(
+                    ValidatedCaseContract.MappingDirection.valueOf(text(node, "direction")),
+                    text(node, "source"),
+                    text(node, "target"),
+                    type == null ? null : ValidatedCaseContract.MappingType.valueOf(
+                            type.toUpperCase(java.util.Locale.ROOT)),
+                    writeMode == null ? ValidatedCaseContract.MappingWriteMode.REPLACE
+                            : ValidatedCaseContract.MappingWriteMode.valueOf(writeMode),
+                    node.path("required").asBoolean(false),
+                    text(node, "transformRef"),
+                    strings(node.get("submitRoles")),
+                    objectMap(node.get("extensions"))));
+        }
+        return result;
     }
 
     private Map<String, ValidatedCaseContract.FieldDefinition> fields(JsonNode root) {

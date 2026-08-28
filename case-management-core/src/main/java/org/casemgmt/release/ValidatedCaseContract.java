@@ -26,6 +26,7 @@ public record ValidatedCaseContract(
         OrchestrationMode orchestrationMode,
         Map<String, FieldDefinition> fields,
         Map<String, FormDefinition> forms,
+        List<MappingDefinition> mappings,
         List<SlaBindingDefinition> slaBindings,
         List<AdHocActionDefinition> adHocActions,
         Set<String> candidateGroups,
@@ -35,11 +36,27 @@ public record ValidatedCaseContract(
     public ValidatedCaseContract {
         fields = immutable(fields);
         forms = immutable(forms);
+        mappings = List.copyOf(mappings);
         slaBindings = List.copyOf(slaBindings);
         adHocActions = List.copyOf(adHocActions);
         candidateGroups = immutable(candidateGroups);
         roles = immutable(roles);
         searchProfileIds = immutable(searchProfileIds);
+    }
+
+    /** Source-compatible constructor for callers compiled against the pre-mapping typed shape. */
+    public ValidatedCaseContract(
+            String key,
+            OrchestrationMode orchestrationMode,
+            Map<String, FieldDefinition> fields,
+            Map<String, FormDefinition> forms,
+            List<SlaBindingDefinition> slaBindings,
+            List<AdHocActionDefinition> adHocActions,
+            Set<String> candidateGroups,
+            Set<String> roles,
+            Set<String> searchProfileIds) {
+        this(key, orchestrationMode, fields, forms, List.of(), slaBindings, adHocActions,
+                candidateGroups, roles, searchProfileIds);
     }
 
     /** The ad-hoc action with {@code id}, or {@code null} if the contract declares none. */
@@ -57,6 +74,32 @@ public record ValidatedCaseContract(
 
     /** What a business deadline is measured against. */
     public enum SlaScope { CASE, STAGE, TASK, MILESTONE, OCCURRENCE }
+
+    /** Which side supplies and receives a declared canonical mapping. */
+    public enum MappingDirection { CASE_TO_ENGINE, ENGINE_TO_CASE }
+
+    /** JSON value kind declared by a mapping. */
+    public enum MappingType { STRING, INTEGER, NUMBER, BOOLEAN, OBJECT, ARRAY }
+
+    /** How an engine output is combined with an existing canonical field. */
+    public enum MappingWriteMode { REPLACE, MERGE }
+
+    /** One explicit contract-approved movement between canonical data and engine variables. */
+    public record MappingDefinition(
+            MappingDirection direction,
+            String source,
+            String target,
+            MappingType type,
+            MappingWriteMode writeMode,
+            boolean required,
+            String transformRef,
+            List<String> submitRoles,
+            Map<String, Object> extensions) {
+        public MappingDefinition {
+            submitRoles = List.copyOf(submitRoles);
+            extensions = immutable(extensions);
+        }
+    }
 
     /**
      * A canonical case field. {@code schema} is the author's JSON Schema, kept as data rather

@@ -87,6 +87,19 @@ class JsonSchemaCaseContractValidatorTest {
         assertThat(reviewForm.id()).isEqualTo("reviewForm");
         assertThat(reviewForm.schema()).containsEntry("type", "object");
         assertThat(reviewForm.uiSchema()).isNotNull();
+
+        assertThat(contract.mappings()).singleElement().satisfies(mapping -> {
+            assertThat(mapping.direction())
+                    .isEqualTo(ValidatedCaseContract.MappingDirection.ENGINE_TO_CASE);
+            assertThat(mapping.source()).isEqualTo("outcome");
+            assertThat(mapping.target()).isEqualTo("outcome");
+            assertThat(mapping.type()).isEqualTo(ValidatedCaseContract.MappingType.STRING);
+            assertThat(mapping.writeMode()).isEqualTo(ValidatedCaseContract.MappingWriteMode.REPLACE);
+            assertThat(mapping.required()).isTrue();
+            assertThat(mapping.transformRef()).isEqualTo("normalize-outcome");
+            assertThat(mapping.submitRoles()).containsExactly("handler");
+            assertThat(mapping.extensions()).containsEntry("owner", "case-platform");
+        });
     }
 
     /**
@@ -509,7 +522,10 @@ class JsonSchemaCaseContractValidatorTest {
                     }
                   },
                   "mappings": [
-                    {"direction": "ENGINE_TO_CASE", "source": "outcome", "target": "outcome"}
+                    {"direction": "ENGINE_TO_CASE", "source": "outcome", "target": "outcome",
+                     "type": "string", "writeMode": "REPLACE", "required": true,
+                     "transformRef": "normalize-outcome", "submitRoles": ["handler"],
+                     "extensions": {"owner": "case-platform"}}
                   ],
                   "adHocActions": [
                     {"id": "investigate", "type": "TASK", "name": "Investigate aspect",
