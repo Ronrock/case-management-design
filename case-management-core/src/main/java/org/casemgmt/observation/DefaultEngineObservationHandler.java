@@ -305,7 +305,32 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
         if (incoming.entityRevision() != null && current.entityRevision() != null) {
             return incoming.entityRevision() <= current.entityRevision();
         }
-        return !incoming.engineOccurredAt().isAfter(current.engineOccurredAt());
+        int timeOrder = incoming.engineOccurredAt().compareTo(current.engineOccurredAt());
+        if (timeOrder != 0) {
+            return timeOrder < 0;
+        }
+        String incomingType = incoming.eventType().name();
+        if (incomingType.equals(current.eventType())) {
+            return true;
+        }
+        // Operaton's task timestamps have millisecond precision. Distinct callbacks in one fast
+        // command (notably claim then complete) can therefore carry the same engine time. Accept
+        // a distinct forward event at that instant, while preserving terminal states and
+        // rejecting a delayed create that would reactivate an existing task occurrence.
+        if (incoming instanceof UserTaskObservation) {
+            return "COMPLETED".equals(current.eventType())
+                    || "DELETED".equals(current.eventType())
+                    || incoming.eventType() == UserTaskObservation.EventType.CREATED;
+        }
+        if (incoming instanceof ActivityLifecycleObservation) {
+            return "COMPLETED".equals(current.eventType())
+                    || "CANCELLED".equals(current.eventType());
+        }
+        if (incoming instanceof ProcessObservation) {
+            return "COMPLETED".equals(current.eventType())
+                    || "TERMINATED".equals(current.eventType());
+        }
+        return "CANCELLED".equals(current.eventType());
     }
 
     private void recordApplied(EngineObservation observation, CaseInstance caseInstance,

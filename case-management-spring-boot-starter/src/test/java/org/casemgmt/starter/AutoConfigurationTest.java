@@ -7,6 +7,7 @@ import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.event.WebhookSecretStore;
+import org.casemgmt.observation.EngineObservationHandler;
 import org.casemgmt.repo.IdempotencyRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
@@ -187,6 +188,7 @@ class AutoConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(EmbeddedEngineEventBridge.class);
+                    assertThat(context).hasSingleBean(EngineObservationHandler.class);
                 });
     }
 

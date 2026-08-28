@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             xmlns:operaton="http://operaton.org/schema/1.0/bpmn"
+             xmlns:casemgmt="https://casemgmt.org/bpmn"
+             targetNamespace="https://casemgmt.org/tests">
+  <process id="canonical-lifecycle" name="Canonical lifecycle" isExecutable="true">
+    <startEvent id="start"/>
+    <sequenceFlow id="flow-1" sourceRef="start" targetRef="review"/>
+    <userTask id="review" name="Review complaint"
+              operaton:candidateGroups="handlers"
+              operaton:formKey="reviewForm"/>
+    <sequenceFlow id="flow-2" sourceRef="review" targetRef="assessment"/>
+    <subProcess id="assessment" name="Assessment" casemgmt:stage="true">
+      <startEvent id="assessment-start"/>
+      <sequenceFlow id="assessment-flow" sourceRef="assessment-start" targetRef="assessment-end"/>
+      <endEvent id="assessment-end"/>
+    </subProcess>
+    <sequenceFlow id="flow-3" sourceRef="assessment" targetRef="approved"/>
+    <intermediateThrowEvent id="approved" name="Approved" casemgmt:milestoneId="approved"/>
+    <sequenceFlow id="flow-4" sourceRef="approved" targetRef="end"/>
+    <endEvent id="end"/>
+  </process>
+</definitions>

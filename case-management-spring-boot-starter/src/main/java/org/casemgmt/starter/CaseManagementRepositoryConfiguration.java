@@ -1,6 +1,7 @@
 package org.casemgmt.starter;
 
 import org.casemgmt.repo.AuditRepository;
+import org.casemgmt.repo.AppliedObservationRepository;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
@@ -21,10 +22,6 @@ import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.projection.JdbcCaseProjectionPort;
 import org.casemgmt.projection.ActiveBpmnCaseRepository;
 import org.casemgmt.projection.RemotePollingCheckpointRepository;
-import org.casemgmt.event.CaseEvent;
-import org.casemgmt.event.EventPublisher;
-import org.casemgmt.event.EventTypes;
-import org.casemgmt.domain.CaseIds;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -77,19 +74,13 @@ public class CaseManagementRepositoryConfiguration {
     @Bean public IdempotencyRepository idempotencyRepository(JdbcClient c) { return new IdempotencyRepository(c); }
     @Bean public EngineCommandRepository engineCommandRepository(JdbcClient c) { return new EngineCommandRepository(c); }
     @Bean public SlaRepository slaRepository(JdbcClient c) { return new SlaRepository(c); }
-    @Bean public CaseProjectionPort caseProjectionPort(JdbcClient c, CaseRepository cases,
-                                                       EventPublisher publisher) {
-        return new JdbcCaseProjectionPort(c, (caseId, state, completedAt) -> {
-            var completed = cases.require(caseId);
-            String eventType = "CANCELLED".equals(state)
-                    ? EventTypes.CASE_CANCELLED : EventTypes.CASE_CLOSED;
-            publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(), eventType,
-                    caseId, completed.tenantId(), completedAt,
-                    java.util.Map.of("state", state, "source", "root-process")));
-            publisher.audit(caseId, completed.tenantId(), "engine", "case.complete-root-process",
-                    "Case", caseId, java.util.Map.of("state", "ACTIVE"),
-                    java.util.Map.of("state", state));
-        });
+    @Bean public AppliedObservationRepository appliedObservationRepository(JdbcClient c) {
+        return new AppliedObservationRepository(c);
+    }
+    @Bean public CaseProjectionPort caseProjectionPort(JdbcClient c) {
+        // Root completion is published by DefaultEngineObservationHandler. Keeping the legacy
+        // projection callback active here would emit a second event/audit for the same fact.
+        return new JdbcCaseProjectionPort(c);
     }
     @Bean public RemotePollingCheckpointRepository remotePollingCheckpointRepository(JdbcClient c) {
         return new RemotePollingCheckpointRepository(c);

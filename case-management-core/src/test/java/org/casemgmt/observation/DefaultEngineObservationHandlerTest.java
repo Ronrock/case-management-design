@@ -458,17 +458,53 @@ class DefaultEngineObservationHandlerTest {
     }
 
     @Test
-    void equalOccurrenceTimeIsIgnoredForUnrevisionedFacts() {
+    void equalOccurrenceTimeAndEventAreIgnoredForUnrevisionedFacts() {
         ProcessObservation observation = processObservation("obs-equal-time", null, OCCURRED);
         owningClaim(observation, activeCase("tenant-a", "process-1", 7));
         when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
                 new AppliedObservationRepository.AppliedPosition(
-                        "obs-current", null, OCCURRED, "STARTED")));
+                        "obs-current", null, OCCURRED, "COMPLETED")));
 
         assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.IGNORED_STALE);
 
         verify(claims).markIgnoredStale(claim);
         verify(events, never()).publish(any());
+    }
+
+    @Test
+    void distinctForwardTaskEventAtSameEngineTimestampIsApplied() {
+        UserTaskObservation observation = new UserTaskObservation("obs-claim-same-time", 1,
+                "operaton:embedded", "tenant-a", "case-1", "process-1", "task-1", null,
+                UserTaskObservation.EventType.CLAIMED, OCCURRED, RECEIVED,
+                authorityAttributes("taskDefinitionKey", "review", "assignee", "alice"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-created", null, OCCURRED, "CREATED")));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.APPLIED);
+
+        verify(projections).observe(argThat((TaskObservation projected) ->
+                projected.eventName().equals("claim")));
+        verify(claims).markApplied(claim);
+        verify(claims, never()).markIgnoredStale(claim);
+    }
+
+    @Test
+    void terminalTaskStateRejectsDifferentEventAtSameEngineTimestamp() {
+        UserTaskObservation observation = new UserTaskObservation("obs-late-claim", 1,
+                "operaton:embedded", "tenant-a", "case-1", "process-1", "task-1", null,
+                UserTaskObservation.EventType.CLAIMED, OCCURRED, RECEIVED,
+                authorityAttributes("taskDefinitionKey", "review", "assignee", "alice"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-completed", null, OCCURRED, "COMPLETED")));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.IGNORED_STALE);
+
+        verify(projections, never()).observe(any(TaskObservation.class));
+        verify(claims).markIgnoredStale(claim);
     }
 
     @Test

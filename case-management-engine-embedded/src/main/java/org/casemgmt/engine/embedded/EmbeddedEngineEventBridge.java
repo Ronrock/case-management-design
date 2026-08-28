@@ -1,81 +1,164 @@
 package org.casemgmt.engine.embedded;
 
-import org.casemgmt.projection.CaseProjectionPort;
-import org.casemgmt.projection.ProcessCompletionObservation;
-import org.casemgmt.projection.TaskObservation;
+import org.casemgmt.observation.ActivityLifecycleObservation;
+import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.MilestoneObservation;
+import org.casemgmt.observation.ProcessObservation;
+import org.casemgmt.observation.UserTaskObservation;
 import org.casemgmt.projection.ActivityObservation;
+import org.operaton.bpm.engine.RepositoryService;
+import org.operaton.bpm.engine.TaskService;
 import org.operaton.bpm.engine.impl.history.event.HistoricProcessInstanceEventEntity;
 import org.operaton.bpm.engine.impl.history.event.HistoryEvent;
 import org.operaton.bpm.spring.boot.starter.event.ExecutionEvent;
 import org.operaton.bpm.spring.boot.starter.event.TaskEvent;
 import org.springframework.context.event.EventListener;
 
-import java.time.OffsetDateTime;
+import java.time.Clock;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.Date;
-import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
 
-/** Translates Operaton's built-in Spring event bridge into the engine-neutral projection port. */
-public class EmbeddedEngineEventBridge {
+/** Translates synchronous Operaton callbacks into the canonical engine-observation contract. */
+public final class EmbeddedEngineEventBridge {
 
-    private final CaseProjectionPort projections;
+    public static final String SOURCE = "operaton:embedded";
+
+    private final EngineObservationHandler observations;
     private final ProcessCaseCorrelation correlation;
     private final ProcessActivityClassifier classifier;
+    private final RepositoryService repository;
+    private final TaskService tasks;
+    private final String engineId;
+    private final Clock clock;
 
-    public EmbeddedEngineEventBridge(CaseProjectionPort projections,
-                                     ProcessCaseCorrelation correlation) {
-        this(projections, correlation, (definition, activity) -> java.util.Optional.empty());
+    public EmbeddedEngineEventBridge(
+            EngineObservationHandler observations,
+            ProcessCaseCorrelation correlation,
+            ProcessActivityClassifier classifier,
+            RepositoryService repository,
+            TaskService tasks,
+            String engineId) {
+        this(observations, correlation, classifier, repository, tasks, engineId,
+                Clock.systemUTC());
     }
 
-    public EmbeddedEngineEventBridge(CaseProjectionPort projections,
-                                     ProcessCaseCorrelation correlation,
-                                     ProcessActivityClassifier classifier) {
-        this.projections = projections;
-        this.correlation = correlation;
-        this.classifier = classifier;
+    EmbeddedEngineEventBridge(
+            EngineObservationHandler observations,
+            ProcessCaseCorrelation correlation,
+            ProcessActivityClassifier classifier,
+            RepositoryService repository,
+            TaskService tasks,
+            String engineId,
+            Clock clock) {
+        this.observations = Objects.requireNonNull(observations, "observations");
+        this.correlation = Objects.requireNonNull(correlation, "correlation");
+        this.classifier = Objects.requireNonNull(classifier, "classifier");
+        this.repository = Objects.requireNonNull(repository, "repository");
+        this.tasks = Objects.requireNonNull(tasks, "tasks");
+        if (engineId == null || engineId.isBlank()) {
+            throw new IllegalArgumentException("engineId must not be blank");
+        }
+        this.engineId = engineId;
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
+    /**
+     * The built-in Operaton Spring plugin publishes this event synchronously from the command
+     * context. The common handler therefore joins the same transaction; any persistence failure
+     * propagates and rolls the engine command back.
+     */
     @EventListener
     public void onTask(TaskEvent event) {
-        if (event.getProcessInstanceId() == null) {
+        UserTaskObservation.EventType eventType = taskEvent(event.getEventName(),
+                event.getAssignee());
+        if (eventType == null || event.getProcessInstanceId() == null || event.getId() == null) {
             return;
         }
         String caseId = correlation.caseId(event.getProcessInstanceId());
         if (caseId == null) {
             return;
         }
-        OffsetDateTime observedAt = OffsetDateTime.now(ZoneOffset.UTC);
+        Instant receivedAt = clock.instant();
         Date engineDate = event.getLastUpdated() != null
                 ? event.getLastUpdated() : event.getCreateTime();
+        Instant occurredAt = engineDate == null ? receivedAt : engineDate.toInstant();
+        String definitionKey = processDefinitionKey(event.getProcessDefinitionId());
         ProcessActivityClassifier.TaskMetadata metadata = classifier.taskMetadata(
                 event.getProcessDefinitionId(), event.getTaskDefinitionKey());
-        projections.observe(new TaskObservation(caseId, event.getId(),
-                // One execution commonly visits several sequential user tasks. The task id is
-                // the stable per-occurrence key; using executionId collapses those occurrences
-                // into one CM_PLAN_ITEM and breaks repetition/multi-instance projection.
-                event.getId(),
-                event.getTaskDefinitionKey(), event.getName(), event.getEventName(),
-                event.getAssignee(), metadata.candidateGroups(), metadata.formKey(), event.getPriority(),
-                at(event.getDueDate()), engineDate == null ? observedAt : at(engineDate), observedAt));
+
+        Map<String, Object> attributes = authorityAttributes(
+                event.getProcessDefinitionId(), definitionKey);
+        put(attributes, "taskDefinitionKey", event.getTaskDefinitionKey());
+        // One execution commonly visits several sequential user tasks. The task id is the stable
+        // occurrence key; using executionId collapses them into one projected plan item.
+        attributes.put("activityInstanceId", event.getId());
+        put(attributes, "name", event.getName());
+        put(attributes, "assignee", event.getAssignee());
+        attributes.put("candidateGroups", metadata.candidateGroups());
+        put(attributes, "formKey", metadata.formKey());
+        attributes.put("priority", event.getPriority());
+        if (event.getDueDate() != null) {
+            attributes.put("dueAt", at(event.getDueDate()).toString());
+        }
+        if (eventType == UserTaskObservation.EventType.COMPLETED) {
+            attributes.put("variables", new LinkedHashMap<>(tasks.getVariables(event.getId())));
+        }
+
+        observations.apply(new UserTaskObservation(observationId(), 1, SOURCE, engineId,
+                event.getTenantId(), caseId, event.getProcessInstanceId(), event.getId(), null,
+                eventType, occurredAt, receivedAt, attributes));
     }
 
-    /** Execution events are consumed so tagged-stage/milestone mapping can evolve at this adapter. */
+    /** Emits lifecycle for explicitly classified stages and milestones only. */
     @EventListener
     public void onExecution(ExecutionEvent event) {
-        if (event.getProcessInstanceId() == null || event.getActivityInstanceId() == null) return;
+        if (event.getProcessInstanceId() == null || event.getActivityInstanceId() == null) {
+            return;
+        }
         String caseId = event.getProcessBusinessKey() != null
                 ? event.getProcessBusinessKey() : correlation.caseId(event.getProcessInstanceId());
-        if (caseId == null) return;
-        classifier.classify(event.getProcessDefinitionId(), event.getCurrentActivityId())
-                .ifPresent(classification -> {
-                    OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-                    projections.observe(new ActivityObservation(caseId,
-                            event.getActivityInstanceId(), event.getCurrentActivityId(),
-                            event.getCurrentActivityName(), classification.kind(),
-                            classification.milestoneId(), event.getEventName(), now, now));
-                });
+        if (caseId == null) {
+            return;
+        }
+        var classification = classifier.classify(
+                event.getProcessDefinitionId(), event.getCurrentActivityId());
+        if (classification.isEmpty()) {
+            return;
+        }
+        Instant now = clock.instant();
+        String definitionKey = processDefinitionKey(event.getProcessDefinitionId());
+        Map<String, Object> attributes = authorityAttributes(
+                event.getProcessDefinitionId(), definitionKey);
+        put(attributes, "activityId", event.getCurrentActivityId());
+        put(attributes, "name", event.getCurrentActivityName());
+
+        ProcessActivityClassifier.Classification value = classification.orElseThrow();
+        if (value.kind() == ActivityObservation.Kind.MILESTONE) {
+            MilestoneObservation.EventType type = milestoneEvent(event.getEventName());
+            if (type == null) {
+                return;
+            }
+            put(attributes, "milestoneId", value.milestoneId());
+            observations.apply(new MilestoneObservation(observationId(), 1, SOURCE, engineId,
+                    event.getTenantId(), caseId, event.getProcessInstanceId(),
+                    event.getActivityInstanceId(), null, type, now, now, attributes));
+            return;
+        }
+        ActivityLifecycleObservation.EventType type = activityEvent(event.getEventName());
+        if (type == null) {
+            return;
+        }
+        observations.apply(new ActivityLifecycleObservation(observationId(), 1, SOURCE, engineId,
+                event.getTenantId(), caseId, event.getProcessInstanceId(),
+                event.getActivityInstanceId(), null, type, now, now, attributes));
     }
 
+    /** Process history provides the engine's stable sequence and exact terminal timestamp. */
     @EventListener
     public void onHistory(HistoryEvent event) {
         if (!(event instanceof HistoricProcessInstanceEventEntity process)
@@ -87,14 +170,94 @@ public class EmbeddedEngineEventBridge {
         if (caseId == null) {
             return;
         }
-        OffsetDateTime observedAt = OffsetDateTime.now(ZoneOffset.UTC);
-        projections.observe(new ProcessCompletionObservation(caseId,
-                process.getProcessInstanceId(), process.getProcessDefinitionKey(),
-                process.getDeleteReason() == null ? "completed" : "cancelled",
-                at(process.getEndTime()), observedAt));
+        Instant receivedAt = clock.instant();
+        Map<String, Object> attributes = authorityAttributes(
+                process.getProcessDefinitionId(), process.getProcessDefinitionKey());
+        ProcessObservation.EventType type = process.getDeleteReason() == null
+                ? ProcessObservation.EventType.COMPLETED
+                : ProcessObservation.EventType.TERMINATED;
+        observations.apply(new ProcessObservation(observationId(), 1, SOURCE, engineId,
+                process.getTenantId(), caseId, process.getProcessInstanceId(),
+                process.getProcessInstanceId(), stableRevision(process.getSequenceCounter()), type,
+                process.getEndTime().toInstant(), receivedAt, attributes));
     }
 
-    private static OffsetDateTime at(Date date) {
-        return date == null ? null : date.toInstant().atOffset(ZoneOffset.UTC);
+    private String processDefinitionKey(String processDefinitionId) {
+        if (processDefinitionId == null || processDefinitionId.isBlank()) {
+            throw new IllegalArgumentException("processDefinitionId must not be blank");
+        }
+        var definition = repository.getProcessDefinition(processDefinitionId);
+        if (definition == null || definition.getKey() == null || definition.getKey().isBlank()) {
+            throw new IllegalStateException(
+                    "No process definition key for exact definition " + processDefinitionId);
+        }
+        return definition.getKey();
+    }
+
+    private static Map<String, Object> authorityAttributes(
+            String processDefinitionId, String processDefinitionKey) {
+        if (processDefinitionId == null || processDefinitionId.isBlank()
+                || processDefinitionKey == null || processDefinitionKey.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Exact process definition id and key are required");
+        }
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("processDefinitionId", processDefinitionId);
+        attributes.put("processDefinitionKey", processDefinitionKey);
+        return attributes;
+    }
+
+    private static UserTaskObservation.EventType taskEvent(String eventName, String assignee) {
+        if (eventName == null) {
+            return null;
+        }
+        return switch (eventName) {
+            case "create" -> UserTaskObservation.EventType.CREATED;
+            case "assignment" -> assignee == null
+                    ? UserTaskObservation.EventType.UNCLAIMED
+                    : UserTaskObservation.EventType.CLAIMED;
+            // Operaton emits an undirected update immediately before assignment. Translating it
+            // would race the semantic assignment event at the same timestamp and make CLAIMED or
+            // UNCLAIMED appear stale, so only the directional callback is canonical evidence.
+            case "update" -> null;
+            case "complete" -> UserTaskObservation.EventType.COMPLETED;
+            case "delete" -> UserTaskObservation.EventType.DELETED;
+            default -> null;
+        };
+    }
+
+    private static ActivityLifecycleObservation.EventType activityEvent(String eventName) {
+        if ("start".equals(eventName)) {
+            return ActivityLifecycleObservation.EventType.STARTED;
+        }
+        if ("end".equals(eventName)) {
+            return ActivityLifecycleObservation.EventType.COMPLETED;
+        }
+        return null;
+    }
+
+    private static MilestoneObservation.EventType milestoneEvent(String eventName) {
+        if ("end".equals(eventName)) {
+            return MilestoneObservation.EventType.REACHED;
+        }
+        return null;
+    }
+
+    private static Long stableRevision(long sequenceCounter) {
+        return sequenceCounter > 0 ? sequenceCounter : null;
+    }
+
+    private static void put(Map<String, Object> attributes, String key, Object value) {
+        if (value != null) {
+            attributes.put(key, value);
+        }
+    }
+
+    private static String observationId() {
+        return UUID.randomUUID().toString();
+    }
+
+    private static java.time.OffsetDateTime at(Date date) {
+        return date.toInstant().atOffset(ZoneOffset.UTC);
     }
 }

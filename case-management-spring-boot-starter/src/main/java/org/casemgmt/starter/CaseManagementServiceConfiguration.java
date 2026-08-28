@@ -7,6 +7,16 @@ import org.casemgmt.orchestration.CaseOrchestrationRegistry;
 import org.casemgmt.orchestration.EngineDeploymentIdentityResolver;
 import org.casemgmt.orchestration.PlanModelOrchestration;
 import org.casemgmt.event.EventPublisher;
+import org.casemgmt.observation.DefaultEngineObservationAuthorityValidator;
+import org.casemgmt.observation.DefaultEngineObservationHandler;
+import org.casemgmt.observation.EngineObservationAuthorityValidator;
+import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.LoggingObservationSecurityTelemetry;
+import org.casemgmt.observation.ObservationSecurityTelemetry;
+import org.casemgmt.observation.SlaLifecyclePort;
+import org.casemgmt.projection.CaseProjectionPort;
+import org.casemgmt.release.JsonSchemaCaseContractValidator;
+import org.casemgmt.repo.AppliedObservationRepository;
 import org.casemgmt.repo.AuditRepository;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
@@ -33,6 +43,8 @@ import org.casemgmt.service.CommentService;
 import org.casemgmt.service.DocumentService;
 import org.casemgmt.service.FormValidator;
 import org.casemgmt.service.LinkedProcessService;
+import org.casemgmt.service.CaseDataMappingService;
+import org.casemgmt.service.ContractCaseDataMappingService;
 import org.casemgmt.service.MilestoneService;
 import org.casemgmt.service.PlanItemService;
 import org.casemgmt.service.TransitionApplier;
@@ -48,6 +60,54 @@ import org.casemgmt.rules.CriterionEvaluator;
 
 @Configuration(proxyBeanMethods = false)
 public class CaseManagementServiceConfiguration {
+
+    @Bean
+    @ConditionalOnMissingBean(CaseDataMappingService.class)
+    public CaseDataMappingService caseDataMappingService(
+            CaseRepository cases,
+            CaseDefinitionVersionBindingRepository bindings,
+            CaseDefinitionReleaseRepository releases) {
+        return new ContractCaseDataMappingService(cases, bindings, releases,
+                new JsonSchemaCaseContractValidator());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(EngineObservationAuthorityValidator.class)
+    public EngineObservationAuthorityValidator engineObservationAuthorityValidator(
+            CaseDefinitionVersionBindingRepository bindings,
+            LinkedProcessRepository processes,
+            CaseManagementProperties properties) {
+        return new DefaultEngineObservationAuthorityValidator(
+                bindings, processes, properties.getEngineId());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(SlaLifecyclePort.class)
+    public SlaLifecyclePort slaLifecyclePort() {
+        return SlaLifecyclePort.none();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(ObservationSecurityTelemetry.class)
+    public ObservationSecurityTelemetry observationSecurityTelemetry() {
+        return new LoggingObservationSecurityTelemetry();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(EngineObservationHandler.class)
+    public EngineObservationHandler engineObservationHandler(
+            AppliedObservationRepository claims,
+            CaseRepository cases,
+            LinkedProcessRepository processes,
+            CaseProjectionPort projections,
+            CaseDataMappingService mappings,
+            EventPublisher events,
+            SlaLifecyclePort sla,
+            EngineObservationAuthorityValidator authority,
+            ObservationSecurityTelemetry securityTelemetry) {
+        return new DefaultEngineObservationHandler(claims, cases, processes, projections,
+                mappings, events, sla, authority, securityTelemetry);
+    }
 
     @Bean
     @ConditionalOnMissingBean(EventPublisher.class)

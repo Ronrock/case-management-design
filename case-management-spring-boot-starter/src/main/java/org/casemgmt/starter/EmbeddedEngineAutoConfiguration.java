@@ -8,7 +8,7 @@ import org.casemgmt.engine.embedded.EmbeddedOrchestrationDeploymentPort;
 import org.casemgmt.engine.embedded.ProcessActivityClassifier;
 import org.casemgmt.engine.embedded.RepositoryProcessActivityClassifier;
 import org.casemgmt.orchestration.OrchestrationDeploymentPort;
-import org.casemgmt.projection.CaseProjectionPort;
+import org.casemgmt.observation.EngineObservationHandler;
 import org.operaton.bpm.engine.ProcessEngine;
 import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.RepositoryService;
@@ -118,15 +118,17 @@ public class EmbeddedEngineAutoConfiguration {
 
         @Bean
         EmbeddedEngineEventBridge embeddedEngineEventBridge(
-                CaseProjectionPort projections, ProcessCaseCorrelation correlation,
-                ProcessActivityClassifier classifier) {
-            // Do not guard this with @ConditionalOnBean(CaseProjectionPort.class).
+                EngineObservationHandler observations, ProcessCaseCorrelation correlation,
+                ProcessActivityClassifier classifier, RepositoryService repositoryService,
+                TaskService taskService, CaseManagementProperties properties) {
+            // Do not guard this with @ConditionalOnBean(EngineObservationHandler.class).
             // This auto-configuration deliberately runs before CaseManagementAutoConfiguration,
-            // which imports the repository configuration that declares that port. Evaluating
+            // which imports the service configuration that declares that handler. Evaluating
             // the condition here therefore skips the bridge even though the dependency exists
             // by bean-instantiation time. Required method parameters provide the correct
             // fail-fast behaviour without making registration order observable.
-            return new EmbeddedEngineEventBridge(projections, correlation, classifier);
+            return new EmbeddedEngineEventBridge(observations, correlation, classifier,
+                    repositoryService, taskService, properties.getEngineId());
         }
 
         @Bean
