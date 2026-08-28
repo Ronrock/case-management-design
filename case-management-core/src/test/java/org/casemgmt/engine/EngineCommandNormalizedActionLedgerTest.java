@@ -154,6 +154,25 @@ class EngineCommandNormalizedActionLedgerTest {
                 .hasMessageContaining("epoch");
     }
 
+    @Test
+    void appliedHighWaterRowMustExactlyAdvanceTheRepositoryVerifiedPriorSummary() {
+        var cancel = new CommandDispatchOutcome.OperatorAction(
+                "tenant-a", "operation-a", "command-a", EngineCommand.Type.COMPLETE_TASK,
+                "task-a", CommandDispatchOutcome.ActionType.CANCEL, "action:cancel",
+                "audit:cancel", AT, false);
+        var applied = new EngineCommandPolicy.ProcessedAction(2, cancel, null);
+        var prior = new EngineCommandPolicy.ActionLedgerSummary(1, 1, 0, 0);
+
+        assertThatThrownBy(() -> new EngineCommandPolicy.Decision(
+                EngineCommandStatus.CANCELLED, AT, null, null, null,
+                0, 0, 0, false, null, null, null, applied,
+                prior,
+                // Same count/high-water, but the CANCEL subtype total was forged away.
+                new EngineCommandPolicy.ActionLedgerSummary(2, 2, 0, 0)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("prior summary");
+    }
+
     private static EngineCommandPolicy.Decision awaiting(
             EngineCommandPolicy.ActionLedgerSummary summary) {
         return new EngineCommandPolicy.Decision(
@@ -169,7 +188,8 @@ class EngineCommandNormalizedActionLedgerTest {
                 decision.automaticAttemptsInBudget(), decision.budgetEpoch(),
                 decision.automaticBudgetReset(), decision.terminalConfirmation(),
                 decision.legacyConfirmation(), decision.decisionEvidence(),
-                decision.appliedAction(), decision.actionLedgerSummary());
+                decision.appliedAction(), decision.appliedActionPriorSummary(),
+                decision.actionLedgerSummary());
     }
 
     private static EngineCommandPolicy.CommandState state(

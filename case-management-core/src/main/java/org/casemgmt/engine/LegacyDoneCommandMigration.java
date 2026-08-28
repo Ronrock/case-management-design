@@ -24,6 +24,7 @@ final class LegacyDoneCommandMigration {
                 EngineCommandStatus.CONFIRMED, row.migratedAt(), null, null, null,
                 startedDispatches, startedDispatches, 0, false,
                 null, evidence, null, null,
+                null,
                 EngineCommandPolicy.ActionLedgerSummary.empty());
     }
 

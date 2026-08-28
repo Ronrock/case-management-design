@@ -6,6 +6,36 @@
 
   <!-- One durable row per tenant authority and deterministic engine fact. This is additive so
        a rolling application deployment can introduce lifecycle effects without rewriting history. -->
+  <changeSet id="cm-applied-engine-observation-structure-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="CM_APPLIED_ENGINE_OBSERVATION has an incompatible structure">
+      <or>
+        <not><tableExists tableName="CM_APPLIED_ENGINE_OBSERVATION"/></not>
+        <sqlCheck expectedResult="16"><![CDATA[
+          SELECT COUNT(*) FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
+            AND DATA_DEFAULT IS NULL AND (
+              (COLUMN_NAME = 'OBSERVATION_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'TENANT_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 64 AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'FINGERPRINT_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 64 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'CLAIM_TOKEN_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 43 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'STATUS_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 16 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'SOURCE_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'CASE_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'PROCESS_INSTANCE_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'ENTITY_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'ENTITY_REVISION_' AND DATA_TYPE = 'NUMBER' AND DATA_PRECISION = 19 AND NVL(DATA_SCALE, 0) = 0 AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'EVENT_TYPE_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 64 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'ENGINE_OCCURRED_AT_' AND DATA_TYPE = 'TIMESTAMP WITH TIME ZONE' AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'CLAIMED_AT_' AND DATA_TYPE = 'TIMESTAMP WITH TIME ZONE' AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'APPLIED_AT_' AND DATA_TYPE = 'TIMESTAMP WITH TIME ZONE' AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'FAILED_AT_' AND DATA_TYPE = 'TIMESTAMP WITH TIME ZONE' AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'FAILURE_DETAIL_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 2000 AND NULLABLE = 'Y'))
+        ]]></sqlCheck>
+      </or>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
+  </changeSet>
+
   <changeSet id="cm-applied-engine-observation" author="casemgmt">
     <preConditions onFail="MARK_RAN" onError="HALT">
       <not><tableExists tableName="CM_APPLIED_ENGINE_OBSERVATION"/></not>
@@ -62,6 +92,35 @@
   <!-- Oracle's ordinary (TENANT_ID_, FINGERPRINT_) unique index accepts multiple NULL
        tenants. The first expression is always 0 or 1, so tenant-less rows are indexed and
        cannot collide with a named tenant; unlike a sentinel it cannot alias a legal tenant. -->
+  <changeSet id="cm-applied-engine-observation-authority-index-structure-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="UQ_CM_AEO_AUTH_FINGERPRINT has an incompatible structure">
+      <or>
+        <not><indexExists tableName="CM_APPLIED_ENGINE_OBSERVATION"
+                          indexName="UQ_CM_AEO_AUTH_FINGERPRINT"/></not>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT COUNT(*) FROM USER_INDEXES I
+          WHERE I.INDEX_NAME = 'UQ_CM_AEO_AUTH_FINGERPRINT'
+            AND I.TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
+            AND I.UNIQUENESS = 'UNIQUE'
+            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
+                 WHERE C.INDEX_NAME = I.INDEX_NAME) = 3
+            AND (SELECT COUNT(*) FROM USER_IND_EXPRESSIONS E
+                 WHERE E.INDEX_NAME = I.INDEX_NAME AND E.COLUMN_POSITION = 1
+                   AND REGEXP_REPLACE(UPPER(E.COLUMN_EXPRESSION), '[[:space:]\"]', '') =
+                       'CASEWHENTENANT_ID_ISNULLTHEN1ELSE0END') = 1
+            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
+                 WHERE C.INDEX_NAME = I.INDEX_NAME AND C.COLUMN_POSITION = 2
+                   AND C.COLUMN_NAME = 'TENANT_ID_') = 1
+            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
+                 WHERE C.INDEX_NAME = I.INDEX_NAME AND C.COLUMN_POSITION = 3
+                   AND C.COLUMN_NAME = 'FINGERPRINT_') = 1
+        ]]></sqlCheck>
+      </or>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
+  </changeSet>
+
   <changeSet id="cm-applied-engine-observation-authority-index" author="casemgmt">
     <preConditions onFail="MARK_RAN" onError="HALT">
       <not><indexExists tableName="CM_APPLIED_ENGINE_OBSERVATION"
@@ -73,6 +132,31 @@
         TENANT_ID_,
         FINGERPRINT_)
     </sql>
+  </changeSet>
+
+  <changeSet id="cm-applied-engine-observation-status-index-structure-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="IX_CM_AEO_STATUS has an incompatible structure">
+      <or>
+        <not><indexExists tableName="CM_APPLIED_ENGINE_OBSERVATION"
+                          indexName="IX_CM_AEO_STATUS"/></not>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT COUNT(*) FROM USER_INDEXES I
+          WHERE I.INDEX_NAME = 'IX_CM_AEO_STATUS'
+            AND I.TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
+            AND I.UNIQUENESS = 'NONUNIQUE'
+            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
+                 WHERE C.INDEX_NAME = I.INDEX_NAME) = 2
+            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
+                 WHERE C.INDEX_NAME = I.INDEX_NAME AND C.COLUMN_POSITION = 1
+                   AND C.COLUMN_NAME = 'STATUS_') = 1
+            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
+                 WHERE C.INDEX_NAME = I.INDEX_NAME AND C.COLUMN_POSITION = 2
+                   AND C.COLUMN_NAME = 'CLAIMED_AT_') = 1
+        ]]></sqlCheck>
+      </or>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-applied-engine-observation-status-index" author="casemgmt">

@@ -28,7 +28,7 @@ class SchemaMigrationTest extends OracleTestBase {
         // CM_CASE_DEF_RELEASE, CM_CASE_DEF_BINDING, and CM_ENGINE_POLL_CHECKPOINT from changesets.
         // CM_APPLIED_ENGINE_OBSERVATION is the WS3 lifecycle-effect claim ledger.
         // DATABASECHANGELOG* do not match the CM_ prefix.
-        assertThat(tables).isEqualTo(31);
+        assertThat(tables).isEqualTo(32);
     }
 
     @Test

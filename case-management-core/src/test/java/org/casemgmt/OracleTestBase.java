@@ -224,6 +224,9 @@ public abstract class OracleTestBase {
     // bulk of the connection churn this method used to cause on every single test method across
     // every extending class.
     private static void deleteAllCaseManagementData() {
+        if (dataSource == null) {
+            return;
+        }
         List<String> tablesChildToParent = List.of(
                 "CM_APPLIED_ENGINE_OBSERVATION",
                 "CM_CASE_DEF_BINDING",
@@ -250,6 +253,7 @@ public abstract class OracleTestBase {
                 "CM_BULK_OPERATION_ITEM",
                 "CM_BULK_OPERATION",
                 "CM_DEF_IDENTITY_LINK",
+                "CM_ENGINE_COMMAND_ACTION",
                 "CM_ENGINE_COMMAND",
                 "CM_QUEUE",
                 "CM_SAVED_FILTER",

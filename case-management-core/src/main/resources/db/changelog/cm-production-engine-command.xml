@@ -1,0 +1,569 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+  <!-- Guard the all-or-nothing Oracle ADD before the restartable MARK_RAN changeset. -->
+  <changeSet id="cm-production-engine-command-columns-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="CM_ENGINE_COMMAND production columns are incomplete or incompatible">
+      <sqlCheck expectedResult="1"><![CDATA[
+        SELECT CASE WHEN NVL(PRESENT_COUNT,0) = 0 OR
+          (EXACT_COUNT = 44 AND INVALID_OPTIONAL = 0
+           AND NULLABLE_REQUIRED IN (0,15) AND DEFAULTED = 0) THEN 1 ELSE 0 END
+        FROM (
+          SELECT
+            SUM(CASE WHEN COLUMN_NAME IN (
+              'OPERATION_ID_','TENANT_ID_','IDEMPOTENCY_KEY_','PAYLOAD_DIGEST_',
+              'TARGET_IDENTITY_','CORRELATION_JSON_','CANONICAL_PATCH_JSON_',
+              'EXPECTED_CASE_VERSION_','LEASE_TOKEN_','LEASE_OWNER_','LEASE_EXPIRES_AT_',
+              'DISPATCHED_AT_','UPDATED_AT_','CONFIRMED_AT_','FAILED_AT_','DECIDED_AT_',
+              'SAFE_ERROR_CODE_','SAFE_SUMMARY_','CONFIRM_SOURCE_','REMOTE_IDENTITY_',
+              'REMOTE_STATE_','EVIDENCE_REFERENCE_','TOTAL_DISPATCH_ATTEMPTS_',
+              'AUTO_ATTEMPTS_','BUDGET_EPOCH_','AUTO_BUDGET_RESET_','ROW_VERSION_',
+              'ACTION_COUNT_','ACTION_HIGH_WATER_','ACTION_RESET_COUNT_','ACTION_CANCEL_COUNT_',
+              'DECISION_REVIEW_FINDING_','DECISION_REVIEW_SOURCE_','DECISION_REVIEW_REF_',
+              'LEGACY_ROW_ID_','LEGACY_STATUS_','LEGACY_MIGRATION_REF_',
+              'LEGACY_MIGRATED_AT_','LEGACY_FAILURE_COUNT_','RAW_LEGACY_PAYLOAD_',
+              'RAW_LEGACY_ERROR_','RAW_LEGACY_CLAIM_TOKEN_',
+              'RAW_LEGACY_CLAIMED_AT_','ORIGINAL_STATUS_') THEN 1 ELSE 0 END) PRESENT_COUNT,
+            SUM(CASE WHEN COLUMN_NAME IN (
+              'TARGET_IDENTITY_','CORRELATION_JSON_','CANONICAL_PATCH_JSON_',
+              'EXPECTED_CASE_VERSION_','LEASE_TOKEN_','LEASE_OWNER_','LEASE_EXPIRES_AT_',
+              'DISPATCHED_AT_','CONFIRMED_AT_','FAILED_AT_','SAFE_ERROR_CODE_','SAFE_SUMMARY_',
+              'CONFIRM_SOURCE_','REMOTE_IDENTITY_','REMOTE_STATE_','EVIDENCE_REFERENCE_',
+              'DECISION_REVIEW_FINDING_','DECISION_REVIEW_SOURCE_','DECISION_REVIEW_REF_',
+              'LEGACY_ROW_ID_','LEGACY_STATUS_','LEGACY_MIGRATION_REF_',
+              'LEGACY_MIGRATED_AT_','LEGACY_FAILURE_COUNT_','RAW_LEGACY_PAYLOAD_',
+              'RAW_LEGACY_ERROR_','RAW_LEGACY_CLAIM_TOKEN_','RAW_LEGACY_CLAIMED_AT_',
+              'ORIGINAL_STATUS_') AND NULLABLE <> 'Y' THEN 1 ELSE 0 END) INVALID_OPTIONAL,
+            SUM(CASE WHEN COLUMN_NAME IN (
+              'OPERATION_ID_','TENANT_ID_','IDEMPOTENCY_KEY_','PAYLOAD_DIGEST_','UPDATED_AT_',
+              'DECIDED_AT_','TOTAL_DISPATCH_ATTEMPTS_','AUTO_ATTEMPTS_','BUDGET_EPOCH_',
+              'AUTO_BUDGET_RESET_','ROW_VERSION_','ACTION_COUNT_','ACTION_HIGH_WATER_',
+              'ACTION_RESET_COUNT_','ACTION_CANCEL_COUNT_') AND NULLABLE='Y'
+              THEN 1 ELSE 0 END) NULLABLE_REQUIRED,
+            SUM(CASE WHEN COLUMN_NAME IN (
+              'OPERATION_ID_','TENANT_ID_','IDEMPOTENCY_KEY_','PAYLOAD_DIGEST_',
+              'TARGET_IDENTITY_','CORRELATION_JSON_','CANONICAL_PATCH_JSON_',
+              'EXPECTED_CASE_VERSION_','LEASE_TOKEN_','LEASE_OWNER_','LEASE_EXPIRES_AT_',
+              'DISPATCHED_AT_','UPDATED_AT_','CONFIRMED_AT_','FAILED_AT_','DECIDED_AT_',
+              'SAFE_ERROR_CODE_','SAFE_SUMMARY_','CONFIRM_SOURCE_','REMOTE_IDENTITY_',
+              'REMOTE_STATE_','EVIDENCE_REFERENCE_','TOTAL_DISPATCH_ATTEMPTS_','AUTO_ATTEMPTS_',
+              'BUDGET_EPOCH_','AUTO_BUDGET_RESET_','ROW_VERSION_','ACTION_COUNT_',
+              'ACTION_HIGH_WATER_','ACTION_RESET_COUNT_','ACTION_CANCEL_COUNT_',
+              'DECISION_REVIEW_FINDING_','DECISION_REVIEW_SOURCE_','DECISION_REVIEW_REF_',
+              'LEGACY_ROW_ID_','LEGACY_STATUS_','LEGACY_MIGRATION_REF_',
+              'LEGACY_MIGRATED_AT_','LEGACY_FAILURE_COUNT_','RAW_LEGACY_PAYLOAD_',
+              'RAW_LEGACY_ERROR_','RAW_LEGACY_CLAIM_TOKEN_','RAW_LEGACY_CLAIMED_AT_',
+              'ORIGINAL_STATUS_') AND DATA_DEFAULT IS NOT NULL THEN 1 ELSE 0 END) DEFAULTED,
+            SUM(CASE
+              WHEN COLUMN_NAME = 'OPERATION_ID_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 THEN 1
+              WHEN COLUMN_NAME = 'TENANT_ID_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 THEN 1
+              WHEN COLUMN_NAME = 'IDEMPOTENCY_KEY_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128 THEN 1
+              WHEN COLUMN_NAME = 'PAYLOAD_DIGEST_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 THEN 1
+              WHEN COLUMN_NAME = 'TARGET_IDENTITY_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=255 THEN 1
+              WHEN COLUMN_NAME IN ('CORRELATION_JSON_','CANONICAL_PATCH_JSON_','RAW_LEGACY_PAYLOAD_') AND DATA_TYPE='CLOB' THEN 1
+              WHEN COLUMN_NAME IN ('EXPECTED_CASE_VERSION_','TOTAL_DISPATCH_ATTEMPTS_','BUDGET_EPOCH_',
+                                   'ROW_VERSION_','ACTION_COUNT_','ACTION_HIGH_WATER_',
+                                   'ACTION_RESET_COUNT_','ACTION_CANCEL_COUNT_')
+                   AND DATA_TYPE='NUMBER' AND DATA_PRECISION=19 THEN 1
+              WHEN COLUMN_NAME IN ('AUTO_ATTEMPTS_','LEGACY_FAILURE_COUNT_')
+                   AND DATA_TYPE='NUMBER' AND DATA_PRECISION=3 THEN 1
+              WHEN COLUMN_NAME='AUTO_BUDGET_RESET_' AND DATA_TYPE='NUMBER' AND DATA_PRECISION=1 THEN 1
+              WHEN COLUMN_NAME IN ('LEASE_EXPIRES_AT_','DISPATCHED_AT_','UPDATED_AT_',
+                                   'CONFIRMED_AT_','FAILED_AT_','DECIDED_AT_','LEGACY_MIGRATED_AT_')
+                   AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' THEN 1
+              WHEN COLUMN_NAME='LEASE_TOKEN_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 THEN 1
+              WHEN COLUMN_NAME='LEASE_OWNER_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128 THEN 1
+              WHEN COLUMN_NAME IN ('SAFE_ERROR_CODE_','REMOTE_STATE_') AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 THEN 1
+              WHEN COLUMN_NAME='SAFE_SUMMARY_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=256 THEN 1
+              WHEN COLUMN_NAME IN ('CONFIRM_SOURCE_','DECISION_REVIEW_FINDING_','DECISION_REVIEW_SOURCE_')
+                   AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=32 THEN 1
+              WHEN COLUMN_NAME='REMOTE_IDENTITY_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=255 THEN 1
+              WHEN COLUMN_NAME IN ('EVIDENCE_REFERENCE_','DECISION_REVIEW_REF_','LEGACY_MIGRATION_REF_')
+                   AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=160 THEN 1
+              WHEN COLUMN_NAME='LEGACY_ROW_ID_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 THEN 1
+              WHEN COLUMN_NAME IN ('LEGACY_STATUS_','ORIGINAL_STATUS_') AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=20 THEN 1
+              WHEN COLUMN_NAME='RAW_LEGACY_ERROR_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=2000 THEN 1
+              WHEN COLUMN_NAME='RAW_LEGACY_CLAIM_TOKEN_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 THEN 1
+              WHEN COLUMN_NAME='RAW_LEGACY_CLAIMED_AT_' AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' THEN 1
+              ELSE 0 END) EXACT_COUNT
+          FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_ENGINE_COMMAND')
+      ]]></sqlCheck>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-columns" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><columnExists tableName="CM_ENGINE_COMMAND" columnName="OPERATION_ID_"/></not>
+    </preConditions>
+    <addColumn tableName="CM_ENGINE_COMMAND">
+      <column name="OPERATION_ID_" type="VARCHAR2(64)"/>
+      <column name="TENANT_ID_" type="VARCHAR2(64)"/>
+      <column name="IDEMPOTENCY_KEY_" type="VARCHAR2(128)"/>
+      <column name="PAYLOAD_DIGEST_" type="VARCHAR2(64)"/>
+      <column name="TARGET_IDENTITY_" type="VARCHAR2(255)"/>
+      <column name="CORRELATION_JSON_" type="CLOB"/>
+      <column name="CANONICAL_PATCH_JSON_" type="CLOB"/>
+      <column name="EXPECTED_CASE_VERSION_" type="NUMBER(19)"/>
+      <column name="LEASE_TOKEN_" type="VARCHAR2(64)"/>
+      <column name="LEASE_OWNER_" type="VARCHAR2(128)"/>
+      <column name="LEASE_EXPIRES_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="DISPATCHED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="UPDATED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="CONFIRMED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="FAILED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="DECIDED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="SAFE_ERROR_CODE_" type="VARCHAR2(64)"/>
+      <column name="SAFE_SUMMARY_" type="VARCHAR2(256)"/>
+      <column name="CONFIRM_SOURCE_" type="VARCHAR2(32)"/>
+      <column name="REMOTE_IDENTITY_" type="VARCHAR2(255)"/>
+      <column name="REMOTE_STATE_" type="VARCHAR2(64)"/>
+      <column name="EVIDENCE_REFERENCE_" type="VARCHAR2(160)"/>
+      <column name="TOTAL_DISPATCH_ATTEMPTS_" type="NUMBER(19)"/>
+      <column name="AUTO_ATTEMPTS_" type="NUMBER(3)"/>
+      <column name="BUDGET_EPOCH_" type="NUMBER(19)"/>
+      <column name="AUTO_BUDGET_RESET_" type="NUMBER(1)"/>
+      <column name="ROW_VERSION_" type="NUMBER(19)"/>
+      <column name="ACTION_COUNT_" type="NUMBER(19)"/>
+      <column name="ACTION_HIGH_WATER_" type="NUMBER(19)"/>
+      <column name="ACTION_RESET_COUNT_" type="NUMBER(19)"/>
+      <column name="ACTION_CANCEL_COUNT_" type="NUMBER(19)"/>
+      <column name="DECISION_REVIEW_FINDING_" type="VARCHAR2(32)"/>
+      <column name="DECISION_REVIEW_SOURCE_" type="VARCHAR2(32)"/>
+      <column name="DECISION_REVIEW_REF_" type="VARCHAR2(160)"/>
+      <column name="LEGACY_ROW_ID_" type="VARCHAR2(64)"/>
+      <column name="LEGACY_STATUS_" type="VARCHAR2(20)"/>
+      <column name="LEGACY_MIGRATION_REF_" type="VARCHAR2(160)"/>
+      <column name="LEGACY_MIGRATED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="LEGACY_FAILURE_COUNT_" type="NUMBER(3)"/>
+      <column name="RAW_LEGACY_PAYLOAD_" type="CLOB"/>
+      <column name="RAW_LEGACY_ERROR_" type="VARCHAR2(2000)"/>
+      <column name="RAW_LEGACY_CLAIM_TOKEN_" type="VARCHAR2(64)"/>
+      <column name="RAW_LEGACY_CLAIMED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="ORIGINAL_STATUS_" type="VARCHAR2(20)"/>
+    </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-backfill" author="casemgmt">
+    <sql><![CDATA[
+      UPDATE CM_ENGINE_COMMAND SET
+        OPERATION_ID_ = ID_,
+        TENANT_ID_ = '__legacy_unscoped__',
+        IDEMPOTENCY_KEY_ = 'legacy:' || ID_,
+        PAYLOAD_DIGEST_ = LOWER(RAWTOHEX(STANDARD_HASH(
+          NVL(DBMS_LOB.SUBSTR(PAYLOAD_JSON_, 32767, 1), '{}'), 'SHA256'))),
+        TARGET_IDENTITY_ = COALESCE(
+          CASE TYPE_
+            WHEN 'CREATE_TASK' THEN JSON_VALUE(PAYLOAD_JSON_, '$.planItemId')
+            WHEN 'CLAIM_TASK' THEN JSON_VALUE(PAYLOAD_JSON_, '$.engineTaskId')
+            WHEN 'COMPLETE_TASK' THEN JSON_VALUE(PAYLOAD_JSON_, '$.engineTaskId')
+            WHEN 'START_PROCESS' THEN COALESCE(JSON_VALUE(PAYLOAD_JSON_, '$.processDefinitionId'),
+                                               JSON_VALUE(PAYLOAD_JSON_, '$.processDefinitionKey'))
+            WHEN 'CANCEL_PROCESS' THEN JSON_VALUE(PAYLOAD_JSON_, '$.processInstanceId')
+            WHEN 'DEPLOY_ORCHESTRATION' THEN JSON_VALUE(PAYLOAD_JSON_, '$.definitionKey')
+            WHEN 'CORRELATE_MESSAGE' THEN JSON_VALUE(PAYLOAD_JSON_, '$.messageName')
+          END, CASE_ID_),
+        UPDATED_AT_ = CREATED_AT_,
+        DECIDED_AT_ = CREATED_AT_,
+        TOTAL_DISPATCH_ATTEMPTS_ = CASE
+          WHEN STATUS_ IN ('CLAIMED','DONE') THEN ATTEMPTS_ + 1 ELSE ATTEMPTS_ END,
+        AUTO_ATTEMPTS_ = CASE
+          WHEN STATUS_ IN ('CLAIMED','DONE') THEN ATTEMPTS_ + 1 ELSE ATTEMPTS_ END,
+        BUDGET_EPOCH_ = 0,
+        AUTO_BUDGET_RESET_ = 0,
+        ROW_VERSION_ = 0,
+        ACTION_COUNT_ = 0,
+        ACTION_HIGH_WATER_ = 0,
+        ACTION_RESET_COUNT_ = 0,
+        ACTION_CANCEL_COUNT_ = 0,
+        LEGACY_ROW_ID_ = CASE WHEN STATUS_ = 'DONE' THEN ID_ END,
+        LEGACY_STATUS_ = CASE WHEN STATUS_ = 'DONE' THEN 'DONE' END,
+        LEGACY_MIGRATION_REF_ = CASE WHEN STATUS_ = 'DONE' THEN 'ws4-task2' END,
+        LEGACY_MIGRATED_AT_ = CASE WHEN STATUS_ = 'DONE' THEN SYSTIMESTAMP END,
+        LEGACY_FAILURE_COUNT_ = CASE WHEN STATUS_ = 'DONE' THEN ATTEMPTS_ END,
+        CONFIRM_SOURCE_ = CASE WHEN STATUS_ = 'DONE' THEN 'LEGACY_MIGRATION' END,
+        CONFIRMED_AT_ = CASE WHEN STATUS_ = 'DONE' THEN SYSTIMESTAMP END,
+        FAILED_AT_ = CASE WHEN STATUS_ = 'DEAD' THEN CREATED_AT_ END,
+        RAW_LEGACY_PAYLOAD_ = PAYLOAD_JSON_,
+        RAW_LEGACY_ERROR_ = LAST_ERROR_,
+        RAW_LEGACY_CLAIM_TOKEN_ = CLAIM_TOKEN_,
+        RAW_LEGACY_CLAIMED_AT_ = CLAIMED_AT_,
+        ORIGINAL_STATUS_ = STATUS_,
+        NEXT_ATTEMPT_AT_ = CASE WHEN STATUS_ = 'RETRYING' THEN NEXT_ATTEMPT_AT_ END,
+        STATUS_ = CASE STATUS_
+          WHEN 'PENDING' THEN 'PENDING'
+          WHEN 'RETRYING' THEN 'RETRYABLE'
+          WHEN 'CLAIMED' THEN 'AWAITING_CONFIRMATION'
+          WHEN 'DONE' THEN 'CONFIRMED'
+          WHEN 'DEAD' THEN 'FAILED'
+          ELSE STATUS_ END,
+        CLAIM_TOKEN_ = NULL,
+        CLAIMED_AT_ = NULL
+      WHERE OPERATION_ID_ IS NULL
+    ]]></sql>
+    <sql><![CDATA[
+      UPDATE CM_ENGINE_COMMAND
+      SET DECIDED_AT_=LEGACY_MIGRATED_AT_, CONFIRMED_AT_=LEGACY_MIGRATED_AT_
+      WHERE CONFIRM_SOURCE_='LEGACY_MIGRATION'
+    ]]></sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-required" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="15">SELECT COUNT(*) FROM USER_TAB_COLUMNS
+        WHERE TABLE_NAME='CM_ENGINE_COMMAND'
+          AND COLUMN_NAME IN ('OPERATION_ID_','TENANT_ID_','IDEMPOTENCY_KEY_','PAYLOAD_DIGEST_','UPDATED_AT_',
+                              'DECIDED_AT_','TOTAL_DISPATCH_ATTEMPTS_','AUTO_ATTEMPTS_',
+                              'BUDGET_EPOCH_','AUTO_BUDGET_RESET_','ROW_VERSION_',
+                              'ACTION_COUNT_','ACTION_HIGH_WATER_','ACTION_RESET_COUNT_',
+                              'ACTION_CANCEL_COUNT_')
+          AND NULLABLE='Y'</sqlCheck>
+    </preConditions>
+    <sql><![CDATA[
+      ALTER TABLE CM_ENGINE_COMMAND MODIFY (
+        OPERATION_ID_ NOT NULL, TENANT_ID_ NOT NULL, IDEMPOTENCY_KEY_ NOT NULL, PAYLOAD_DIGEST_ NOT NULL,
+        UPDATED_AT_ NOT NULL, DECIDED_AT_ NOT NULL, TOTAL_DISPATCH_ATTEMPTS_ NOT NULL,
+        AUTO_ATTEMPTS_ NOT NULL, BUDGET_EPOCH_ NOT NULL, AUTO_BUDGET_RESET_ NOT NULL,
+        ROW_VERSION_ NOT NULL, ACTION_COUNT_ NOT NULL, ACTION_HIGH_WATER_ NOT NULL,
+        ACTION_RESET_COUNT_ NOT NULL, ACTION_CANCEL_COUNT_ NOT NULL)
+    ]]></sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-status-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="CK_CM_ENGCMD_STATUS has an incompatible definition">
+      <sqlCheck expectedResult="1"><![CDATA[
+        SELECT CASE WHEN COUNT(*)=0 OR
+          MAX(CASE WHEN CONSTRAINT_TYPE='C' THEN
+            REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"]','') END) IN (
+            'STATUS_IN(''PENDING'',''RETRYING'',''CLAIMED'',''DONE'',''DEAD'')',
+            'STATUS_IN(''PENDING'',''DISPATCHING'',''RETRYABLE'',''AWAITING_CONFIRMATION'',''CONFIRMED'',''FAILED'',''CONFLICT'',''MANUAL_REVIEW'',''CANCELLED'')')
+          THEN 1 ELSE 0 END
+        FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME='CM_ENGINE_COMMAND' AND CONSTRAINT_NAME='CK_CM_ENGCMD_STATUS'
+      ]]></sqlCheck>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-drop-poc-status" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="1"><![CDATA[SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME='CM_ENGINE_COMMAND' AND CONSTRAINT_NAME='CK_CM_ENGCMD_STATUS'
+          AND REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"]','') =
+            'STATUS_IN(''PENDING'',''RETRYING'',''CLAIMED'',''DONE'',''DEAD'')']]></sqlCheck>
+    </preConditions>
+    <sql>ALTER TABLE CM_ENGINE_COMMAND DROP CONSTRAINT CK_CM_ENGCMD_STATUS</sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-new-status-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="CK_CM_ENGCMD_STATUS production definition is incompatible">
+      <sqlCheck expectedResult="1"><![CDATA[
+        SELECT CASE WHEN COUNT(*)=0 OR
+          MAX(CASE WHEN CONSTRAINT_TYPE='C' THEN
+            REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"]','') END) =
+            'STATUS_IN(''PENDING'',''DISPATCHING'',''RETRYABLE'',''AWAITING_CONFIRMATION'',''CONFIRMED'',''FAILED'',''CONFLICT'',''MANUAL_REVIEW'',''CANCELLED'')'
+          THEN 1 ELSE 0 END
+        FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME='CM_ENGINE_COMMAND' AND CONSTRAINT_NAME='CK_CM_ENGCMD_STATUS'
+      ]]></sqlCheck>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-status" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME='CM_ENGINE_COMMAND' AND CONSTRAINT_NAME='CK_CM_ENGCMD_STATUS'</sqlCheck>
+    </preConditions>
+    <sql>ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT CK_CM_ENGCMD_STATUS
+      CHECK (STATUS_ IN ('PENDING','DISPATCHING','RETRYABLE','AWAITING_CONFIRMATION',
+                         'CONFIRMED','FAILED','CONFLICT','MANUAL_REVIEW','CANCELLED'))</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-action-table-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="CM_ENGINE_COMMAND_ACTION has an incompatible structure">
+      <or>
+        <not><tableExists tableName="CM_ENGINE_COMMAND_ACTION"/></not>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN COUNT(*)=15 AND
+            (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+             WHERE TABLE_NAME='CM_ENGINE_COMMAND_ACTION')=15 THEN 1 ELSE 0 END
+          FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_ENGINE_COMMAND_ACTION' AND (
+            (COLUMN_NAME='COMMAND_ID_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 AND NULLABLE='N') OR
+            (COLUMN_NAME='SEQUENCE_' AND DATA_TYPE='NUMBER' AND DATA_PRECISION=19 AND NULLABLE='N') OR
+            (COLUMN_NAME='ACTION_ID_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=160 AND NULLABLE='N') OR
+            (COLUMN_NAME='TENANT_ID_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 AND NULLABLE='N') OR
+            (COLUMN_NAME='OPERATION_ID_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 AND NULLABLE='N') OR
+            (COLUMN_NAME='COMMAND_TYPE_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=30 AND NULLABLE='N') OR
+            (COLUMN_NAME='EXPECTED_TARGET_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=255 AND NULLABLE='N') OR
+            (COLUMN_NAME='ACTION_TYPE_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=32 AND NULLABLE='N') OR
+            (COLUMN_NAME='AUDIT_REFERENCE_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=160 AND NULLABLE='N') OR
+            (COLUMN_NAME='PERFORMED_AT_' AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='N') OR
+            (COLUMN_NAME='OVERRIDE_AUTO_CAP_' AND DATA_TYPE='NUMBER' AND DATA_PRECISION=1 AND NULLABLE='N') OR
+            (COLUMN_NAME='REVIEW_FINDING_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=32 AND NULLABLE='Y') OR
+            (COLUMN_NAME='REVIEW_SOURCE_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=32 AND NULLABLE='Y') OR
+            (COLUMN_NAME='REVIEW_REFERENCE_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=160 AND NULLABLE='Y') OR
+            (COLUMN_NAME='CREATED_AT_' AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='N'
+              AND REGEXP_REPLACE(UPPER(DATA_DEFAULT),'[[:space:]]','')='SYSTIMESTAMP'))
+        ]]></sqlCheck>
+      </or>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-action-table" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><tableExists tableName="CM_ENGINE_COMMAND_ACTION"/></not>
+    </preConditions>
+    <createTable tableName="CM_ENGINE_COMMAND_ACTION">
+      <column name="COMMAND_ID_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="SEQUENCE_" type="NUMBER(19)"><constraints nullable="false"/></column>
+      <column name="ACTION_ID_" type="VARCHAR2(160)"><constraints nullable="false"/></column>
+      <column name="TENANT_ID_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="OPERATION_ID_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="COMMAND_TYPE_" type="VARCHAR2(30)"><constraints nullable="false"/></column>
+      <column name="EXPECTED_TARGET_" type="VARCHAR2(255)"><constraints nullable="false"/></column>
+      <column name="ACTION_TYPE_" type="VARCHAR2(32)"><constraints nullable="false"/></column>
+      <column name="AUDIT_REFERENCE_" type="VARCHAR2(160)"><constraints nullable="false"/></column>
+      <column name="PERFORMED_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="OVERRIDE_AUTO_CAP_" type="NUMBER(1)"><constraints nullable="false"/></column>
+      <column name="REVIEW_FINDING_" type="VARCHAR2(32)"/>
+      <column name="REVIEW_SOURCE_" type="VARCHAR2(32)"/>
+      <column name="REVIEW_REFERENCE_" type="VARCHAR2(160)"/>
+      <column name="CREATED_AT_" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="SYSTIMESTAMP"><constraints nullable="false"/></column>
+    </createTable>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-invariants-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="CM_ENGINE_COMMAND production invariant constraint is incompatible">
+      <and>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN COUNT(*)=0 OR
+            MAX(CASE WHEN CONSTRAINT_TYPE='C' THEN
+              REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"]','') END) =
+              'TOTAL_DISPATCH_ATTEMPTS_>=0ANDAUTO_ATTEMPTS_>=0ANDAUTO_ATTEMPTS_<=6ANDBUDGET_EPOCH_>=0ANDAUTO_BUDGET_RESET_IN(0,1)ANDROW_VERSION_>=0ANDACTION_COUNT_>=0ANDACTION_HIGH_WATER_=ACTION_COUNT_ANDACTION_RESET_COUNT_>=0ANDACTION_CANCEL_COUNT_>=0ANDACTION_RESET_COUNT_+ACTION_CANCEL_COUNT_<=ACTION_COUNT_ANDBUDGET_EPOCH_=ACTION_RESET_COUNT_ANDTOTAL_DISPATCH_ATTEMPTS_>=BUDGET_EPOCH_*6+AUTO_ATTEMPTS_'
+            THEN 1 ELSE 0 END FROM USER_CONSTRAINTS
+          WHERE TABLE_NAME='CM_ENGINE_COMMAND' AND CONSTRAINT_NAME='CK_CM_ENGCMD_COUNTERS'
+        ]]></sqlCheck>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN COUNT(*)=0 OR
+            MAX(CASE WHEN CONSTRAINT_TYPE='C' THEN
+              REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"]','') END) =
+              '(STATUS_=''DISPATCHING''ANDLEASE_TOKEN_ISNOTNULLANDLEASE_OWNER_ISNOTNULLANDLEASE_EXPIRES_AT_ISNOTNULL)OR(STATUS_<>''DISPATCHING''ANDLEASE_TOKEN_ISNULLANDLEASE_OWNER_ISNULLANDLEASE_EXPIRES_AT_ISNULL)'
+            THEN 1 ELSE 0 END FROM USER_CONSTRAINTS
+          WHERE TABLE_NAME='CM_ENGINE_COMMAND' AND CONSTRAINT_NAME='CK_CM_ENGCMD_LEASE'
+        ]]></sqlCheck>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN COUNT(*)=0 OR
+            MAX(CASE WHEN CONSTRAINT_TYPE='C' THEN
+              REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"]','') END) =
+              'SEQUENCE_>0ANDOVERRIDE_AUTO_CAP_IN(0,1)AND((REVIEW_FINDING_ISNULLANDREVIEW_SOURCE_ISNULLANDREVIEW_REFERENCE_ISNULL)OR(REVIEW_FINDING_ISNOTNULLANDREVIEW_SOURCE_ISNOTNULLANDREVIEW_REFERENCE_ISNOTNULL))'
+            THEN 1 ELSE 0 END FROM USER_CONSTRAINTS
+          WHERE TABLE_NAME='CM_ENGINE_COMMAND_ACTION' AND CONSTRAINT_NAME='CK_CM_ECA_INVARIANTS'
+        ]]></sqlCheck>
+      </and>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-counter-invariants" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE CONSTRAINT_NAME='CK_CM_ENGCMD_COUNTERS'</sqlCheck>
+    </preConditions>
+    <sql><![CDATA[ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT CK_CM_ENGCMD_COUNTERS CHECK (
+      TOTAL_DISPATCH_ATTEMPTS_ >= 0 AND AUTO_ATTEMPTS_ >= 0 AND AUTO_ATTEMPTS_ <= 6
+      AND BUDGET_EPOCH_ >= 0 AND AUTO_BUDGET_RESET_ IN (0,1) AND ROW_VERSION_ >= 0
+      AND ACTION_COUNT_ >= 0 AND ACTION_HIGH_WATER_ = ACTION_COUNT_
+      AND ACTION_RESET_COUNT_ >= 0 AND ACTION_CANCEL_COUNT_ >= 0
+      AND ACTION_RESET_COUNT_ + ACTION_CANCEL_COUNT_ <= ACTION_COUNT_
+      AND BUDGET_EPOCH_ = ACTION_RESET_COUNT_
+      AND TOTAL_DISPATCH_ATTEMPTS_ >= BUDGET_EPOCH_ * 6 + AUTO_ATTEMPTS_)]]></sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-lease-invariants" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE CONSTRAINT_NAME='CK_CM_ENGCMD_LEASE'</sqlCheck>
+    </preConditions>
+    <sql><![CDATA[ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT CK_CM_ENGCMD_LEASE CHECK (
+      (STATUS_='DISPATCHING' AND LEASE_TOKEN_ IS NOT NULL AND LEASE_OWNER_ IS NOT NULL
+       AND LEASE_EXPIRES_AT_ IS NOT NULL)
+      OR (STATUS_<>'DISPATCHING' AND LEASE_TOKEN_ IS NULL AND LEASE_OWNER_ IS NULL
+       AND LEASE_EXPIRES_AT_ IS NULL))]]></sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-action-invariants" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE CONSTRAINT_NAME='CK_CM_ECA_INVARIANTS'</sqlCheck>
+    </preConditions>
+    <sql><![CDATA[ALTER TABLE CM_ENGINE_COMMAND_ACTION ADD CONSTRAINT CK_CM_ECA_INVARIANTS CHECK (
+      SEQUENCE_ > 0 AND OVERRIDE_AUTO_CAP_ IN (0,1)
+      AND ((REVIEW_FINDING_ IS NULL AND REVIEW_SOURCE_ IS NULL AND REVIEW_REFERENCE_ IS NULL)
+        OR (REVIEW_FINDING_ IS NOT NULL AND REVIEW_SOURCE_ IS NOT NULL
+          AND REVIEW_REFERENCE_ IS NOT NULL)))]]></sql>
+  </changeSet>
+
+  <!-- One fail-closed gate validates every restart-sensitive named object before any
+       existence-only create changeSet may be marked ran. Absent objects are valid prefixes;
+       same-named objects are valid only with the exact ownership/order/uniqueness contract. -->
+  <changeSet id="cm-production-engine-command-objects-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="CM_ENGINE_COMMAND production constraint/index structure is incompatible">
+      <sqlCheck expectedResult="1"><![CDATA[
+        SELECT CASE WHEN
+          (NOT EXISTS (SELECT 1 FROM USER_CONSTRAINTS WHERE CONSTRAINT_NAME='FK_CM_ECA_COMMAND') OR
+           EXISTS (SELECT 1 FROM USER_CONSTRAINTS FK
+                   JOIN USER_CONS_COLUMNS FC ON FC.CONSTRAINT_NAME=FK.CONSTRAINT_NAME AND FC.POSITION=1
+                   JOIN USER_CONSTRAINTS PK ON PK.CONSTRAINT_NAME=FK.R_CONSTRAINT_NAME
+                   JOIN USER_CONS_COLUMNS PC ON PC.CONSTRAINT_NAME=PK.CONSTRAINT_NAME AND PC.POSITION=1
+                   WHERE FK.CONSTRAINT_NAME='FK_CM_ECA_COMMAND' AND FK.CONSTRAINT_TYPE='R'
+                     AND FK.TABLE_NAME='CM_ENGINE_COMMAND_ACTION' AND FK.DELETE_RULE='NO ACTION'
+                     AND FC.COLUMN_NAME='COMMAND_ID_' AND PK.TABLE_NAME='CM_ENGINE_COMMAND'
+                     AND PC.COLUMN_NAME='ID_'
+                     AND (SELECT COUNT(*) FROM USER_CONS_COLUMNS X
+                          WHERE X.CONSTRAINT_NAME=FK.CONSTRAINT_NAME)=1))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='UQ_CM_ECA_ACTION') OR
+               EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='UQ_CM_ECA_ACTION'
+                 AND I.TABLE_NAME='CM_ENGINE_COMMAND_ACTION' AND I.UNIQUENESS='UNIQUE'
+                 AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                      FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)='COMMAND_ID_,ACTION_ID_'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='UQ_CM_ECA_SEQUENCE') OR
+               EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='UQ_CM_ECA_SEQUENCE'
+                 AND I.TABLE_NAME='CM_ENGINE_COMMAND_ACTION' AND I.UNIQUENESS='UNIQUE'
+                 AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                      FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)='COMMAND_ID_,SEQUENCE_'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='UQ_CM_ENGCMD_OPERATION') OR
+               EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='UQ_CM_ENGCMD_OPERATION'
+                 AND I.TABLE_NAME='CM_ENGINE_COMMAND' AND I.UNIQUENESS='UNIQUE'
+                 AND (SELECT REGEXP_REPLACE(UPPER(COLUMN_EXPRESSION),'[[:space:]"]','')
+                      FROM USER_IND_EXPRESSIONS E WHERE E.INDEX_NAME=I.INDEX_NAME
+                        AND E.COLUMN_POSITION=1)='CASEWHENTENANT_ID_ISNULLTHEN1ELSE0END'
+                 AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                      FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME
+                        AND C.COLUMN_POSITION IN (2,3))='TENANT_ID_,OPERATION_ID_'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='UQ_CM_ENGCMD_IDEMPOTENCY') OR
+               EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='UQ_CM_ENGCMD_IDEMPOTENCY'
+                 AND I.TABLE_NAME='CM_ENGINE_COMMAND' AND I.UNIQUENESS='UNIQUE'
+                 AND (SELECT REGEXP_REPLACE(UPPER(COLUMN_EXPRESSION),'[[:space:]"]','')
+                      FROM USER_IND_EXPRESSIONS E WHERE E.INDEX_NAME=I.INDEX_NAME
+                        AND E.COLUMN_POSITION=1)='CASEWHENTENANT_ID_ISNULLTHEN1ELSE0END'
+                 AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                      FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME
+                        AND C.COLUMN_POSITION IN (2,3))='TENANT_ID_,IDEMPOTENCY_KEY_'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='IX_CM_ENGCMD_PROD_DUE') OR
+               EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='IX_CM_ENGCMD_PROD_DUE'
+                 AND I.TABLE_NAME='CM_ENGINE_COMMAND' AND I.UNIQUENESS='NONUNIQUE'
+                 AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                      FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)='STATUS_,NEXT_ATTEMPT_AT_,CREATED_AT_'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='IX_CM_ENGCMD_LEASE') OR
+               EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='IX_CM_ENGCMD_LEASE'
+                 AND I.TABLE_NAME='CM_ENGINE_COMMAND' AND I.UNIQUENESS='NONUNIQUE'
+                 AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                      FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)='STATUS_,LEASE_EXPIRES_AT_'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='IX_CM_ENGCMD_CASE_STATUS') OR
+               EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='IX_CM_ENGCMD_CASE_STATUS'
+                 AND I.TABLE_NAME='CM_ENGINE_COMMAND' AND I.UNIQUENESS='NONUNIQUE'
+                 AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                      FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)='TENANT_ID_,CASE_ID_,STATUS_'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='IX_CM_ENGCMD_REVIEW') OR
+               EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='IX_CM_ENGCMD_REVIEW'
+                 AND I.TABLE_NAME='CM_ENGINE_COMMAND' AND I.UNIQUENESS='NONUNIQUE'
+                 AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                      FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)='STATUS_,UPDATED_AT_') )
+          THEN 1 ELSE 0 END FROM DUAL
+      ]]></sqlCheck>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-action-fk" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><foreignKeyConstraintExists foreignKeyName="FK_CM_ECA_COMMAND"
+                                       foreignKeyTableName="CM_ENGINE_COMMAND_ACTION"/></not>
+    </preConditions>
+    <addForeignKeyConstraint baseTableName="CM_ENGINE_COMMAND_ACTION" baseColumnNames="COMMAND_ID_"
+                             referencedTableName="CM_ENGINE_COMMAND" referencedColumnNames="ID_"
+                             constraintName="FK_CM_ECA_COMMAND"/>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-action-id-unique" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_ENGINE_COMMAND_ACTION" indexName="UQ_CM_ECA_ACTION"/></not>
+    </preConditions>
+    <createIndex tableName="CM_ENGINE_COMMAND_ACTION" indexName="UQ_CM_ECA_ACTION" unique="true">
+      <column name="COMMAND_ID_"/><column name="ACTION_ID_"/>
+    </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-action-seq-unique" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_ENGINE_COMMAND_ACTION" indexName="UQ_CM_ECA_SEQUENCE"/></not>
+    </preConditions>
+    <createIndex tableName="CM_ENGINE_COMMAND_ACTION" indexName="UQ_CM_ECA_SEQUENCE" unique="true">
+      <column name="COMMAND_ID_"/><column name="SEQUENCE_"/>
+    </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-operation-unique" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_ENGINE_COMMAND" indexName="UQ_CM_ENGCMD_OPERATION"/></not>
+    </preConditions>
+    <sql>CREATE UNIQUE INDEX UQ_CM_ENGCMD_OPERATION ON CM_ENGINE_COMMAND
+      (CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END, TENANT_ID_, OPERATION_ID_)</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-idempotency-unique" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_ENGINE_COMMAND" indexName="UQ_CM_ENGCMD_IDEMPOTENCY"/></not>
+    </preConditions>
+    <sql>CREATE UNIQUE INDEX UQ_CM_ENGCMD_IDEMPOTENCY ON CM_ENGINE_COMMAND
+      (CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END, TENANT_ID_, IDEMPOTENCY_KEY_)</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-due-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_PROD_DUE"/></not>
+    </preConditions>
+    <createIndex tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_PROD_DUE">
+      <column name="STATUS_"/><column name="NEXT_ATTEMPT_AT_"/><column name="CREATED_AT_"/>
+    </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-lease-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_LEASE"/></not>
+    </preConditions>
+    <createIndex tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_LEASE">
+      <column name="STATUS_"/><column name="LEASE_EXPIRES_AT_"/>
+    </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-case-status-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_CASE_STATUS"/></not>
+    </preConditions>
+    <createIndex tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_CASE_STATUS">
+      <column name="TENANT_ID_"/><column name="CASE_ID_"/><column name="STATUS_"/>
+    </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-engine-command-review-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_REVIEW"/></not>
+    </preConditions>
+    <createIndex tableName="CM_ENGINE_COMMAND" indexName="IX_CM_ENGCMD_REVIEW">
+      <column name="STATUS_"/><column name="UPDATED_AT_"/>
+    </createIndex>
+  </changeSet>
+
+</databaseChangeLog>

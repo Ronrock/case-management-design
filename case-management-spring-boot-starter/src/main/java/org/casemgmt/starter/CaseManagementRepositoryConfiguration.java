@@ -91,7 +91,7 @@ public class CaseManagementRepositoryConfiguration {
     @Bean public IdempotencyRepository idempotencyRepository(
             @Qualifier("caseJdbcClient") JdbcClient c) { return new IdempotencyRepository(c); }
     @Bean public EngineCommandRepository engineCommandRepository(
-            @Qualifier("caseJdbcClient") JdbcClient c) { return new EngineCommandRepository(c); }
+            DataSource dataSource) { return new EngineCommandRepository(dataSource); }
     @Bean public SlaRepository slaRepository(
             @Qualifier("caseJdbcClient") JdbcClient c) { return new SlaRepository(c); }
     @Bean public AppliedObservationRepository appliedObservationRepository(

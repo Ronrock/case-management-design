@@ -47,7 +47,10 @@ class AppliedObservationChangelogStaticValidationTest {
     void everyObservationSchemaMutationIncludingInitialCreationIsGranularAndRestartGuarded()
             throws Exception {
         var lifecycle = parsedChanges().stream()
-                .dropWhile(change -> !"cm-applied-engine-observation".equals(change.getId()))
+                .dropWhile(change -> !"cm-applied-engine-observation-structure-guard"
+                        .equals(change.getId()))
+                .takeWhile(change -> !"cm-production-engine-command-columns-guard"
+                        .equals(change.getId()))
                 .toList();
 
         assertThat(lifecycle).isNotEmpty();
@@ -55,18 +58,31 @@ class AppliedObservationChangelogStaticValidationTest {
             assertThat(change.getChanges()).hasSize(1);
             assertThat(change.getPreconditions()).isNotNull();
         });
-        var initialCreation = lifecycle.stream().limit(5).toList();
+        var initialCreation = lifecycle.stream().limit(8).toList();
         assertThat(initialCreation).extracting(change -> change.getId())
                 .containsExactly(
+                        "cm-applied-engine-observation-structure-guard",
                         "cm-applied-engine-observation",
                         "cm-applied-engine-observation-status-constraint",
                         "cm-applied-engine-observation-status-timestamps-constraint",
+                        "cm-applied-engine-observation-authority-index-structure-guard",
                         "cm-applied-engine-observation-authority-index",
+                        "cm-applied-engine-observation-status-index-structure-guard",
                         "cm-applied-engine-observation-status-index");
-        assertThat(initialCreation).allSatisfy(change -> {
+        assertThat(initialCreation.stream()
+                .filter(change -> !change.getId().endsWith("structure-guard")))
+                .allSatisfy(change -> {
             assertThat(change.getPreconditions().getOnFail().toString()).isEqualTo("MARK_RAN");
             assertThat(change.getPreconditions().getOnError().toString()).isEqualTo("HALT");
         });
+        assertThat(initialCreation.stream()
+                .filter(change -> change.getId().endsWith("structure-guard")))
+                .allSatisfy(change -> {
+                    assertThat(change.getPreconditions().getOnFail().toString())
+                            .isEqualTo("HALT");
+                    assertThat(change.getPreconditions().getOnError().toString())
+                            .isEqualTo("HALT");
+                });
     }
 
     @Test
@@ -84,7 +100,9 @@ class AppliedObservationChangelogStaticValidationTest {
             assertThat(changes).extracting(change -> change.getId())
                     .contains("cm-applied-engine-observation",
                             "cm-engine-observation-hardening-kind")
-                    .endsWith("cm-engine-observation-channel-engine-index");
+                    .containsSubsequence(
+                            "cm-engine-observation-channel-engine-index",
+                            "cm-production-engine-command-columns-guard");
 
             var appliedObservation = changes.stream()
                     .filter(change -> "cm-applied-engine-observation".equals(change.getId()))
@@ -150,6 +168,51 @@ class AppliedObservationChangelogStaticValidationTest {
                     .collect(Collectors.joining("\n")))
                     .doesNotContain("UPDATE CM_APPLIED_ENGINE_OBSERVATION");
         }
+    }
+
+    @Test
+    void productionCommandMigrationFailsClosedBeforeRestartableOracleDdl() throws Exception {
+        var production = parsedChanges().stream()
+                .dropWhile(change -> !"cm-production-engine-command-columns-guard"
+                        .equals(change.getId()))
+                .toList();
+
+        assertThat(production).extracting(change -> change.getId())
+                .startsWith(
+                        "cm-production-engine-command-columns-guard",
+                        "cm-production-engine-command-columns",
+                        "cm-production-engine-command-backfill",
+                        "cm-production-engine-command-required",
+                        "cm-production-engine-command-status-guard",
+                        "cm-production-engine-command-drop-poc-status",
+                        "cm-production-engine-command-new-status-guard",
+                        "cm-production-engine-command-status",
+                        "cm-engine-command-action-table-guard",
+                        "cm-engine-command-action-table",
+                        "cm-production-engine-command-invariants-guard",
+                        "cm-production-engine-command-counter-invariants",
+                        "cm-production-engine-command-lease-invariants",
+                        "cm-engine-command-action-invariants",
+                        "cm-production-engine-command-objects-guard");
+        assertThat(production.stream().filter(change -> change.getId().endsWith("guard")))
+                .allSatisfy(guard -> {
+                    assertThat(guard.getPreconditions()).isNotNull();
+                    assertThat(guard.getPreconditions().getOnFail().toString()).isEqualTo("HALT");
+                    assertThat(guard.getPreconditions().getOnError().toString()).isEqualTo("HALT");
+                });
+        String productionSql = production.stream()
+                .flatMap(changeSet -> changeSet.getChanges().stream())
+                .filter(RawSQLChange.class::isInstance)
+                .map(RawSQLChange.class::cast)
+                .map(RawSQLChange::getSql)
+                .collect(Collectors.joining("\n"));
+        assertThat(productionSql)
+                .contains("RAW_LEGACY_CLAIM_TOKEN_ = CLAIM_TOKEN_")
+                .contains("RAW_LEGACY_CLAIMED_AT_ = CLAIMED_AT_")
+                .contains("CLAIM_TOKEN_ = NULL")
+                .contains("CLAIMED_AT_ = NULL")
+                .contains("CM_ENGINE_COMMAND_ACTION")
+                .contains("UQ_CM_ENGCMD_IDEMPOTENCY");
     }
 
     private static java.util.List<liquibase.changelog.ChangeSet> parsedChanges() throws Exception {

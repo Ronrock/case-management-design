@@ -353,6 +353,7 @@ class EngineCommandDurableStateTest {
                 decision.automaticAttemptsInBudget(), decision.budgetEpoch(),
                 decision.automaticBudgetReset(), decision.terminalConfirmation(),
                 decision.legacyConfirmation(), decision.decisionEvidence(), applied,
+                decision.appliedActionPriorSummary(),
                 decision.actionLedgerSummary());
     }
 

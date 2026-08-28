@@ -295,6 +295,7 @@ public final class EngineCommandPolicy {
                         null, null, committed.totalDispatchAttempts() + 1,
                         committed.automaticAttemptsInBudget() + 1,
                         committed.budgetEpoch(), false, null, null, null, null,
+                        null,
                         committed.actionLedgerSummary()));
     }
 
@@ -374,6 +375,7 @@ public final class EngineCommandPolicy {
                 "review.retry", "Reviewed evidence permits another dispatch attempt",
                 committed.totalDispatchAttempts(), budgetAttempts, epoch, exhausted,
                 null, null, outcome.reviewEvidence(), append.action(),
+                append.expectedSummary(),
                 append.resultingSummary());
     }
 
@@ -404,6 +406,7 @@ public final class EngineCommandPolicy {
                 saturatingAdd(clock.instant(), delay), safeCode(errorCode), safeSummary(summary),
                 committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
                 committed.budgetEpoch(), false, null, null, evidence, null,
+                null,
                 committed.actionLedgerSummary());
     }
 
@@ -573,6 +576,7 @@ public final class EngineCommandPolicy {
         return new Decision(EngineCommandStatus.CONFIRMED, now(), null, null, null,
                 committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
                 committed.budgetEpoch(), false, evidence, null, null, null,
+                null,
                 committed.actionLedgerSummary());
     }
 
@@ -582,6 +586,7 @@ public final class EngineCommandPolicy {
         return new Decision(status, now(), null, safeCode(errorCode), safeSummary(summary),
                 committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
                 committed.budgetEpoch(), false, null, null, evidence, null,
+                null,
                 committed.actionLedgerSummary());
     }
 
@@ -594,6 +599,7 @@ public final class EngineCommandPolicy {
                 summary == null ? null : safeSummary(summary),
                 committed.totalDispatchAttempts(), budgetAttempts, budgetEpoch, resetBudget,
                 null, null, outcome.reviewEvidence(), append.action(),
+                append.expectedSummary(),
                 append.resultingSummary());
     }
 
@@ -1028,6 +1034,7 @@ public final class EngineCommandPolicy {
             LegacyConfirmationEvidence legacyConfirmation,
             CommandDispatchOutcome.ReviewEvidence decisionEvidence,
             ProcessedAction appliedAction,
+            ActionLedgerSummary appliedActionPriorSummary,
             ActionLedgerSummary actionLedgerSummary) {
         public Decision {
             Objects.requireNonNull(status, "status");
@@ -1092,6 +1099,8 @@ public final class EngineCommandPolicy {
                 }
             }
             if (appliedAction != null) {
+                Objects.requireNonNull(
+                        appliedActionPriorSummary, "appliedActionPriorSummary");
                 if (actionLedgerSummary.actionCount() == 0) {
                     throw new IllegalArgumentException(
                             "Applied operator action requires a normalized ledger row");
@@ -1104,8 +1113,16 @@ public final class EngineCommandPolicy {
                     throw new IllegalArgumentException(
                             "Applied operator action review must match decision evidence");
                 }
+                if (!actionLedgerSummary.equals(
+                        appliedActionPriorSummary.append(appliedAction))) {
+                    throw new IllegalArgumentException(
+                            "Applied operator action must exactly advance its prior summary");
+                }
                 validateAppliedAction(status, automaticBudgetReset,
                         automaticAttemptsInBudget, budgetEpoch, appliedAction);
+            } else if (appliedActionPriorSummary != null) {
+                throw new IllegalArgumentException(
+                        "A prior summary is valid only with its applied operator action");
             } else if (automaticBudgetReset) {
                 throw new IllegalArgumentException(
                         "An automatic budget reset requires its applied retry override action");
@@ -1165,6 +1182,30 @@ public final class EngineCommandPolicy {
             return appliedAction == null ? null : appliedAction.action();
         }
 
+        /** Compatibility constructor; historical high-water actions require an explicit prior. */
+        public Decision(
+                EngineCommandStatus status,
+                OffsetDateTime decidedAt,
+                OffsetDateTime nextAttemptAt,
+                String errorCode,
+                String safeSummary,
+                long totalDispatchAttempts,
+                int automaticAttemptsInBudget,
+                long budgetEpoch,
+                boolean automaticBudgetReset,
+                CommandDispatchOutcome.ConfirmationEvidence terminalConfirmation,
+                LegacyConfirmationEvidence legacyConfirmation,
+                CommandDispatchOutcome.ReviewEvidence decisionEvidence,
+                ProcessedAction appliedAction,
+                ActionLedgerSummary actionLedgerSummary) {
+            this(status, decidedAt, nextAttemptAt, errorCode, safeSummary,
+                    totalDispatchAttempts, automaticAttemptsInBudget, budgetEpoch,
+                    automaticBudgetReset, terminalConfirmation, legacyConfirmation,
+                    decisionEvidence, appliedAction,
+                    compatibilityPrior(appliedAction, actionLedgerSummary),
+                    actionLedgerSummary);
+        }
+
         /** Compatibility constructor for callers creating a state with no legacy provenance. */
         public Decision(
                 EngineCommandStatus status,
@@ -1183,7 +1224,8 @@ public final class EngineCommandPolicy {
             this(status, decidedAt, nextAttemptAt, errorCode, safeSummary,
                     totalDispatchAttempts, automaticAttemptsInBudget, budgetEpoch,
                     automaticBudgetReset, terminalConfirmation, null, decisionEvidence,
-                    appliedAction, actionLedgerSummary);
+                    appliedAction, compatibilityPrior(appliedAction, actionLedgerSummary),
+                    actionLedgerSummary);
         }
 
         /** Compatibility constructor for callers without historical actions yet. */
@@ -1204,7 +1246,21 @@ public final class EngineCommandPolicy {
                     totalDispatchAttempts, automaticAttemptsInBudget, budgetEpoch,
                     automaticBudgetReset, terminalConfirmation, null, decisionEvidence,
                     compatibilityAppliedAction(appliedOperatorAction, decisionEvidence),
+                    appliedOperatorAction == null ? null : ActionLedgerSummary.empty(),
                     compatibilitySummary(appliedOperatorAction, decisionEvidence));
+        }
+
+        private static ActionLedgerSummary compatibilityPrior(
+                ProcessedAction appliedAction, ActionLedgerSummary resultingSummary) {
+            if (appliedAction == null) {
+                return null;
+            }
+            ActionLedgerSummary empty = ActionLedgerSummary.empty();
+            if (!empty.append(appliedAction).equals(resultingSummary)) {
+                throw new IllegalArgumentException(
+                        "Historical high-water applied actions require an explicit prior summary");
+            }
+            return empty;
         }
 
         private static ProcessedAction compatibilityAppliedAction(

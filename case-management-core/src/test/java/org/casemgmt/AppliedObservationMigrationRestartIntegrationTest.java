@@ -21,6 +21,7 @@ import java.sql.Statement;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Oracle proof that every durable-observation DDL step resumes after an auto-committed prefix. */
 class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
@@ -36,10 +37,13 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
     private static String jdbcUrl;
 
     private static final List<String> EXPECTED_CHANGESETS = List.of(
+            "cm-applied-engine-observation-structure-guard",
             "cm-applied-engine-observation",
             "cm-applied-engine-observation-status-constraint",
             "cm-applied-engine-observation-status-timestamps-constraint",
+            "cm-applied-engine-observation-authority-index-structure-guard",
             "cm-applied-engine-observation-authority-index",
+            "cm-applied-engine-observation-status-index-structure-guard",
             "cm-applied-engine-observation-status-index",
             "cm-engine-observation-hardening-kind",
             "cm-engine-observation-hardening-ignored-at",
@@ -91,8 +95,42 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
         assertThat(appliedChangeSets(scenarioJdbc)).containsExactlyElementsOf(EXPECTED_CHANGESETS);
     }
 
+    @ParameterizedTest(name = "halts on malformed pre-existing {0}")
+    @EnumSource(MalformedState.class)
+    void malformedSameNamedObjectsHaltWithoutRecordingTheGuardedChangeSet(
+            MalformedState malformedState) throws Exception {
+        recreateSchema();
+        DataSource scenarioDataSource = new DriverManagerDataSource(
+                jdbcUrl, SCHEMA, SCHEMA_PASSWORD);
+        applyMasterBeforeObservationLedger(scenarioDataSource);
+        recreateMalformedPrefix(scenarioDataSource, malformedState);
+        JdbcClient scenarioJdbc = JdbcClient.create(scenarioDataSource);
+
+        assertThatThrownBy(() -> migrate(scenarioDataSource))
+                .hasRootCauseMessage(malformedState.expectedFailureMessage());
+        assertThat(appliedChangeSets(scenarioJdbc))
+                .doesNotContain(malformedState.guardedChangeSet());
+    }
+
     private static void recreateInitialTable(DataSource scenarioDataSource,
                                              PartialState partialState) throws Exception {
+        if (partialState == PartialState.EMPTY_SCHEMA) {
+            return;
+        }
+        createCorrectInitialTable(scenarioDataSource);
+        if (partialState == PartialState.SOME_CONSTRAINTS_AND_INDEXES) {
+            execute(scenarioDataSource, """
+                    ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS
+                      CHECK (STATUS_ IN ('CLAIMED','APPLIED','FAILED'))""");
+            execute(scenarioDataSource, """
+                    CREATE UNIQUE INDEX UQ_CM_AEO_AUTH_FINGERPRINT
+                      ON CM_APPLIED_ENGINE_OBSERVATION (
+                        CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END,
+                        TENANT_ID_, FINGERPRINT_)""");
+        }
+    }
+
+    private static void createCorrectInitialTable(DataSource scenarioDataSource) throws Exception {
         execute(scenarioDataSource, """
                 CREATE TABLE CM_APPLIED_ENGINE_OBSERVATION (
                   OBSERVATION_ID_ VARCHAR2(128) NOT NULL,
@@ -112,15 +150,43 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                   FAILED_AT_ TIMESTAMP WITH TIME ZONE,
                   FAILURE_DETAIL_ VARCHAR2(2000)
                 )""");
-        if (partialState == PartialState.SOME_CONSTRAINTS_AND_INDEXES) {
+    }
+
+    private static void recreateMalformedPrefix(
+            DataSource scenarioDataSource, MalformedState malformedState) throws Exception {
+        if (malformedState == MalformedState.TABLE_WRONG_COLUMN_SIGNATURE) {
+            createCorrectInitialTable(scenarioDataSource);
             execute(scenarioDataSource, """
-                    ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS
-                      CHECK (STATUS_ IN ('CLAIMED','APPLIED','FAILED'))""");
-            execute(scenarioDataSource, """
+                    ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION
+                    MODIFY CLAIM_TOKEN_ VARCHAR2(64)""");
+            return;
+        }
+        createCorrectInitialTable(scenarioDataSource);
+        String authorityDefinition = switch (malformedState) {
+            case AUTHORITY_INDEX_NONUNIQUE -> """
+                    CREATE INDEX UQ_CM_AEO_AUTH_FINGERPRINT
+                    ON CM_APPLIED_ENGINE_OBSERVATION (
+                      CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END,
+                      TENANT_ID_, FINGERPRINT_)""";
+            case AUTHORITY_INDEX_WRONG_COLUMN -> """
                     CREATE UNIQUE INDEX UQ_CM_AEO_AUTH_FINGERPRINT
-                      ON CM_APPLIED_ENGINE_OBSERVATION (
-                        CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END,
-                        TENANT_ID_, FINGERPRINT_)""");
+                    ON CM_APPLIED_ENGINE_OBSERVATION (
+                      CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END,
+                      TENANT_ID_, OBSERVATION_ID_)""";
+            case AUTHORITY_INDEX_WRONG_EXPRESSION -> """
+                    CREATE UNIQUE INDEX UQ_CM_AEO_AUTH_FINGERPRINT
+                    ON CM_APPLIED_ENGINE_OBSERVATION (
+                      CASE WHEN TENANT_ID_ IS NULL THEN 0 ELSE 1 END,
+                      TENANT_ID_, FINGERPRINT_)""";
+            case STATUS_INDEX_WRONG_COLUMN -> null;
+            case TABLE_WRONG_COLUMN_SIGNATURE -> throw new IllegalStateException();
+        };
+        if (authorityDefinition != null) {
+            execute(scenarioDataSource, authorityDefinition);
+        } else {
+            execute(scenarioDataSource, """
+                    CREATE INDEX IX_CM_AEO_STATUS
+                    ON CM_APPLIED_ENGINE_OBSERVATION (STATUS_, APPLIED_AT_)""");
         }
     }
 
@@ -153,6 +219,9 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                         "UQ_CM_AEO_AUTH_FINGERPRINT:UNIQUE");
         assertThat(indexColumns(scenarioJdbc, "IX_CM_AEO_STATUS"))
                 .containsExactly("STATUS_", "CLAIMED_AT_");
+        assertThat(indexExpressions(scenarioJdbc, "UQ_CM_AEO_AUTH_FINGERPRINT"))
+                .containsExactly(
+                        "CASE WHEN \"TENANT_ID_\" IS NULL THEN 1 ELSE 0 END", null, null);
         assertThat(indexColumns(scenarioJdbc, "IX_CM_AEO_ENGINE_ENTITY"))
                 .containsExactly("TENANT_ID_", "ENGINE_ID_", "CASE_ID_",
                         "PROCESS_INSTANCE_ID_", "OBSERVATION_KIND_", "ENTITY_ID_", "STATUS_");
@@ -161,6 +230,14 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
     private static List<String> indexColumns(JdbcClient scenarioJdbc, String indexName) {
         return scenarioJdbc.sql("""
                 SELECT COLUMN_NAME FROM USER_IND_COLUMNS
+                WHERE INDEX_NAME = :indexName
+                ORDER BY COLUMN_POSITION""")
+                .param("indexName", indexName).query(String.class).list();
+    }
+
+    private static List<String> indexExpressions(JdbcClient scenarioJdbc, String indexName) {
+        return scenarioJdbc.sql("""
+                SELECT COLUMN_EXPRESSION FROM USER_IND_EXPRESSIONS
                 WHERE INDEX_NAME = :indexName
                 ORDER BY COLUMN_POSITION""")
                 .param("indexName", indexName).query(String.class).list();
@@ -236,7 +313,37 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
     }
 
     private enum PartialState {
+        EMPTY_SCHEMA,
         TABLE_ONLY,
         SOME_CONSTRAINTS_AND_INDEXES
+    }
+
+    private enum MalformedState {
+        TABLE_WRONG_COLUMN_SIGNATURE(
+                "cm-applied-engine-observation-structure-guard",
+                "CM_APPLIED_ENGINE_OBSERVATION has an incompatible structure"),
+        AUTHORITY_INDEX_NONUNIQUE(
+                "cm-applied-engine-observation-authority-index-structure-guard",
+                "UQ_CM_AEO_AUTH_FINGERPRINT has an incompatible structure"),
+        AUTHORITY_INDEX_WRONG_COLUMN(
+                "cm-applied-engine-observation-authority-index-structure-guard",
+                "UQ_CM_AEO_AUTH_FINGERPRINT has an incompatible structure"),
+        AUTHORITY_INDEX_WRONG_EXPRESSION(
+                "cm-applied-engine-observation-authority-index-structure-guard",
+                "UQ_CM_AEO_AUTH_FINGERPRINT has an incompatible structure"),
+        STATUS_INDEX_WRONG_COLUMN(
+                "cm-applied-engine-observation-status-index-structure-guard",
+                "IX_CM_AEO_STATUS has an incompatible structure");
+
+        private final String guardedChangeSet;
+        private final String expectedFailureMessage;
+
+        MalformedState(String guardedChangeSet, String expectedFailureMessage) {
+            this.guardedChangeSet = guardedChangeSet;
+            this.expectedFailureMessage = expectedFailureMessage;
+        }
+
+        String guardedChangeSet() { return guardedChangeSet; }
+        String expectedFailureMessage() { return expectedFailureMessage; }
     }
 }

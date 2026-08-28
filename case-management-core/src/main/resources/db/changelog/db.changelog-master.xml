@@ -17,4 +17,5 @@
   <include file="db/changelog/cm-poc-additions.xml"/>
   <include file="db/changelog/cm-bpmn-release-activation.xml"/>
   <include file="db/changelog/cm-engine-observation-effects.xml"/>
+  <include file="db/changelog/cm-production-engine-command.xml"/>
 </databaseChangeLog>
