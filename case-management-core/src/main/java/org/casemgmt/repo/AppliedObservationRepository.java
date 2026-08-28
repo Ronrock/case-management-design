@@ -5,6 +5,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 import java.security.SecureRandom;
+import java.time.OffsetDateTime;
 import java.util.Base64;
 import java.util.Optional;
 import java.util.regex.Pattern;
@@ -20,6 +21,10 @@ public final class AppliedObservationRepository {
     public enum ClaimOutcome { CLAIMED, RECLAIMED, DUPLICATE }
 
     public enum Status { CLAIMED, APPLIED, FAILED }
+
+    /** Audit-safe ordering coordinates of the newest applied fact for one engine entity. */
+    public record AppliedPosition(String observationId, Long entityRevision,
+                                  java.time.Instant engineOccurredAt, String eventType) { }
 
     /** Opaque ownership capability; callers can retain it but cannot mint one. */
     public static final class Claim {
@@ -94,6 +99,42 @@ public final class AppliedObservationRepository {
             }
             return ClaimResult.duplicate();
         }
+    }
+
+    /**
+     * Finds the position against which a newly-owned fact is ordered. When the incoming engine
+     * supplies a stable entity revision, revision is authoritative and occurrence time breaks a
+     * tie. Without a revision, the latest engine occurrence time is authoritative.
+     */
+    public Optional<AppliedPosition> latestAppliedPosition(EngineObservation observation) {
+        ObservationValues values = valuesOf(observation);
+        String ordering = observation.entityRevision() == null
+                ? "ENGINE_OCCURRED_AT_ DESC, APPLIED_AT_ DESC"
+                : "CASE WHEN ENTITY_REVISION_ IS NULL THEN 1 ELSE 0 END, "
+                    + "ENTITY_REVISION_ DESC, ENGINE_OCCURRED_AT_ DESC, APPLIED_AT_ DESC";
+        return jdbc.sql("""
+                SELECT OBSERVATION_ID_, ENTITY_REVISION_, ENGINE_OCCURRED_AT_, EVENT_TYPE_
+                FROM CM_APPLIED_ENGINE_OBSERVATION
+                WHERE SOURCE_ = :source AND CASE_ID_ = :caseId
+                  AND PROCESS_INSTANCE_ID_ = :processInstanceId AND ENTITY_ID_ = :entityId
+                  AND (TENANT_ID_ = :tenantId
+                    OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
+                  AND STATUS_ = 'APPLIED'
+                ORDER BY """ + ordering + " FETCH FIRST 1 ROW ONLY")
+                .param("source", values.source())
+                .param("caseId", values.caseId())
+                .param("processInstanceId", values.processInstanceId())
+                .param("entityId", values.entityId())
+                .param("tenantId", values.tenantId())
+                .query((rs, rowNum) -> {
+                    Number revision = (Number) rs.getObject("ENTITY_REVISION_");
+                    OffsetDateTime occurred = rs.getObject(
+                            "ENGINE_OCCURRED_AT_", OffsetDateTime.class);
+                    return new AppliedPosition(rs.getString("OBSERVATION_ID_"),
+                            revision == null ? null : revision.longValue(), occurred.toInstant(),
+                            rs.getString("EVENT_TYPE_"));
+                })
+                .optional();
     }
 
     /** Marks this caller's still-claimed observation as applied, or rejects a stale owner. */
