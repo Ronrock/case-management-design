@@ -6,9 +6,11 @@ import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.service.CanonicalPatch;
 import org.casemgmt.service.CaseDataMappingService;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.jdbc.datasource.ConnectionHolder;
-import org.springframework.jdbc.datasource.DataSourceUtils;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
@@ -30,7 +32,7 @@ public class CaseRepository {
             LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_""";
 
     private final JdbcClient jdbc;
-    private final DataSource transactionDataSource;
+    private final TransactionTemplate mandatoryCanonicalTransaction;
 
     /**
      * Compatibility constructor for ordinary repository operations. Canonical compare-and-apply
@@ -41,14 +43,14 @@ public class CaseRepository {
         this(jdbc, null);
     }
 
-    /** Creates the {@link JdbcClient} from, and retains, the exact transaction DataSource. */
+    /** Creates the {@link JdbcClient} and mandatory transaction participant from one DataSource. */
     public CaseRepository(DataSource transactionDataSource) {
-        this(JdbcClient.create(transactionDataSource), transactionDataSource);
+        this(JdbcClient.create(transactionDataSource), mandatoryTransaction(transactionDataSource));
     }
 
-    private CaseRepository(JdbcClient jdbc, DataSource transactionDataSource) {
+    private CaseRepository(JdbcClient jdbc, TransactionTemplate mandatoryCanonicalTransaction) {
         this.jdbc = jdbc;
-        this.transactionDataSource = transactionDataSource;
+        this.mandatoryCanonicalTransaction = mandatoryCanonicalTransaction;
     }
 
     public void insert(CaseInstance c) {
@@ -180,13 +182,29 @@ public class CaseRepository {
      * held. This method deliberately opens no transaction of its own: callers must already be
      * inside a Spring-managed transaction using the repository's {@code DataSource}. A naked or
      * auto-commit invocation is rejected because its row lock would otherwise be released after
-     * the SELECT, reopening the compare/write race this method exists to close.
+     * the SELECT, reopening the compare/write race this method exists to close. Its internal
+     * {@code PROPAGATION_MANDATORY} template is only a manager-specific participation guard: it
+     * cannot start, suspend, or independently commit a transaction.
      */
     public CaseDataMappingService.PatchResult applyCanonicalPatch(CanonicalPatch patch) {
         if (patch == null) {
             throw new IllegalArgumentException("patch must not be null");
         }
-        requireCanonicalTransaction();
+        if (mandatoryCanonicalTransaction == null) {
+            throw new IllegalStateException("Canonical compare-and-apply requires an active caller "
+                    + "transaction and a transaction-verifiable repository DataSource");
+        }
+        try {
+            return mandatoryCanonicalTransaction.execute(
+                    status -> applyCanonicalPatchInCallerTransaction(patch));
+        } catch (IllegalTransactionStateException missingTransaction) {
+            throw new IllegalStateException("Canonical compare-and-apply requires an active caller "
+                    + "transaction bound to the repository DataSource", missingTransaction);
+        }
+    }
+
+    private CaseDataMappingService.PatchResult applyCanonicalPatchInCallerTransaction(
+            CanonicalPatch patch) {
         CaseInstance current = requireForCanonicalUpdate(patch.caseId());
         if (patch.changes().isEmpty()) {
             return CaseDataMappingService.PatchResult.noChanges(current.version());
@@ -227,19 +245,19 @@ public class CaseRepository {
                 .orElseThrow(() -> new NotFoundException("Case", id));
     }
 
-    private void requireCanonicalTransaction() {
-        if (transactionDataSource == null) {
-            throw new IllegalStateException("Canonical compare-and-apply requires an active caller "
-                    + "transaction and a transaction-verifiable repository DataSource");
+    private static TransactionTemplate mandatoryTransaction(DataSource repositoryDataSource) {
+        DataSource transactionResource = repositoryDataSource;
+        while (transactionResource instanceof TransactionAwareDataSourceProxy proxy) {
+            transactionResource = proxy.getTargetDataSource();
+            if (transactionResource == null) {
+                throw new IllegalArgumentException(
+                        "TransactionAwareDataSourceProxy must have a target DataSource");
+            }
         }
-        Object resource = TransactionSynchronizationManager.getResource(transactionDataSource);
-        if (!TransactionSynchronizationManager.isActualTransactionActive()
-                || !(resource instanceof ConnectionHolder holder)
-                || !DataSourceUtils.isConnectionTransactional(
-                        holder.getConnection(), transactionDataSource)) {
-            throw new IllegalStateException("Canonical compare-and-apply requires an active caller "
-                    + "transaction bound to the repository DataSource");
-        }
+        TransactionTemplate mandatory = new TransactionTemplate(
+                new DataSourceTransactionManager(transactionResource));
+        mandatory.setPropagationBehavior(TransactionDefinition.PROPAGATION_MANDATORY);
+        return mandatory;
     }
 
     private static List<CaseDataMappingService.FieldConflict> conflicts(
