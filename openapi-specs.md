@@ -52,18 +52,34 @@ paths:
                 items: {$ref: '#/components/schemas/CaseDefinition'}
     post:
       tags: [Case Definitions]
-      summary: Deploy a new case definition (new key or new version)
+      summary: Deploy a legacy plan model or publish a combined BPMN definition
+      description: >
+        Requires the administrator identity group. `application/json` preserves the legacy
+        PLAN_MODEL deployment operation and returns its deployment summary. `application/zip`
+        publishes orchestration, contract, and presentation artifacts and returns the resulting
+        BPMN binding lifecycle. A combined 201 response does not mean the binding is runnable:
+        embedded deployment is normally ACTIVE, while remote deployment can return
+        deploymentStatus DEPLOYING with bindingStatus DRAFT until its verified report arrives.
       requestBody:
         required: true
         content:
           application/json:
             schema: {$ref: '#/components/schemas/CaseDefinition'}
+          application/zip:
+            schema:
+              type: string
+              format: binary
       responses:
         '201':
-          description: Deployed
+          description: >
+            Legacy PLAN_MODEL definition or combined BPMN binding created. Inspect the response
+            lifecycle fields before starting cases; only an ACTIVE binding is runnable.
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/CaseDefinition'}
+              schema:
+                oneOf:
+                  - {$ref: '#/components/schemas/PlanModelDeploymentResponse'}
+                  - {$ref: '#/components/schemas/CaseDefinitionBindingResponse'}
         '400': {$ref: '#/components/responses/BadRequest'}
 
   /case-definitions/{key}:
@@ -94,6 +110,129 @@ paths:
               schema:
                 type: array
                 items: {$ref: '#/components/schemas/CaseDefinition'}
+    post:
+      tags: [Case Definitions]
+      summary: Bind exact immutable releases as a new case-definition version
+      description: >
+        Requires the administrator identity group. The supplied release IDs are immutable and
+        must belong to this definition key and tenant. Independent binding accepts only ACTIVE
+        constituent releases, so a successful 201 response has bindingStatus ACTIVE and is
+        runnable. A non-active release is rejected rather than silently bound.
+      parameters: [{$ref: '#/components/parameters/definitionKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CaseDefinitionBindingRequest'}
+      responses:
+        '201':
+          description: Exact release binding created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionBindingResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /case-definitions/{key}/orchestration-releases:
+    post:
+      tags: [Case Definitions]
+      summary: Publish an immutable orchestration release
+      description: >
+        Requires the administrator identity group. A 201 response means the immutable release
+        was persisted, not necessarily activated. Status is ACTIVE after verified synchronous
+        deployment, DEPLOYING while remote verification is pending, or FAILED with a bounded
+        failureDetail after definitive validation/deployment failure. Only ACTIVE is usable.
+      parameters: [{$ref: '#/components/parameters/definitionKey'}]
+      requestBody:
+        required: true
+        content:
+          application/zip:
+            schema: {type: string, format: binary}
+          application/xml:
+            schema: {type: string, format: binary}
+          application/bpmn+xml:
+            schema: {type: string, format: binary}
+      responses:
+        '201':
+          description: Immutable orchestration release persisted
+          headers:
+            Location: {$ref: '#/components/headers/ReleaseLocation'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionRelease'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /case-definitions/{key}/contract-releases:
+    post:
+      tags: [Case Definitions]
+      summary: Publish an immutable contract release
+      description: >
+        Requires the administrator identity group. A 201 response means the immutable release
+        was persisted. Status is ACTIVE after successful validation or FAILED with a bounded
+        failureDetail; only ACTIVE may be bound.
+      parameters: [{$ref: '#/components/parameters/definitionKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+          application/schema+json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        '201':
+          description: Immutable contract release persisted
+          headers:
+            Location: {$ref: '#/components/headers/ReleaseLocation'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionRelease'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /case-definitions/{key}/presentation-releases:
+    post:
+      tags: [Case Definitions]
+      summary: Publish an immutable presentation release
+      description: >
+        Requires the administrator identity group. A 201 response means the immutable release
+        was persisted. Status is ACTIVE after successful validation or FAILED with a bounded
+        failureDetail; only ACTIVE may be bound.
+      parameters: [{$ref: '#/components/parameters/definitionKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        '201':
+          description: Immutable presentation release persisted
+          headers:
+            Location: {$ref: '#/components/headers/ReleaseLocation'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionRelease'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /case-definitions/{key}/releases/{releaseId}:
+    get:
+      tags: [Case Definitions]
+      summary: Get immutable release lifecycle metadata (administrator only)
+      description: >
+        Returns lifecycle metadata for orchestration, contract, or presentation releases.
+        Publication Location headers point here. A FAILED release remains retrievable with a
+        bounded diagnostic; kind-specific contract and presentation content downloads are
+        unchanged.
+      parameters:
+        - {$ref: '#/components/parameters/definitionKey'}
+        - name: releaseId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Release metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionRelease'}
+        '404': {$ref: '#/components/responses/NotFound'}
 
   /case-definitions/{key}/forms/{formKey}:
     get:
@@ -234,7 +373,10 @@ paths:
               schema: {$ref: '#/components/schemas/Case'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '409':
-          description: Idempotency-Key reused with a different payload
+          description: >
+            Conflict. Includes idempotency-key reuse and a case definition or exact BPMN
+            binding that is not active. Clients branch on the problem code, including
+            `case-definition-not-active` and `case-definition-binding-not-active`.
 
   /cases/{caseId}:
     parameters: [{$ref: '#/components/parameters/caseId'}]
@@ -1572,6 +1714,13 @@ components:
     ETag:
       description: Current entity version for optimistic concurrency
       schema: {type: string}
+    ReleaseLocation:
+      description: >
+        Administrator metadata URL for the persisted release:
+        `/case-api/v2/case-definitions/{key}/releases/{releaseId}`.
+      schema:
+        type: string
+        format: uri-reference
 
   responses:
     BadRequest:
@@ -1925,6 +2074,141 @@ components:
               condition: {type: string, description: FEEL/JUEL expression}
               queueId: {type: string}
         deployedAt: {type: string, format: date-time, readOnly: true}
+        orchestrationMode:
+          type: string
+          enum: [PLAN_MODEL, BPMN]
+          readOnly: true
+        orchestrationReleaseId: {type: string, readOnly: true}
+        orchestrationSha256: {type: string, readOnly: true}
+        contractReleaseId: {type: string, readOnly: true}
+        contractSha256: {type: string, readOnly: true}
+        presentationReleaseId: {type: string, readOnly: true}
+        presentationSha256: {type: string, readOnly: true}
+        deploymentStatus:
+          type: string
+          enum: [DRAFT, VALIDATED, DEPLOYING, ACTIVE, FAILED, RETIRED]
+          readOnly: true
+        bindingStatus:
+          type: string
+          enum: [DRAFT, ACTIVE, RETIRED, FAILED]
+          readOnly: true
+        boundAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        activatedAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        retiredAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        engineProcessDefinitionKey:
+          type: string
+          nullable: true
+          readOnly: true
+          description: Descriptive engine key; never used as the exact runtime selector.
+        engineProcessDefinitionVersion:
+          type: integer
+          nullable: true
+          readOnly: true
+        engineTenantId: {type: string, nullable: true, readOnly: true}
+
+    PlanModelDeploymentResponse:
+      type: object
+      required: [id, key, version, orchestrationMode, tenantId, planItems, availableActions]
+      additionalProperties: false
+      properties:
+        id: {type: string, readOnly: true}
+        key: {type: string, readOnly: true}
+        version: {type: integer, readOnly: true}
+        orchestrationMode:
+          type: string
+          enum: [PLAN_MODEL]
+          readOnly: true
+        tenantId: {type: string, nullable: true, readOnly: true}
+        planItems:
+          type: integer
+          minimum: 0
+          readOnly: true
+          description: Number of plan items in the deployed definition.
+        availableActions:
+          type: array
+          readOnly: true
+          items: {$ref: '#/components/schemas/AvailableAction'}
+
+    CaseDefinitionRelease:
+      type: object
+      required: [id, definitionKey, kind, sha256, mediaType, status, publishedAt]
+      additionalProperties: false
+      properties:
+        id: {type: string, readOnly: true}
+        definitionKey: {type: string, readOnly: true}
+        kind:
+          type: string
+          enum: [ORCHESTRATION, CONTRACT, PRESENTATION]
+          readOnly: true
+        sha256: {type: string, readOnly: true}
+        mediaType: {type: string, readOnly: true}
+        status:
+          type: string
+          enum: [DRAFT, VALIDATED, DEPLOYING, ACTIVE, FAILED, RETIRED]
+          readOnly: true
+        failureDetail:
+          type: string
+          nullable: true
+          maxLength: 2000
+          readOnly: true
+          description: Bounded operator diagnostic; present when publication or deployment failed.
+        publishedAt: {type: string, format: date-time, readOnly: true}
+
+    CaseDefinitionBindingRequest:
+      type: object
+      required: [orchestrationReleaseId, contractReleaseId, presentationReleaseId]
+      additionalProperties: false
+      properties:
+        orchestrationReleaseId: {type: string}
+        contractReleaseId: {type: string}
+        presentationReleaseId: {type: string}
+
+    CaseDefinitionBindingResponse:
+      type: object
+      required:
+        - caseDefinitionId
+        - orchestrationMode
+        - orchestrationReleaseId
+        - orchestrationSha256
+        - contractReleaseId
+        - contractSha256
+        - presentationReleaseId
+        - presentationSha256
+        - deploymentStatus
+        - bindingStatus
+        - boundAt
+      additionalProperties: false
+      properties:
+        caseDefinitionId: {type: string, readOnly: true}
+        orchestrationMode:
+          type: string
+          enum: [BPMN]
+          readOnly: true
+        orchestrationReleaseId: {type: string, readOnly: true}
+        orchestrationSha256: {type: string, readOnly: true}
+        contractReleaseId: {type: string, readOnly: true}
+        contractSha256: {type: string, readOnly: true}
+        presentationReleaseId: {type: string, readOnly: true}
+        presentationSha256: {type: string, readOnly: true}
+        deploymentStatus:
+          type: string
+          enum: [DRAFT, VALIDATED, DEPLOYING, ACTIVE, FAILED, RETIRED]
+          readOnly: true
+        bindingStatus:
+          type: string
+          enum: [DRAFT, ACTIVE, RETIRED, FAILED]
+          readOnly: true
+        boundAt: {type: string, format: date-time, readOnly: true}
+        activatedAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        retiredAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        engineDeploymentId: {type: string, nullable: true, readOnly: true}
+        engineProcessDefinitionId: {type: string, nullable: true, readOnly: true}
+        engineProcessDefinitionKey: {type: string, nullable: true, readOnly: true}
+        engineProcessDefinitionVersion:
+          type: integer
+          nullable: true
+          readOnly: true
+        engineTenantId: {type: string, nullable: true, readOnly: true}
 
     PlanItemDefinition:
       type: object

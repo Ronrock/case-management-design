@@ -35,9 +35,17 @@ GET /case-api/v2/case-definitions/{key}
 GET /case-api/v2/case-definitions/{key}/versions/{version}
 ```
 
-BPMN definition responses include `orchestrationMode`, exact release IDs/hashes, and
-`deploymentStatus`. `ACTIVE` is runnable; `DEPLOYING` is waiting for remote deployment;
-`FAILED` requires administrative investigation.
+BPMN definition responses include `orchestrationMode`, exact release IDs/hashes,
+`deploymentStatus`, `bindingStatus`, lifecycle timestamps, and the descriptive engine
+definition key, version, and tenant. `ACTIVE` is runnable; `DEPLOYING` is waiting for remote
+deployment; `FAILED` requires administrative investigation. General discovery never returns the
+raw engine deployment ID or process-definition ID. Those operational identifiers are returned
+only by the administrator-only bind and combined-publication responses.
+
+Creating a BPMN case without an active definition version returns `409` with
+`code: case-definition-not-active`. If the version was selected but its exact binding became
+unavailable before start, the code is `case-definition-binding-not-active`. An unknown key remains
+`404 not-found`, and `PLAN_MODEL` definitions do not require a binding.
 
 ## Publish a BPMN case type
 
@@ -58,6 +66,18 @@ POST /case-api/v2/case-definitions/{key}/contract-releases
 POST /case-api/v2/case-definitions/{key}/presentation-releases
 POST /case-api/v2/case-definitions/{key}/versions
 ```
+
+Every independent publication response includes a `Location` pointing to the same
+administrator-only lifecycle resource, regardless of release kind:
+
+```http
+GET /case-api/v2/case-definitions/{key}/releases/{releaseId}
+```
+
+It returns `status` and a `failureDetail` limited to 2,000 characters. A definitive deployment
+failure remains stored as `FAILED` and can be inspected through this URL; it is not rolled back
+because a later combined-binding step failed. Existing contract and presentation content-download
+URLs keep returning their immutable content.
 
 The final request binds exact release IDs:
 

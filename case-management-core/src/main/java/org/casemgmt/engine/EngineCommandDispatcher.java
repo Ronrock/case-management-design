@@ -2,10 +2,12 @@ package org.casemgmt.engine;
 
 import org.casemgmt.domain.CaseTask;
 import org.casemgmt.orchestration.OrchestrationDeploymentClient;
+import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.repo.EngineCommandRepository;
 
 import java.util.Base64;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 
@@ -13,8 +15,8 @@ import java.util.Map;
  * Drains the engine command outbox against the real (remote) gateway and reports the resulting
  * sync state back onto CM_TASK (for {@code CREATE_TASK}) or CM_LINKED_PROCESS (for {@code
  * START_PROCESS}), so {@code availableActions} can withhold {@code claim} until the engine
- * actually has the task, and a linked process's {@code PROC_INST_ID_} can be updated from its
- * locally-minted placeholder to the engine's real id once confirmed.
+ * actually has the task, and a linked process's separate correlation can be replaced by the
+ * engine's real process-instance identity once confirmed.
  *
  * <p><b>Timeout assumption, for Task 25 (the production {@code RestClient} bean):</b> this
  * dispatcher's whole retry-versus-dead-letter decision depends on {@link EngineGateway} calls
@@ -31,17 +33,27 @@ public class EngineCommandDispatcher {
     /**
      * Callback: (correlation key, sync state, engine id). For {@code CREATE_TASK} the correlation
      * key is {@code planItemId} (a human task is always backed by exactly one plan item). For
-     * {@code START_PROCESS} it is the {@code CM_LINKED_PROCESS} row id ({@code correlationId} in
-     * the enqueued payload, originally {@link StartProcessRequest#correlationId()} — Task 18
-     * review round 2: {@code planItemId} cannot serve this purpose because an ad hoc linked
-     * process legitimately has none).
+     * {@code START_PROCESS} failures use the {@code CM_LINKED_PROCESS} row correlation. Successful
+     * starts use {@link #confirmProcessStarted} because root confirmation also needs the case id
+     * and confirmation time for the atomic case/link update.
      */
     public interface SyncReporter {
         void report(String correlationKey, CaseTask.EngineSync sync, String engineId);
+
+        /**
+         * Reports a successful process start with all identities needed to atomically confirm
+         * both a root link and its owning case. Simple reporters retain the older callback
+         * behavior; production remote wiring overrides this method.
+         */
+        default void confirmProcessStarted(String caseId, String correlationId,
+                                           String engineProcessInstanceId,
+                                           OffsetDateTime confirmedAt) {
+            report(correlationId, CaseTask.EngineSync.SYNCED, engineProcessInstanceId);
+        }
     }
 
     public interface DeploymentReporter {
-        void report(String releaseId, ReleaseStatus status, String engineDeploymentId,
+        void report(String releaseId, ReleaseStatus status, EngineDeploymentIdentity identity,
                     String failureDetail);
     }
 
@@ -96,11 +108,25 @@ public class EngineCommandDispatcher {
             case CLAIM_TASK -> delegate.claimTask(str(p, "engineTaskId"), str(p, "userId"));
             case COMPLETE_TASK -> delegate.completeTask(str(p, "engineTaskId"), map(p.get("variables")));
             case START_PROCESS -> {
-                EngineProcessRef ref = delegate.startProcess(new StartProcessRequest(
-                        command.caseId(), blankToNull(str(p, "planItemId")),
-                        str(p, "processDefinitionKey"), map(p.get("variables"))));
-                syncReporter.report(str(p, "correlationId"), CaseTask.EngineSync.SYNCED,
-                        ref.processInstanceId());
+                EngineProcessRef ref;
+                // Commands written before exact-ID support have no selectionType and contain
+                // only a key. Treat that historical shape as the explicit legacy path; only a
+                // newly written ID marker may enter the exact-start path.
+                if (!"ID".equals(str(p, "selectionType"))) {
+                    ref = delegate.startProcessByKey(new StartProcessByKeyRequest(
+                            command.caseId(), blankToNull(str(p, "planItemId")),
+                            str(p, "processDefinitionKey"), map(p.get("variables")),
+                            blankToNull(str(p, "correlationId"))));
+                } else {
+                    ref = delegate.startProcess(new StartProcessRequest(
+                            command.caseId(), blankToNull(str(p, "planItemId")),
+                            str(p, "processDefinitionId"), blankToNull(str(p, "processDefinitionKey")),
+                            blankToNull(str(p, "tenantId")), map(p.get("variables")),
+                            blankToNull(str(p, "correlationId"))));
+                }
+                String processInstanceId = requireProcessInstanceId(ref);
+                syncReporter.confirmProcessStarted(command.caseId(), str(p, "correlationId"),
+                        processInstanceId, OffsetDateTime.now());
             }
             case CANCEL_PROCESS -> delegate.cancelProcess(str(p, "processInstanceId"), str(p, "reason"));
             case DEPLOY_ORCHESTRATION -> {
@@ -108,11 +134,11 @@ public class EngineCommandDispatcher {
                     throw new EngineException("Configured engine does not support orchestration deployment");
                 }
                 String releaseId = str(p, "releaseId");
-                String deploymentId = deploymentClient.deploy(releaseId,
+                EngineDeploymentIdentity identity = deploymentClient.deploy(releaseId,
                         str(p, "definitionKey"), blankToNull(str(p, "tenantId")),
                         Base64.getDecoder().decode(str(p, "contentBase64")),
                         str(p, "mediaType"));
-                deploymentReporter.report(releaseId, ReleaseStatus.ACTIVE, deploymentId, null);
+                deploymentReporter.report(releaseId, ReleaseStatus.ACTIVE, identity, null);
             }
             case CORRELATE_MESSAGE -> delegate.correlateMessage(new MessageCorrelationRequest(
                     command.caseId(), str(p, "messageName"), map(p.get("variables"))));
@@ -158,6 +184,14 @@ public class EngineCommandDispatcher {
 
     private static String blankToNull(String s) {
         return s == null || s.isBlank() ? null : s;
+    }
+
+    private static String requireProcessInstanceId(EngineProcessRef ref) {
+        String processInstanceId = ref == null ? null : blankToNull(ref.processInstanceId());
+        if (processInstanceId == null) {
+            throw new EngineException("Engine start returned no process-instance id");
+        }
+        return processInstanceId;
     }
 
     @SuppressWarnings("unchecked")

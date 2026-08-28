@@ -4,6 +4,7 @@ import org.casemgmt.release.CaseDefinitionRelease;
 import org.casemgmt.release.ReleaseKind;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.rest.CallerResolver;
+import org.casemgmt.rest.dto.BindingResponseFields;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseDefinitionReleaseService;
@@ -28,6 +29,8 @@ import java.util.Map;
 @RestController
 @RequestMapping("/case-api/v2/case-definitions/{key}")
 public class CaseDefinitionReleaseController {
+
+    private static final int MAX_FAILURE_DETAIL = 2_000;
 
     private final CaseDefinitionReleaseService service;
     private final CaseDefinitionReleaseRepository repository;
@@ -98,6 +101,24 @@ public class CaseDefinitionReleaseController {
         return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(release.content());
     }
 
+    /**
+     * Administrative lifecycle metadata for every immutable release kind. Content downloads keep
+     * their existing kind-specific routes; publication Locations always target this representation.
+     */
+    @GetMapping(value = "/releases/{releaseId}", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> release(
+            @PathVariable String key, @PathVariable String releaseId,
+            Authentication authentication) {
+        Actor actor = callers.actor(authentication);
+        policy.assertMayAdminister(callers.groups(actor), "read-case-definition-release");
+        String tenantId = callers.requireTenant(actor, null);
+        CaseDefinitionRelease release = repository.require(releaseId, tenantId);
+        if (!release.definitionKey().equals(key)) {
+            throw new org.casemgmt.error.NotFoundException("CaseDefinitionRelease", releaseId);
+        }
+        return releaseBody(release);
+    }
+
     @PostMapping(value = "/versions", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<Map<String, Object>> bindVersion(
             @PathVariable String key, @RequestBody Map<String, Object> request,
@@ -112,13 +133,7 @@ public class CaseDefinitionReleaseController {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("caseDefinitionId", binding.caseDefinitionId());
         body.put("orchestrationMode", "BPMN");
-        body.put("orchestrationReleaseId", binding.orchestrationReleaseId());
-        body.put("orchestrationSha256", binding.orchestrationSha256());
-        body.put("contractReleaseId", binding.contractReleaseId());
-        body.put("contractSha256", binding.contractSha256());
-        body.put("presentationReleaseId", binding.presentationReleaseId());
-        body.put("presentationSha256", binding.presentationSha256());
-        body.put("deploymentStatus", binding.deploymentStatus().name());
+        BindingResponseFields.put(body, binding, true);
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
 
@@ -130,6 +145,14 @@ public class CaseDefinitionReleaseController {
         String tenantId = callers.requireTenant(actor, null);
         CaseDefinitionRelease release = service.publish(
                 key, tenantId, kind, contentType, content, actor.userId());
+        Map<String, Object> body = releaseBody(release);
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .location(URI.create("/case-api/v2/case-definitions/" + key
+                        + "/releases/" + release.id()))
+                .body(body);
+    }
+
+    private static Map<String, Object> releaseBody(CaseDefinitionRelease release) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("id", release.id());
         body.put("definitionKey", release.definitionKey());
@@ -137,11 +160,14 @@ public class CaseDefinitionReleaseController {
         body.put("sha256", release.sha256());
         body.put("mediaType", release.mediaType());
         body.put("status", release.status().name());
+        body.put("failureDetail", boundedFailure(release.failureDetail()));
         body.put("publishedAt", release.publishedAt());
-        return ResponseEntity.status(HttpStatus.CREATED)
-                .location(URI.create("/case-api/v2/case-definitions/" + key + "/"
-                        + kind.name().toLowerCase() + "-releases/" + release.id()))
-                .body(body);
+        return body;
+    }
+
+    private static String boundedFailure(String detail) {
+        if (detail == null || detail.length() <= MAX_FAILURE_DETAIL) return detail;
+        return detail.substring(0, MAX_FAILURE_DETAIL - 3) + "...";
     }
 
     private static String required(Map<String, Object> request, String field) {

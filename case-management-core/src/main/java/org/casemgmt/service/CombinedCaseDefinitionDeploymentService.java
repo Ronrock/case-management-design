@@ -10,7 +10,6 @@ import org.casemgmt.repo.JsonCodec;
 import org.casemgmt.error.InvalidCaseDefinitionException;
 
 import java.nio.charset.StandardCharsets;
-import org.springframework.transaction.annotation.Transactional;
 
 public class CombinedCaseDefinitionDeploymentService {
 
@@ -31,7 +30,16 @@ public class CombinedCaseDefinitionDeploymentService {
         this.contracts = contracts;
     }
 
-    @Transactional
+    /**
+     * Coordinates independently transactional publication and binding steps.
+     *
+     * <p>This method deliberately has no outer transaction. Each call to the proxied release
+     * service commits the immutable release and its definitive deployment outcome before the
+     * version-binding transaction begins. A later binding failure therefore cannot erase a
+     * persisted {@code FAILED} orchestration release and its operator diagnostic. Deterministic
+     * cross-artifact validation still runs before the first publication, so invalid bundles leave
+     * no partial evidence rows.
+     */
     public CaseDefinitionVersionBinding deploy(String tenantId, byte[] archive, String deployedBy) {
         CombinedCaseDefinitionArchive parsed = CombinedCaseDefinitionArchive.read("<combined>", archive);
         var rawContract = JsonCodec.toMap(parsed.contractJson());
@@ -66,7 +74,7 @@ public class CombinedCaseDefinitionDeploymentService {
         CaseDefinitionRelease presentation = releases.publish(key, tenantId,
                 ReleaseKind.PRESENTATION, "application/json",
                 parsed.presentationJson().getBytes(StandardCharsets.UTF_8), deployedBy);
-        return versions.bind(key, tenantId, orchestration.id(), contract.id(), presentation.id(),
-                deployedBy);
+        return versions.bindPendingDeployment(key, tenantId, orchestration.id(), contract.id(),
+                presentation.id(), deployedBy);
     }
 }

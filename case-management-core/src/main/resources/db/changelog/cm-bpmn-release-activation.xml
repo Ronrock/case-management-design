@@ -1,0 +1,404 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+  <!--
+    Workstream 2 expand migration. Existing columns remain in place so an older application can
+    still read the schema during a rolling deployment. The rollback path is therefore an
+    application rollback while retaining this expanded schema; dropping these columns would lose
+    verified engine identities and lifecycle history and is intentionally not automated.
+  -->
+
+  <changeSet id="cm-bpmn-release-exact-identity" author="casemgmt">
+    <addColumn tableName="CM_CASE_DEF_RELEASE">
+      <column name="ENGINE_PROC_DEF_ID_" type="VARCHAR2(128)"/>
+      <column name="ENGINE_PROC_DEF_KEY_" type="VARCHAR2(255)"/>
+      <column name="ENGINE_PROC_DEF_VER_" type="NUMBER(10)"/>
+      <column name="ENGINE_TENANT_ID_" type="VARCHAR2(64)"/>
+      <column name="VALIDATED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="ACTIVATED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="RETIRED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+
+    <sql>ALTER TABLE CM_CASE_DEF_RELEASE DROP CONSTRAINT CK_CM_CDR_STATUS</sql>
+    <sql>
+      ALTER TABLE CM_CASE_DEF_RELEASE ADD CONSTRAINT CK_CM_CDR_STATUS
+        CHECK (STATUS_ IN ('DRAFT','VALIDATED','DEPLOYING','ACTIVE','FAILED','RETIRED'))
+    </sql>
+
+    <!-- PUBLISHED_AT_ is the only historical timestamp that records when a row first became
+         ACTIVE under the old write path. Preserve that fact; do not invent a validation time. -->
+    <sql>
+      UPDATE CM_CASE_DEF_RELEASE
+      SET ACTIVATED_AT_ = PUBLISHED_AT_
+      WHERE STATUS_ = 'ACTIVE'
+    </sql>
+
+    <!-- Embedded installations may have the Operaton repository tables in this same Oracle
+         schema. In that one case we can resolve an exact identity safely: deployment, process
+         key and tenant must select exactly one ACT_RE_PROCDEF row. Dynamic SQL keeps remote-only
+         installations (which correctly have no local engine tables) compatible. -->
+    <sql splitStatements="false" stripComments="false"><![CDATA[
+      DECLARE
+        engine_table_count NUMBER;
+        matching_count NUMBER;
+        resolved_id VARCHAR2(128);
+        resolved_key VARCHAR2(255);
+        resolved_version NUMBER;
+        resolved_tenant VARCHAR2(64);
+      BEGIN
+        SELECT COUNT(*) INTO engine_table_count
+        FROM USER_TABLES
+        WHERE TABLE_NAME = 'ACT_RE_PROCDEF';
+
+        IF engine_table_count = 1 THEN
+          FOR release_row IN (
+            SELECT ID_, CASE_DEF_KEY_, TENANT_ID_, ENGINE_DEPLOYMENT_ID_
+            FROM CM_CASE_DEF_RELEASE
+            WHERE KIND_ = 'ORCHESTRATION'
+              AND STATUS_ = 'ACTIVE'
+              AND ENGINE_DEPLOYMENT_ID_ IS NOT NULL
+          ) LOOP
+            EXECUTE IMMEDIATE
+              'SELECT COUNT(*), MIN(ID_), MIN(KEY_), MIN(VERSION_), MIN(TENANT_ID_) ' ||
+              'FROM ACT_RE_PROCDEF ' ||
+              'WHERE DEPLOYMENT_ID_ = :deployment_id AND KEY_ = :definition_key ' ||
+              'AND (TENANT_ID_ = :tenant_id OR (:tenant_id_null IS NULL AND TENANT_ID_ IS NULL))'
+              INTO matching_count, resolved_id, resolved_key, resolved_version, resolved_tenant
+              USING release_row.ENGINE_DEPLOYMENT_ID_, release_row.CASE_DEF_KEY_,
+                    release_row.TENANT_ID_, release_row.TENANT_ID_;
+
+            IF matching_count = 1 THEN
+              UPDATE CM_CASE_DEF_RELEASE
+              SET ENGINE_PROC_DEF_ID_ = resolved_id,
+                  ENGINE_PROC_DEF_KEY_ = resolved_key,
+                  ENGINE_PROC_DEF_VER_ = resolved_version,
+                  ENGINE_TENANT_ID_ = resolved_tenant,
+                  VALIDATED_AT_ = COALESCE(VALIDATED_AT_, PUBLISHED_AT_)
+              WHERE ID_ = release_row.ID_;
+            END IF;
+          END LOOP;
+        END IF;
+      END;
+    ]]></sql>
+
+    <!-- A deployment id cannot be deterministically expanded into one process-definition id,
+         version and tenant without querying the engine deployment. Liquibase has no such engine
+         transaction, so historical deployed orchestration rows are made unavailable instead of
+         guessing. PLAN_MODEL releases normally have no engine deployment id and are untouched. -->
+    <sql>
+      UPDATE CM_CASE_DEF_RELEASE
+      SET STATUS_ = 'FAILED',
+          FAILURE_DETAIL_ = SUBSTR(
+            CASE WHEN FAILURE_DETAIL_ IS NULL THEN '' ELSE FAILURE_DETAIL_ || '; ' END ||
+            'Exact process definition identity unresolved by migration; activation repair required',
+            1, 2000)
+      WHERE KIND_ = 'ORCHESTRATION'
+        AND STATUS_ = 'ACTIVE'
+        AND ENGINE_DEPLOYMENT_ID_ IS NOT NULL
+        AND (ENGINE_PROC_DEF_ID_ IS NULL
+          OR ENGINE_PROC_DEF_KEY_ IS NULL
+          OR ENGINE_PROC_DEF_VER_ IS NULL)
+    </sql>
+
+    <sql>
+      ALTER TABLE CM_CASE_DEF_RELEASE ADD CONSTRAINT CK_CM_CDR_EXACT_ID CHECK (
+        STATUS_ != 'ACTIVE'
+        OR ENGINE_DEPLOYMENT_ID_ IS NULL
+        OR (ENGINE_PROC_DEF_ID_ IS NOT NULL
+          AND ENGINE_PROC_DEF_KEY_ IS NOT NULL
+          AND ENGINE_PROC_DEF_VER_ IS NOT NULL))
+    </sql>
+    <sql>
+      ALTER TABLE CM_CASE_DEF_RELEASE ADD CONSTRAINT CK_CM_CDR_LIFECYCLE_TS CHECK (
+        (STATUS_ != 'ACTIVE' OR ACTIVATED_AT_ IS NOT NULL)
+        AND (STATUS_ != 'RETIRED' OR (ACTIVATED_AT_ IS NOT NULL AND RETIRED_AT_ IS NOT NULL))
+        AND (RETIRED_AT_ IS NULL OR ACTIVATED_AT_ IS NULL OR RETIRED_AT_ &gt;= ACTIVATED_AT_))
+    </sql>
+
+    <createIndex tableName="CM_CASE_DEF_RELEASE" indexName="IX_CM_CDR_ENGINE_ID">
+      <column name="ENGINE_TENANT_ID_"/>
+      <column name="ENGINE_PROC_DEF_KEY_"/>
+      <column name="ENGINE_PROC_DEF_VER_"/>
+      <column name="STATUS_"/>
+    </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-bpmn-binding-lifecycle-identity" author="casemgmt">
+    <addColumn tableName="CM_CASE_DEF_BINDING">
+      <!-- Defaults keep old writers insert-compatible. STATUS_=DRAFT is deliberately safe: an
+           old binary cannot accidentally make a newly inserted BPMN binding selectable. -->
+      <column name="ORCHESTRATION_MODE_" type="VARCHAR2(20)" defaultValue="PLAN_MODEL">
+        <constraints nullable="false"/>
+      </column>
+      <column name="STATUS_" type="VARCHAR2(20)" defaultValue="DRAFT">
+        <constraints nullable="false"/>
+      </column>
+      <column name="FAILURE_DETAIL_" type="VARCHAR2(2000)"/>
+      <column name="ENGINE_DEPLOYMENT_ID_" type="VARCHAR2(128)"/>
+      <column name="ENGINE_PROC_DEF_ID_" type="VARCHAR2(128)"/>
+      <column name="ENGINE_PROC_DEF_KEY_" type="VARCHAR2(255)"/>
+      <column name="ENGINE_PROC_DEF_VER_" type="NUMBER(10)"/>
+      <column name="ENGINE_TENANT_ID_" type="VARCHAR2(64)"/>
+      <column name="ACTIVATED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="RETIRED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+
+    <!-- The case-definition row is authoritative for the existing orchestration mode. -->
+    <sql>
+      UPDATE CM_CASE_DEF_BINDING b
+      SET ORCHESTRATION_MODE_ = (
+        SELECT d.ORCHESTRATION_MODE_
+        FROM CM_CASE_DEF d
+        WHERE d.ID_ = b.CASE_DEF_ID_)
+    </sql>
+
+    <!-- Copy only stored exact identities. No identity is derived from key, tenant or deployment
+         because any of those derivations could bind the wrong engine definition. -->
+    <sql>
+      UPDATE CM_CASE_DEF_BINDING b
+      SET (ENGINE_DEPLOYMENT_ID_, ENGINE_PROC_DEF_ID_, ENGINE_PROC_DEF_KEY_,
+           ENGINE_PROC_DEF_VER_, ENGINE_TENANT_ID_) = (
+        SELECT r.ENGINE_DEPLOYMENT_ID_, r.ENGINE_PROC_DEF_ID_,
+               r.ENGINE_PROC_DEF_KEY_, r.ENGINE_PROC_DEF_VER_,
+               r.ENGINE_TENANT_ID_
+        FROM CM_CASE_DEF_RELEASE r
+        WHERE r.ID_ = b.ORCH_RELEASE_ID_)
+    </sql>
+
+    <sql>
+      UPDATE CM_CASE_DEF_BINDING
+      SET STATUS_ = CASE
+            WHEN ORCHESTRATION_MODE_ = 'PLAN_MODEL' AND DEPLOY_STATUS_ = 'ACTIVE' THEN 'ACTIVE'
+            WHEN ORCHESTRATION_MODE_ = 'PLAN_MODEL' AND DEPLOY_STATUS_ = 'FAILED' THEN 'FAILED'
+            WHEN ORCHESTRATION_MODE_ = 'PLAN_MODEL' THEN 'DRAFT'
+            WHEN DEPLOY_STATUS_ = 'ACTIVE'
+             AND ENGINE_DEPLOYMENT_ID_ IS NOT NULL
+             AND ENGINE_PROC_DEF_ID_ IS NOT NULL
+             AND ENGINE_PROC_DEF_KEY_ IS NOT NULL
+             AND ENGINE_PROC_DEF_VER_ IS NOT NULL THEN 'ACTIVE'
+            ELSE 'FAILED'
+          END,
+          FAILURE_DETAIL_ = CASE
+            WHEN ORCHESTRATION_MODE_ = 'BPMN'
+             AND (ENGINE_DEPLOYMENT_ID_ IS NULL
+               OR ENGINE_PROC_DEF_ID_ IS NULL
+               OR ENGINE_PROC_DEF_KEY_ IS NULL
+               OR ENGINE_PROC_DEF_VER_ IS NULL)
+            THEN 'Exact process definition identity unresolved by migration; binding repair required'
+            ELSE FAILURE_DETAIL_
+          END
+    </sql>
+
+    <sql>
+      UPDATE CM_CASE_DEF_BINDING
+      SET ACTIVATED_AT_ = BOUND_AT_
+      WHERE STATUS_ = 'ACTIVE'
+    </sql>
+
+    <sql>
+      ALTER TABLE CM_CASE_DEF_BINDING ADD CONSTRAINT CK_CM_CDB_MODE_V2
+        CHECK (ORCHESTRATION_MODE_ IN ('PLAN_MODEL','BPMN'))
+    </sql>
+    <sql>
+      ALTER TABLE CM_CASE_DEF_BINDING ADD CONSTRAINT CK_CM_CDB_LIFECYCLE
+        CHECK (STATUS_ IN ('DRAFT','ACTIVE','RETIRED','FAILED'))
+    </sql>
+    <sql>
+      ALTER TABLE CM_CASE_DEF_BINDING ADD CONSTRAINT CK_CM_CDB_EXACT_ID CHECK (
+        STATUS_ != 'ACTIVE'
+        OR ORCHESTRATION_MODE_ = 'PLAN_MODEL'
+        OR (ENGINE_DEPLOYMENT_ID_ IS NOT NULL
+          AND ENGINE_PROC_DEF_ID_ IS NOT NULL
+          AND ENGINE_PROC_DEF_KEY_ IS NOT NULL
+          AND ENGINE_PROC_DEF_VER_ IS NOT NULL))
+    </sql>
+    <sql>
+      ALTER TABLE CM_CASE_DEF_BINDING ADD CONSTRAINT CK_CM_CDB_LIFECYCLE_TS CHECK (
+        (STATUS_ != 'ACTIVE' OR ACTIVATED_AT_ IS NOT NULL)
+        AND (STATUS_ != 'RETIRED' OR RETIRED_AT_ IS NOT NULL)
+        AND (RETIRED_AT_ IS NULL OR ACTIVATED_AT_ IS NULL OR RETIRED_AT_ &gt;= ACTIVATED_AT_))
+    </sql>
+
+    <createIndex tableName="CM_CASE_DEF_BINDING" indexName="IX_CM_CDB_ACTIVE">
+      <column name="STATUS_"/>
+      <column name="CASE_DEF_ID_"/>
+    </createIndex>
+    <createIndex tableName="CM_CASE_DEF_BINDING" indexName="IX_CM_CDB_ENGINE_ID">
+      <column name="ENGINE_TENANT_ID_"/>
+      <column name="ENGINE_PROC_DEF_ID_"/>
+    </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-bpmn-binding-active-authority" author="casemgmt">
+    <!-- CASE_DEF_ID_ identifies one immutable version, but cannot by itself express the
+         cross-version authority "one ACTIVE binding per tenant and definition key". Copy the
+         immutable authority coordinates from CM_CASE_DEF so Oracle can enforce that invariant
+         with one function-based unique index, including under concurrent activation. -->
+    <addColumn tableName="CM_CASE_DEF_BINDING">
+      <column name="CASE_DEF_KEY_" type="VARCHAR2(255)"/>
+      <column name="TENANT_ID_" type="VARCHAR2(64)"/>
+    </addColumn>
+    <sql>
+      UPDATE CM_CASE_DEF_BINDING binding
+      SET (CASE_DEF_KEY_, TENANT_ID_) = (
+        SELECT definition.KEY_, definition.TENANT_ID_
+        FROM CM_CASE_DEF definition
+        WHERE definition.ID_ = binding.CASE_DEF_ID_)
+    </sql>
+    <!-- Keep the expanded columns physically nullable during the rolling compatibility window.
+         A pre-WS2 writer does not know them, so this trigger derives omitted values from the
+         immutable definition row. New writers may supply the values, but cannot forge them. -->
+    <sql splitStatements="false" stripComments="false"><![CDATA[
+      CREATE OR REPLACE TRIGGER TRG_CM_CDB_AUTHORITY
+      BEFORE INSERT OR UPDATE OF CASE_DEF_ID_, CASE_DEF_KEY_, TENANT_ID_
+      ON CM_CASE_DEF_BINDING
+      FOR EACH ROW
+      DECLARE
+        authoritative_key CM_CASE_DEF.KEY_%TYPE;
+        authoritative_tenant CM_CASE_DEF.TENANT_ID_%TYPE;
+      BEGIN
+        SELECT definition.KEY_, definition.TENANT_ID_
+        INTO authoritative_key, authoritative_tenant
+        FROM CM_CASE_DEF definition
+        WHERE definition.ID_ = :NEW.CASE_DEF_ID_;
+
+        IF :NEW.CASE_DEF_KEY_ IS NULL THEN
+          :NEW.CASE_DEF_KEY_ := authoritative_key;
+        END IF;
+        IF :NEW.TENANT_ID_ IS NULL THEN
+          :NEW.TENANT_ID_ := authoritative_tenant;
+        END IF;
+
+        IF :NEW.CASE_DEF_KEY_ != authoritative_key
+          OR (:NEW.TENANT_ID_ IS NULL AND authoritative_tenant IS NOT NULL)
+          OR (:NEW.TENANT_ID_ IS NOT NULL AND authoritative_tenant IS NULL)
+          OR :NEW.TENANT_ID_ != authoritative_tenant THEN
+          RAISE_APPLICATION_ERROR(-20001,
+            'Binding key/tenant must match its immutable case definition');
+        END IF;
+      EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+          RAISE_APPLICATION_ERROR(-20001,
+            'Binding key/tenant must match its immutable case definition');
+      END;
+    ]]></sql>
+
+    <!-- Historical installations legitimately contain one ACTIVE binding for each immutable
+         definition version. Before adding the cross-version unique index, retain the highest
+         semantic version for each tenant/key. BOUND_AT_ and CASE_DEF_ID_ make the choice stable
+         if malformed historical data contains a version tie. Retired rows remain auditable and
+         DEPLOY_STATUS_=FAILED prevents an old binary from treating a retired loser as active. -->
+    <sql>
+      MERGE INTO CM_CASE_DEF_BINDING target
+      USING (
+        SELECT CASE_DEF_ID_
+        FROM (
+          SELECT binding.CASE_DEF_ID_,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY definition.TENANT_ID_, definition.KEY_
+                   ORDER BY definition.VERSION_NO_ DESC,
+                            binding.BOUND_AT_ DESC NULLS LAST,
+                            binding.CASE_DEF_ID_ DESC
+                 ) AS authority_rank
+          FROM CM_CASE_DEF_BINDING binding
+          JOIN CM_CASE_DEF definition ON definition.ID_ = binding.CASE_DEF_ID_
+          WHERE binding.STATUS_ = 'ACTIVE'
+        )
+        WHERE authority_rank &gt; 1
+      ) duplicate
+      ON (target.CASE_DEF_ID_ = duplicate.CASE_DEF_ID_)
+      WHEN MATCHED THEN UPDATE SET
+        target.STATUS_ = 'RETIRED',
+        target.DEPLOY_STATUS_ = 'FAILED',
+        target.RETIRED_AT_ = CASE
+          WHEN target.ACTIVATED_AT_ IS NOT NULL AND target.ACTIVATED_AT_ &gt; SYSTIMESTAMP
+            THEN target.ACTIVATED_AT_
+          ELSE SYSTIMESTAMP
+        END,
+        target.FAILURE_DETAIL_ = SUBSTR(
+          'Retired by migration because a newer active binding exists for this tenant and case definition key'
+          || CASE WHEN target.FAILURE_DETAIL_ IS NULL
+               THEN '' ELSE '; ' || target.FAILURE_DETAIL_ END,
+          1, 2000)
+    </sql>
+
+    <!-- Oracle omits a row from a unique index only when every indexed expression is NULL.
+         The trigger always derives CASE_DEF_KEY_ for new rows and the backfill supplied it for
+         historical rows, so the (NULL,key) pair also protects tenant-less ACTIVE authority.
+         DRAFT/FAILED/RETIRED rows yield (NULL,NULL) and remain unlimited. -->
+    <sql>
+      CREATE UNIQUE INDEX UQ_CM_CDB_ACTIVE_KEY ON CM_CASE_DEF_BINDING (
+        CASE WHEN STATUS_ = 'ACTIVE' THEN TENANT_ID_ ELSE NULL END,
+        CASE WHEN STATUS_ = 'ACTIVE' THEN CASE_DEF_KEY_ ELSE NULL END)
+    </sql>
+  </changeSet>
+
+  <changeSet id="cm-bpmn-root-correlation-separation" author="casemgmt">
+    <addColumn tableName="CM_CASE">
+      <column name="ROOT_CORRELATION_ID_" type="VARCHAR2(128)"/>
+    </addColumn>
+    <addColumn tableName="CM_LINKED_PROCESS">
+      <column name="CORRELATION_ID_" type="VARCHAR2(128)"/>
+      <column name="IS_CASE_ROOT_" type="NUMBER(1)" defaultValueNumeric="0">
+        <constraints nullable="false"/>
+      </column>
+    </addColumn>
+
+    <!-- Identify roots using the existing explicit case-to-process identity, not by assuming
+         every linked process without a plan item is a root. -->
+    <sql>
+      UPDATE CM_LINKED_PROCESS lp
+      SET IS_CASE_ROOT_ = 1
+      WHERE EXISTS (
+        SELECT 1 FROM CM_CASE c
+        WHERE c.ID_ = lp.CASE_ID_
+          AND c.ROOT_PROC_INST_ID_ = lp.PROC_INST_ID_)
+    </sql>
+
+    <!-- Existing PENDING rows contain the locally minted correlation placeholder in the engine
+         identity column. Move that known placeholder before making the identity nullable. -->
+    <sql>
+      UPDATE CM_CASE c
+      SET ROOT_CORRELATION_ID_ = ROOT_PROC_INST_ID_,
+          ROOT_PROC_INST_ID_ = NULL
+      WHERE EXISTS (
+        SELECT 1 FROM CM_LINKED_PROCESS lp
+        WHERE lp.CASE_ID_ = c.ID_
+          AND lp.IS_CASE_ROOT_ = 1
+          AND lp.ENGINE_SYNC_ = 'PENDING'
+          AND lp.PROC_INST_ID_ = c.ROOT_PROC_INST_ID_)
+    </sql>
+    <sql>
+      UPDATE CM_LINKED_PROCESS
+      SET CORRELATION_ID_ = PROC_INST_ID_,
+          PROC_INST_ID_ = NULL
+      WHERE ENGINE_SYNC_ = 'PENDING'
+    </sql>
+
+    <dropNotNullConstraint tableName="CM_LINKED_PROCESS"
+                           columnName="PROC_INST_ID_"
+                           columnDataType="VARCHAR2(64)"/>
+
+    <sql>
+      ALTER TABLE CM_LINKED_PROCESS ADD CONSTRAINT CK_CM_LPROC_ROOT_FLAG
+        CHECK (IS_CASE_ROOT_ IN (0, 1))
+    </sql>
+    <createIndex tableName="CM_CASE" indexName="IX_CM_CASE_ROOT_CORR" unique="true">
+      <column name="ROOT_CORRELATION_ID_"/>
+    </createIndex>
+    <createIndex tableName="CM_LINKED_PROCESS" indexName="IX_CM_LPROC_CORRELATION" unique="true">
+      <column name="CORRELATION_ID_"/>
+    </createIndex>
+    <!-- Oracle unique indexes ignore all-null keys. The CASE expression therefore constrains
+         only confirmed root rows and permits any number of pending/non-root rows. -->
+    <sql>
+      CREATE UNIQUE INDEX UQ_CM_LPROC_CONF_ROOT ON CM_LINKED_PROCESS (
+        CASE WHEN IS_CASE_ROOT_ = 1 AND PROC_INST_ID_ IS NOT NULL THEN CASE_ID_ ELSE NULL END)
+    </sql>
+
+  </changeSet>
+
+</databaseChangeLog>

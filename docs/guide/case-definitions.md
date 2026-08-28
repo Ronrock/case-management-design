@@ -378,6 +378,24 @@ curl --user olivia:olivia --request POST \
 Binding is the point where cross-artifact references are validated. Publication stores one
 artifact immutably; it cannot know which other releases you intend to combine until binding.
 
+Every publication response also supplies a `Location` for release metadata:
+
+```text
+GET /case-api/v2/case-definitions/{key}/releases/{releaseId}
+```
+
+This administrator endpoint works for orchestration, contract, and presentation releases. It
+returns the immutable release identifiers, `status`, and a safe `failureDetail` capped at 2,000
+characters. The existing kind-specific contract and presentation GETs continue to download
+content. A combined deployment validates all deterministic cross-artifact rules before writing;
+after publication begins, each immutable release commits in its own transaction so a definitive
+`FAILED` orchestration result remains available even if the later version-binding step fails.
+
+Remote deployment reports are ordered by the case definition's business version under a shared
+tenant-and-key lock. If a delayed report for version 2 arrives after version 3 is active, version 2
+is recorded as superseded and cannot retire or replace version 3. The same rule applies to
+tenant-scoped and tenant-less definitions.
+
 ## Release immutability and versioning
 
 Content is hashed with SHA-256. Republishing identical content for the same tenant, definition key,

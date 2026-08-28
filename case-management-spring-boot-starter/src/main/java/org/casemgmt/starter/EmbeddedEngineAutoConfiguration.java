@@ -91,8 +91,9 @@ public class EmbeddedEngineAutoConfiguration {
         @ConditionalOnMissingBean(EngineGateway.class)
         @ConditionalOnProperty(prefix = "casemgmt.engine", name = "mode", havingValue = "embedded",
                 matchIfMissing = true)
-        EngineGateway embeddedEngineGateway(TaskService taskService, RuntimeService runtimeService) {
-            return new EmbeddedEngineGateway(taskService, runtimeService);
+        EngineGateway embeddedEngineGateway(TaskService taskService, RuntimeService runtimeService,
+                                            org.operaton.bpm.engine.RepositoryService repositoryService) {
+            return new EmbeddedEngineGateway(taskService, runtimeService, repositoryService);
         }
 
         @Bean

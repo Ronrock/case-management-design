@@ -2,6 +2,7 @@ package org.casemgmt.engine.embedded;
 
 import org.casemgmt.engine.*;
 import org.operaton.bpm.engine.ProcessEngineException;
+import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.TaskService;
 import org.operaton.bpm.engine.task.Task;
@@ -26,10 +27,13 @@ public class EmbeddedEngineGateway implements EngineGateway {
 
     private final TaskService taskService;
     private final RuntimeService runtimeService;
+    private final RepositoryService repositoryService;
 
-    public EmbeddedEngineGateway(TaskService taskService, RuntimeService runtimeService) {
+    public EmbeddedEngineGateway(TaskService taskService, RuntimeService runtimeService,
+                                 RepositoryService repositoryService) {
         this.taskService = taskService;
         this.runtimeService = runtimeService;
+        this.repositoryService = repositoryService;
     }
 
     @Override
@@ -91,18 +95,58 @@ public class EmbeddedEngineGateway implements EngineGateway {
 
     @Override
     public EngineProcessRef startProcess(StartProcessRequest request) {
+        var definition = repositoryService.createProcessDefinitionQuery()
+                .processDefinitionId(request.processDefinitionId())
+                .singleResult();
+        if (definition == null) {
+            throw new EngineException("No process definition " + request.processDefinitionId());
+        }
+        if (!java.util.Objects.equals(definition.getTenantId(), request.tenantId())) {
+            throw new EngineException("Process definition " + request.processDefinitionId()
+                    + " belongs to another tenant");
+        }
+        if (request.processDefinitionKey() != null
+                && !request.processDefinitionKey().equals(definition.getKey())) {
+            throw new EngineException("Process definition " + request.processDefinitionId()
+                    + " does not match key " + request.processDefinitionKey());
+        }
         Map<String, Object> variables = new HashMap<>(
                 request.variables() == null ? Map.of() : request.variables());
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
         try {
+            var instance = runtimeService.startProcessInstanceById(
+                    request.processDefinitionId(), request.caseId(), variables);
+            return processRef(instance == null ? null : instance.getId(),
+                    request.processDefinitionKey(), request.caseId());
+        } catch (ProcessEngineException e) {
+            throw new EngineException(
+                    "Could not start process " + request.processDefinitionId(), e);
+        }
+    }
+
+    @Override
+    public EngineProcessRef startProcessByKey(StartProcessByKeyRequest request) {
+        Map<String, Object> variables = new HashMap<>(request.variables());
+        variables.put(CASE_ID_VARIABLE, request.caseId());
+        variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
+        try {
             var instance = runtimeService.startProcessInstanceByKey(
                     request.processDefinitionKey(), request.caseId(), variables);
-            return new EngineProcessRef(instance.getId(), request.processDefinitionKey(), request.caseId());
+            return processRef(instance == null ? null : instance.getId(),
+                    request.processDefinitionKey(), request.caseId());
         } catch (ProcessEngineException e) {
             throw new EngineException(
                     "Could not start process " + request.processDefinitionKey(), e);
         }
+    }
+
+    private static EngineProcessRef processRef(
+            String processInstanceId, String processDefinitionKey, String caseId) {
+        if (processInstanceId == null || processInstanceId.isBlank()) {
+            throw new EngineException("Engine start returned no process-instance id");
+        }
+        return new EngineProcessRef(processInstanceId, processDefinitionKey, caseId);
     }
 
     @Override

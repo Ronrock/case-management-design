@@ -1,6 +1,7 @@
 package org.casemgmt.rest.controller;
 
 import org.casemgmt.rest.CallerResolver;
+import org.casemgmt.rest.dto.BindingResponseFields;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
@@ -41,13 +42,7 @@ public class CombinedCaseDefinitionController {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("caseDefinitionId", binding.caseDefinitionId());
         body.put("orchestrationMode", "BPMN");
-        body.put("orchestrationReleaseId", binding.orchestrationReleaseId());
-        body.put("orchestrationSha256", binding.orchestrationSha256());
-        body.put("contractReleaseId", binding.contractReleaseId());
-        body.put("contractSha256", binding.contractSha256());
-        body.put("presentationReleaseId", binding.presentationReleaseId());
-        body.put("presentationSha256", binding.presentationSha256());
-        body.put("deploymentStatus", binding.deploymentStatus().name());
+        BindingResponseFields.put(body, binding, true);
         return ResponseEntity.status(HttpStatus.CREATED).body(body);
     }
 }

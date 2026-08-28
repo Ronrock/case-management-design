@@ -6,6 +6,7 @@ import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.JsonCodec;
 import org.casemgmt.rest.CallerResolver;
+import org.casemgmt.rest.dto.BindingResponseFields;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.rest.policy.AvailableAction;
 import org.casemgmt.service.Actor;
@@ -121,7 +122,8 @@ public class CaseDefinitionController {
             row.put("key", def.key());
             row.put("version", def.versionNo());
             row.put("orchestrationMode", def.orchestrationMode().name());
-            bindings.find(def.id()).ifPresent(binding -> putReleaseReferences(row, binding));
+            bindings.find(def.id()).ifPresent(binding ->
+                    BindingResponseFields.put(row, binding, false));
             row.put("name", def.name());
             row.put("tenantId", def.tenantId());
             row.put("availableActions", actions);
@@ -143,7 +145,8 @@ public class CaseDefinitionController {
         body.put("key", def.key());
         body.put("version", def.versionNo());
         body.put("orchestrationMode", def.orchestrationMode().name());
-        bindings.find(def.id()).ifPresent(binding -> putReleaseReferences(body, binding));
+        bindings.find(def.id()).ifPresent(binding ->
+                BindingResponseFields.put(body, binding, false));
         body.put("name", def.name());
         body.put("tenantId", def.tenantId());
         body.put("roles", def.roles());
@@ -178,22 +181,11 @@ public class CaseDefinitionController {
         body.put("key", def.key());
         body.put("version", def.versionNo());
         body.put("orchestrationMode", def.orchestrationMode().name());
-        bindings.find(def.id()).ifPresent(binding -> putReleaseReferences(body, binding));
+        bindings.find(def.id()).ifPresent(binding ->
+                BindingResponseFields.put(body, binding, false));
         body.put("name", def.name());
         body.put("tenantId", def.tenantId());
         return body;
-    }
-
-    private static void putReleaseReferences(
-            Map<String, Object> body,
-            org.casemgmt.release.CaseDefinitionVersionBinding binding) {
-        body.put("orchestrationReleaseId", binding.orchestrationReleaseId());
-        body.put("orchestrationSha256", binding.orchestrationSha256());
-        body.put("contractReleaseId", binding.contractReleaseId());
-        body.put("contractSha256", binding.contractSha256());
-        body.put("presentationReleaseId", binding.presentationReleaseId());
-        body.put("presentationSha256", binding.presentationSha256());
-        body.put("deploymentStatus", binding.deploymentStatus().name());
     }
 
     @GetMapping(value = "/{key}/forms/{formKey}", produces = "application/schema+json")

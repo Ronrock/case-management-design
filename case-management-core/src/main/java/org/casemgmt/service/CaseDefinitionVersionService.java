@@ -4,6 +4,7 @@ import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.error.InvalidCaseDefinitionException;
 import org.casemgmt.release.CaseDefinitionRelease;
 import org.casemgmt.release.CaseDefinitionVersionBinding;
+import org.casemgmt.release.BindingStatus;
 import org.casemgmt.release.ReleaseKind;
 import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.release.BpmnReleaseValidator;
@@ -49,21 +50,59 @@ public class CaseDefinitionVersionService {
     public CaseDefinitionVersionBinding bind(
             String key, String tenantId, String orchestrationReleaseId,
             String contractReleaseId, String presentationReleaseId, String boundBy) {
-        CaseDefinitionRelease orchestration = require(
+        return bindInternal(key, tenantId, orchestrationReleaseId, contractReleaseId,
+                presentationReleaseId, boundBy, false);
+    }
+
+    @Transactional
+    CaseDefinitionVersionBinding bindPendingDeployment(
+            String key, String tenantId, String orchestrationReleaseId,
+            String contractReleaseId, String presentationReleaseId, String boundBy) {
+        return bindInternal(key, tenantId, orchestrationReleaseId, contractReleaseId,
+                presentationReleaseId, boundBy, true);
+    }
+
+    private CaseDefinitionVersionBinding bindInternal(
+            String key, String tenantId, String orchestrationReleaseId,
+            String contractReleaseId, String presentationReleaseId, String boundBy,
+            boolean pendingOrchestrationAllowed) {
+        CaseDefinitionRelease orchestration = pendingOrchestrationAllowed
+                ? requirePendingOrActiveOrchestration(orchestrationReleaseId, tenantId, key)
+                : require(
                 orchestrationReleaseId, tenantId, key, ReleaseKind.ORCHESTRATION);
         CaseDefinitionRelease contract = require(
                 contractReleaseId, tenantId, key, ReleaseKind.CONTRACT);
         CaseDefinitionRelease presentation = require(
                 presentationReleaseId, tenantId, key, ReleaseKind.PRESENTATION);
         validateBoundArtifacts(key, orchestration, contract, presentation);
+        if (orchestration.status() == ReleaseStatus.ACTIVE) {
+            var identity = orchestration.engineIdentity();
+            if (identity == null) {
+                throw invalid(key, "Active BPMN orchestration release '" + orchestration.id()
+                        + "' has no verified engine identity");
+            }
+            if (!key.equals(identity.processDefinitionKey())
+                    || !Objects.equals(tenantId, identity.tenantId())) {
+                throw invalid(key, "Verified engine identity for release '" + orchestration.id()
+                        + "' does not match the binding key and tenant");
+            }
+        }
         CaseDefinition definition = definitions.deployBpmn(key,
                 new String(contract.content(), StandardCharsets.UTF_8), boundBy, tenantId);
-        CaseDefinitionVersionBinding binding = new CaseDefinitionVersionBinding(
-                definition.id(), orchestration.id(), orchestration.sha256(),
+        boolean active = orchestration.status() == ReleaseStatus.ACTIVE;
+        OffsetDateTime now = OffsetDateTime.now();
+        CaseDefinitionVersionBinding draft = new CaseDefinitionVersionBinding(
+                definition.id(), key, tenantId, orchestration.id(), orchestration.sha256(),
                 contract.id(), contract.sha256(), presentation.id(), presentation.sha256(),
-                orchestration.status(), OffsetDateTime.now(), boundBy);
-        bindings.insert(binding);
-        return binding;
+                orchestration.status(), org.casemgmt.orchestration.OrchestrationMode.BPMN,
+                BindingStatus.DRAFT, null, null, now, null, null, boundBy);
+        bindings.insert(draft);
+        if (!active) return draft;
+
+        CaseDefinitionVersionBinding activated = draft.activate(
+                orchestration, contract, presentation, orchestration.engineIdentity(), now);
+        bindings.activate(activated);
+        return activated;
     }
 
     /**
@@ -277,9 +316,26 @@ public class CaseDefinitionVersionService {
             throw new InvalidCaseDefinitionException(key, "Release '" + id + "' is not a "
                     + expectedKind.name().toLowerCase() + " release for definition '" + key + "'");
         }
-        if (release.status() == ReleaseStatus.FAILED) {
-            throw new InvalidCaseDefinitionException(key,
-                    "Release '" + id + "' is failed and cannot be bound");
+        if (release.status() != ReleaseStatus.ACTIVE) {
+            throw new InvalidCaseDefinitionException(key, "Release '" + id + "' is "
+                    + release.status() + "; public binding requires every constituent release "
+                    + "to be ACTIVE");
+        }
+        return release;
+    }
+
+    private CaseDefinitionRelease requirePendingOrActiveOrchestration(
+            String id, String tenantId, String key) {
+        CaseDefinitionRelease release = releases.require(id, tenantId);
+        if (release.kind() != ReleaseKind.ORCHESTRATION
+                || !release.definitionKey().equals(key)) {
+            throw new InvalidCaseDefinitionException(key, "Release '" + id
+                    + "' is not an orchestration release for definition '" + key + "'");
+        }
+        if (release.status() != ReleaseStatus.DEPLOYING
+                && release.status() != ReleaseStatus.ACTIVE) {
+            throw new InvalidCaseDefinitionException(key, "Release '" + id + "' is "
+                    + release.status() + "; combined publication requires DEPLOYING or ACTIVE");
         }
         return release;
     }

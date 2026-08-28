@@ -37,6 +37,30 @@ class ErrorMappingTest {
     }
 
     @Test
+    void unavailableCaseDefinitionMapsToAStableConflict() {
+        ProblemDetail problem = handler.onConflict(new CaseConflictException(
+                "case-definition-not-active",
+                "Case definition 'orders' has no active version", List.of()));
+
+        assertThat(problem.getStatus()).isEqualTo(409);
+        assertThat(problem.getProperties())
+                .containsEntry("code", "case-definition-not-active")
+                .containsEntry("availableActions", List.of());
+    }
+
+    @Test
+    void unavailableExactBindingMapsToAStableConflict() {
+        ProblemDetail problem = handler.onConflict(new CaseConflictException(
+                "case-definition-binding-not-active",
+                "Case definition 'orders' has no active binding", List.of()));
+
+        assertThat(problem.getStatus()).isEqualTo(409);
+        assertThat(problem.getProperties())
+                .containsEntry("code", "case-definition-binding-not-active")
+                .containsEntry("availableActions", List.of());
+    }
+
+    @Test
     void staleVersionMapsTo412() {
         ProblemDetail problem = handler.onOptimisticLock(
                 new OptimisticLockException("Case", "eng-a:1", 3));

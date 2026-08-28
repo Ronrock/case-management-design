@@ -574,6 +574,9 @@ class SlaServiceTest extends OracleTestBase {
         public EngineProcessRef startProcess(StartProcessRequest r) {
             return new EngineProcessRef("proc-" + UUID.randomUUID(), r.processDefinitionKey(), r.caseId());
         }
+        public EngineProcessRef startProcessByKey(org.casemgmt.engine.StartProcessByKeyRequest r) {
+            return new EngineProcessRef("proc-" + UUID.randomUUID(), r.processDefinitionKey(), r.caseId());
+        }
         public void cancelProcess(String processInstanceId, String reason) {}
         public List<EngineTaskRef> findTasks(EngineTaskQuery query) { return List.of(); }
     }

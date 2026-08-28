@@ -6,6 +6,7 @@ casemgmt:
   enabled: false      # this app is the engine only
 operaton:
   bpm:
+    auto-deployment-enabled: false
     history-level: full
     generic-properties:
       properties:

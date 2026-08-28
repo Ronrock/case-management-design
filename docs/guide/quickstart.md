@@ -167,6 +167,11 @@ You should see both `complaint` and `complaint-bpmn`. The BPMN entry includes:
   "key": "complaint-bpmn",
   "orchestrationMode": "BPMN",
   "deploymentStatus": "ACTIVE",
+  "bindingStatus": "ACTIVE",
+  "activatedAt": "...",
+  "engineProcessDefinitionKey": "complaint-bpmn",
+  "engineProcessDefinitionVersion": 1,
+  "engineTenantId": "t1",
   "orchestrationReleaseId": "...",
   "contractReleaseId": "...",
   "presentationReleaseId": "..."

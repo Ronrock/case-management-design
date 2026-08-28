@@ -248,6 +248,16 @@ public class ActionPolicy {
             return actions;
         }
         actions.add(AvailableAction.post("deploy-case-definition", "/case-definitions"));
+        actions.add(AvailableAction.post("publish-orchestration",
+                "/case-definitions/{key}/orchestration-releases"));
+        actions.add(AvailableAction.post("publish-contract",
+                "/case-definitions/{key}/contract-releases"));
+        actions.add(AvailableAction.post("publish-presentation",
+                "/case-definitions/{key}/presentation-releases"));
+        actions.add(AvailableAction.post("bind-case-definition-version",
+                "/case-definitions/{key}/versions"));
+        actions.add(AvailableAction.get("read-case-definition-release",
+                "/case-definitions/{key}/releases/{releaseId}"));
         actions.add(AvailableAction.post("subscribe-webhook", "/webhooks"));
         actions.add(AvailableAction.get("view-webhook-dead-letters", "/webhooks/{webhookId}/dead-letters"));
         actions.add(AvailableAction.post("redeliver-webhook-dead-letters",

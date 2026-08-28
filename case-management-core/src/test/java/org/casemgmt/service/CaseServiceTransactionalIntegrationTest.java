@@ -223,6 +223,11 @@ class CaseServiceTransactionalIntegrationTest extends OracleTestBase {
             return new EngineProcessRef("proc-1", r.processDefinitionKey(), r.caseId());
         }
 
+        @Override
+        public EngineProcessRef startProcessByKey(org.casemgmt.engine.StartProcessByKeyRequest r) {
+            return new EngineProcessRef("proc-1", r.processDefinitionKey(), r.caseId());
+        }
+
         @Override public void cancelProcess(String id, String reason) {}
         @Override public List<EngineTaskRef> findTasks(EngineTaskQuery q) { return List.of(); }
     }

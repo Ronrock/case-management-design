@@ -6,9 +6,12 @@ import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.release.CaseDefinitionRelease;
 import org.casemgmt.release.CaseDefinitionVersionBinding;
 import org.casemgmt.release.ReleaseKind;
+import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
@@ -26,6 +29,36 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class CaseDefinitionVersionServiceTest {
+
+    @ParameterizedTest(name = "rejects {0} contract release")
+    @EnumSource(value = ReleaseStatus.class, names = "ACTIVE", mode = EnumSource.Mode.EXCLUDE)
+    void publicBindingRejectsEveryNonActiveConstituentRelease(ReleaseStatus status) {
+        CaseDefinitionReleaseRepository releases = mock(CaseDefinitionReleaseRepository.class);
+        CaseDefinitionVersionBindingRepository bindings =
+                mock(CaseDefinitionVersionBindingRepository.class);
+        CaseDefinitionService definitions = mock(CaseDefinitionService.class);
+        when(releases.require("orch-1", "t1")).thenReturn(release("orch-1",
+                ReleaseKind.ORCHESTRATION, """
+                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+                  <process id="sample-case" isExecutable="true"/>
+                </definitions>""", "1", "application/bpmn+xml"));
+        when(releases.require("contract-1", "t1")).thenReturn(releaseWithStatus(
+                "contract-1", ReleaseKind.CONTRACT,
+                "{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\"," +
+                        "\"roles\":[],\"forms\":{},\"fields\":{}}", "2", status));
+        when(releases.require("presentation-1", "t1")).thenReturn(release("presentation-1",
+                ReleaseKind.PRESENTATION, "{\"version\":\"1.0\",\"sections\":[]}", "3"));
+
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+                .bind("sample-case", "t1", "orch-1", "contract-1",
+                        "presentation-1", "alice"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("contract-1")
+                .hasMessageContaining(status.name())
+                .hasMessageContaining("ACTIVE");
+
+        verifyNoInteractions(bindings, definitions);
+    }
 
     @Test
     void bindsExactReleaseReferencesIntoABpmnDefinitionVersion() {
@@ -55,7 +88,73 @@ class CaseDefinitionVersionServiceTest {
 
         assertThat(bound.caseDefinitionId()).isEqualTo("t1:sample-case:1");
         assertThat(bound.orchestrationReleaseId()).isEqualTo("orch-1");
+        assertThat(bound.status()).isEqualTo(org.casemgmt.release.BindingStatus.ACTIVE);
+        verify(bindings).insert(org.mockito.ArgumentMatchers.argThat(
+                draft -> draft.status() == org.casemgmt.release.BindingStatus.DRAFT
+                        && draft.engineIdentity() == null));
+        verify(bindings).activate(bound);
+    }
+
+    @Test
+    void combinedRemotePublicationMayCreateOnlyADraftBindingWhileDeploymentIsPending() {
+        CaseDefinitionReleaseRepository releases = mock(CaseDefinitionReleaseRepository.class);
+        CaseDefinitionVersionBindingRepository bindings =
+                mock(CaseDefinitionVersionBindingRepository.class);
+        CaseDefinitionService definitions = mock(CaseDefinitionService.class);
+        when(releases.require("orch-1", "t1")).thenReturn(releaseWithStatus(
+                "orch-1", ReleaseKind.ORCHESTRATION, """
+                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+                  <process id="sample-case" isExecutable="true"/>
+                </definitions>""", "1", ReleaseStatus.DEPLOYING));
+        when(releases.require("contract-1", "t1")).thenReturn(release("contract-1",
+                ReleaseKind.CONTRACT,
+                "{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\"," +
+                        "\"roles\":[],\"forms\":{},\"fields\":{}}", "2"));
+        when(releases.require("presentation-1", "t1")).thenReturn(release("presentation-1",
+                ReleaseKind.PRESENTATION, "{\"version\":\"1.0\",\"sections\":[]}", "3"));
+        CaseDefinition definition = new CaseDefinition("t1:sample-case:2", "sample-case", 2,
+                "Sample case", "t1", null, null, List.of(), List.of(), Map.of(), List.of(),
+                OrchestrationMode.BPMN, OffsetDateTime.now(), "alice");
+        when(definitions.deployBpmn(eq("sample-case"), any(), eq("alice"), eq("t1")))
+                .thenReturn(definition);
+
+        CaseDefinitionVersionBinding bound = new CaseDefinitionVersionService(
+                releases, bindings, definitions).bindPendingDeployment(
+                "sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice");
+
+        assertThat(bound.status()).isEqualTo(org.casemgmt.release.BindingStatus.DRAFT);
+        assertThat(bound.caseDefinitionKey()).isEqualTo("sample-case");
+        assertThat(bound.tenantId()).isEqualTo("t1");
         verify(bindings).insert(bound);
+        verify(bindings, org.mockito.Mockito.never()).activate(any());
+    }
+
+    @Test
+    void rejectsAnActiveBpmnReleaseThatHasNoVerifiedEngineIdentity() {
+        CaseDefinitionReleaseRepository releases = mock(CaseDefinitionReleaseRepository.class);
+        CaseDefinitionVersionBindingRepository bindings =
+                mock(CaseDefinitionVersionBindingRepository.class);
+        CaseDefinitionService definitions = mock(CaseDefinitionService.class);
+        when(releases.require("orch-1", "t1")).thenReturn(CaseDefinitionRelease.stored(
+                "orch-1", "sample-case", "t1", ReleaseKind.ORCHESTRATION,
+                "application/bpmn+xml", """
+                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+                  <process id="sample-case" isExecutable="true"/>
+                </definitions>""".getBytes(StandardCharsets.UTF_8), "1".repeat(64),
+                org.casemgmt.release.ReleaseStatus.ACTIVE, "deployment-legacy", null, "alice"));
+        when(releases.require("contract-1", "t1")).thenReturn(release("contract-1",
+                ReleaseKind.CONTRACT,
+                "{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\","
+                        + "\"roles\":[],\"forms\":{},\"fields\":{}}", "2"));
+        when(releases.require("presentation-1", "t1")).thenReturn(release("presentation-1",
+                ReleaseKind.PRESENTATION, "{\"version\":\"1.0\",\"sections\":[]}", "3"));
+
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+                .bind("sample-case", "t1", "orch-1", "contract-1",
+                        "presentation-1", "alice"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("verified engine identity");
+        verifyNoInteractions(bindings, definitions);
     }
 
     @Test
@@ -269,8 +368,24 @@ class CaseDefinitionVersionServiceTest {
                                                   String digestSeed, String mediaType) {
         // Binding is only legal against releases that reached ACTIVE, so these fixtures say so
         // explicitly rather than relying on a factory that used to assume it.
+        if (kind == ReleaseKind.ORCHESTRATION) {
+            return CaseDefinitionRelease.storedWithEngineIdentity(
+                    id, "sample-case", "t1", kind, mediaType,
+                    content.getBytes(StandardCharsets.UTF_8), digestSeed.repeat(64),
+                    org.casemgmt.release.ReleaseStatus.ACTIVE,
+                    new org.casemgmt.orchestration.EngineDeploymentIdentity(
+                            "deployment-1", "sample-case:1:100", "sample-case", 1, "t1"),
+                    null, "alice");
+        }
         return CaseDefinitionRelease.stored(id, "sample-case", "t1", kind, mediaType,
                 content.getBytes(StandardCharsets.UTF_8), digestSeed.repeat(64),
                 org.casemgmt.release.ReleaseStatus.ACTIVE, null, null, "alice");
+    }
+
+    private static CaseDefinitionRelease releaseWithStatus(
+            String id, ReleaseKind kind, String content, String digestSeed, ReleaseStatus status) {
+        return CaseDefinitionRelease.stored(id, "sample-case", "t1", kind, "application/json",
+                content.getBytes(StandardCharsets.UTF_8), digestSeed.repeat(64), status,
+                null, null, "alice");
     }
 }

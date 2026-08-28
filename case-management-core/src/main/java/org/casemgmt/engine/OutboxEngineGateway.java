@@ -73,8 +73,23 @@ public class OutboxEngineGateway implements EngineGateway {
         // instead of planItemId, which for an ad hoc process would have nothing to correlate on.
         enqueue(EngineCommand.Type.START_PROCESS, request.caseId(),
                 Map.of("planItemId", request.planItemId() == null ? "" : request.planItemId(),
-                        "processDefinitionKey", request.processDefinitionKey(),
+                        "selectionType", "ID",
+                        "processDefinitionId", request.processDefinitionId(),
+                        "processDefinitionKey", request.processDefinitionKey() == null
+                                ? "" : request.processDefinitionKey(),
+                        "tenantId", request.tenantId() == null ? "" : request.tenantId(),
                         "variables", request.variables() == null ? Map.of() : request.variables(),
+                        "correlationId", request.correlationId() == null ? "" : request.correlationId()));
+        return new EngineProcessRef(null, request.processDefinitionKey(), request.caseId());
+    }
+
+    @Override
+    public EngineProcessRef startProcessByKey(StartProcessByKeyRequest request) {
+        enqueue(EngineCommand.Type.START_PROCESS, request.caseId(),
+                Map.of("planItemId", request.planItemId() == null ? "" : request.planItemId(),
+                        "selectionType", "KEY",
+                        "processDefinitionKey", request.processDefinitionKey(),
+                        "variables", request.variables(),
                         "correlationId", request.correlationId() == null ? "" : request.correlationId()));
         return new EngineProcessRef(null, request.processDefinitionKey(), request.caseId());
     }

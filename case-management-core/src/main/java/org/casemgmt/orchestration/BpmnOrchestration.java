@@ -20,10 +20,13 @@ public final class BpmnOrchestration implements CaseOrchestration {
 
     private final EngineGateway engine;
     private final LinkedProcessRepository processes;
+    private final EngineDeploymentIdentityResolver identities;
 
-    public BpmnOrchestration(EngineGateway engine, LinkedProcessRepository processes) {
+    public BpmnOrchestration(EngineGateway engine, LinkedProcessRepository processes,
+                             EngineDeploymentIdentityResolver identities) {
         this.engine = engine;
         this.processes = processes;
+        this.identities = identities;
     }
 
     @Override
@@ -39,14 +42,16 @@ public final class BpmnOrchestration implements CaseOrchestration {
     @Override
     public void onCaseCreated(CaseInstance caseInstance, CaseDefinition definition) {
         String projectionId = CaseIds.newId();
+        EngineDeploymentIdentity identity = identities.requireActive(
+                definition.id(), caseInstance.tenantId());
         EngineProcessRef process = engine.startProcess(new StartProcessRequest(
-                caseInstance.id(), null, definition.key(), caseInstance.variables(), projectionId));
-        String processInstanceId = process.processInstanceId() == null
-                ? projectionId : process.processInstanceId();
+                caseInstance.id(), null, identity.processDefinitionId(),
+                identity.processDefinitionKey(), identity.tenantId(), caseInstance.variables(),
+                projectionId));
         CaseTask.EngineSync sync = process.processInstanceId() == null
                 ? CaseTask.EngineSync.PENDING : CaseTask.EngineSync.SYNCED;
-        processes.insertRoot(projectionId, caseInstance.id(), processInstanceId,
-                definition.key(), sync);
+        processes.insertRoot(projectionId, caseInstance.id(), process.processInstanceId(),
+                identity.processDefinitionKey(), sync);
     }
 
     @Override

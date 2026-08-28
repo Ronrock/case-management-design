@@ -7,9 +7,10 @@ public interface OrchestrationDeploymentPort {
     DeploymentResult deploy(String releaseId, String definitionKey, String tenantId, byte[] content,
                             String mediaType);
 
-    record DeploymentResult(ReleaseStatus status, String engineDeploymentId, String failureDetail) {
-        public static DeploymentResult active(String engineDeploymentId) {
-            return new DeploymentResult(ReleaseStatus.ACTIVE, engineDeploymentId, null);
+    record DeploymentResult(ReleaseStatus status, EngineDeploymentIdentity identity,
+                            String failureDetail) {
+        public static DeploymentResult active(EngineDeploymentIdentity identity) {
+            return new DeploymentResult(ReleaseStatus.ACTIVE, identity, null);
         }
 
         public static DeploymentResult deploying() {

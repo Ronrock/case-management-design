@@ -343,6 +343,10 @@ class CaseServiceTest extends OracleTestBase {
             startedProcesses.add(r.processDefinitionKey());
             return new EngineProcessRef("proc-1", r.processDefinitionKey(), r.caseId());
         }
+        public EngineProcessRef startProcessByKey(org.casemgmt.engine.StartProcessByKeyRequest r) {
+            startedProcesses.add(r.processDefinitionKey());
+            return new EngineProcessRef("proc-1", r.processDefinitionKey(), r.caseId());
+        }
         public void cancelProcess(String id, String reason) {}
         public List<EngineTaskRef> findTasks(EngineTaskQuery q) { return List.of(); }
     }

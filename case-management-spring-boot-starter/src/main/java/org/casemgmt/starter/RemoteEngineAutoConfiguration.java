@@ -3,14 +3,15 @@ package org.casemgmt.starter;
 import org.casemgmt.engine.EngineCommandDispatcher;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
+import org.casemgmt.domain.CaseTask;
 import org.casemgmt.engine.remote.RemoteEngineGateway;
 import org.casemgmt.engine.remote.RemoteObservationPoller;
 import org.casemgmt.engine.remote.RemoteProcessActivityClassifier;
 import org.casemgmt.orchestration.OrchestrationDeploymentPort;
 import org.casemgmt.orchestration.OutboxOrchestrationDeploymentPort;
 import org.casemgmt.repo.CaseTaskRepository;
-import org.casemgmt.repo.CaseDefinitionReleaseRepository;
-import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
+import org.casemgmt.service.OrchestrationDeploymentReportService;
+import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.repo.EngineCommandRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.projection.ActiveBpmnCaseRepository;
@@ -23,6 +24,7 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.web.client.RestClient;
 
 import java.util.Optional;
+import java.time.OffsetDateTime;
 
 @AutoConfiguration(before = CaseManagementAutoConfiguration.class)
 // Fix round 1, Important 1: the master switch guard. Without it, casemgmt.enabled=false with
@@ -180,36 +182,36 @@ public class RemoteEngineAutoConfiguration {
     }
 
     /**
-     * The {@code SyncReporter} lambda reports against one of two correlation keys depending on
-     * which command type is being confirmed ({@code EngineCommandDispatcher.SyncReporter}'s
-     * Javadoc): a {@code planItemId} for {@code CREATE_TASK}, or a {@code CM_LINKED_PROCESS} row
-     * id for {@code START_PROCESS}. The brief's own sketch only wired the task half (and used the
-     * wrong lookup — {@code CaseTaskRepository.findByCase} takes a case id, not a plan item id,
-     * fixed below via {@link CaseTaskRepository#findByPlanItemId}) and left {@code
-     * LinkedProcessRepository} untouched, which would have meant a linked process started in
-     * remote mode never leaves {@code ENGINE_SYNC_ = PENDING} once the outbox actually confirms
-     * it. Both repository calls are safe to make unconditionally for every report: ids are minted
-     * by {@code CaseIds.newId()} and are therefore globally unique, so a task-shaped key can never
-     * match a linked-process row and vice versa — the "wrong" call is just a harmless no-op
-     * (an absent {@code Optional} for the task lookup, a zero-row UPDATE for the linked-process
-     * one).
+     * Task confirmations remain single-row sync reports. Process start success takes the richer
+     * callback so the linked row and, for a root, the owning case receive the real engine identity
+     * in one transaction. A definitive process-start failure updates only the waiting link state.
      */
     @Bean
     public EngineCommandDispatcher engineCommandDispatcher(EngineCommandRepository commands,
                                                             RemoteEngineGateway delegate,
                                                             CaseTaskRepository tasks,
                                                             LinkedProcessRepository linkedProcesses,
-                                                            CaseDefinitionReleaseRepository releases,
-                                                            CaseDefinitionVersionBindingRepository bindings) {
-        return new EngineCommandDispatcher(commands, delegate,
-                (correlationKey, sync, engineId) -> {
-                    tasks.findByPlanItemId(correlationKey)
-                            .ifPresent(t -> tasks.markSync(t.id(), sync, engineId));
-                    linkedProcesses.markSync(correlationKey, sync, engineId);
-                },
-                (releaseId, status, deploymentId, failure) -> {
-                    releases.markDeployment(releaseId, status, deploymentId, failure);
-                    bindings.markDeploymentByRelease(releaseId, status);
-                });
+                                                            LinkedProcessService linkedProcessService,
+                                                            OrchestrationDeploymentReportService deployments) {
+        return new EngineCommandDispatcher(commands, delegate, new EngineCommandDispatcher.SyncReporter() {
+            @Override
+            public void report(String correlationKey, CaseTask.EngineSync sync,
+                               String engineId) {
+                tasks.findByPlanItemId(correlationKey)
+                        .ifPresent(t -> tasks.markSync(t.id(), sync, engineId));
+                if (sync != CaseTask.EngineSync.SYNCED) {
+                    linkedProcesses.markSync(correlationKey, sync, null);
+                }
+            }
+
+            @Override
+            public void confirmProcessStarted(String caseId, String correlationId,
+                                              String engineProcessInstanceId,
+                                              OffsetDateTime confirmedAt) {
+                linkedProcessService.confirmStarted(caseId, correlationId,
+                        engineProcessInstanceId, confirmedAt);
+            }
+        },
+                deployments::report);
     }
 }

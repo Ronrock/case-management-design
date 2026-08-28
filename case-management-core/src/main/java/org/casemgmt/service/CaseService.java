@@ -107,8 +107,16 @@ public class CaseService {
     @Transactional
     public CaseInstance create(String caseDefKey, String tenantId, String businessKey, String title,
                                CasePriority priority, Map<String, Object> variables, Actor actor) {
-        CaseDefinition def = definitions.findLatest(caseDefKey, tenantId)
-                .orElseThrow(() -> new NotFoundException("CaseDefinition", caseDefKey));
+        CaseDefinition def = definitions.findLatestStartable(caseDefKey, tenantId)
+                .orElseGet(() -> {
+                    if (definitions.findLatest(caseDefKey, tenantId).isPresent()) {
+                        throw new CaseConflictException("case-definition-not-active",
+                                "Case definition '" + caseDefKey
+                                        + "' has no ACTIVE binding available for new cases",
+                                List.of());
+                    }
+                    throw new NotFoundException("CaseDefinition", caseDefKey);
+                });
 
         OffsetDateTime now = OffsetDateTime.now();
         CaseInstance created = new CaseInstance(CaseIds.newCaseId(engineId), engineId, tenantId,

@@ -42,6 +42,12 @@ class RecordingEngineGateway implements EngineGateway {
     }
 
     @Override
+    public EngineProcessRef startProcessByKey(org.casemgmt.engine.StartProcessByKeyRequest request) {
+        return new EngineProcessRef("engine-proc-" + ids.incrementAndGet(),
+                request.processDefinitionKey());
+    }
+
+    @Override
     public void cancelProcess(String processInstanceId, String reason) { }
 
     @Override

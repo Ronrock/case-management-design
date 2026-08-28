@@ -202,8 +202,9 @@ public class CaseApiTestConfig {
 
     @Bean
     public BpmnOrchestration bpmnOrchestration(
-            EngineGateway engine, LinkedProcessRepository processes) {
-        return new BpmnOrchestration(engine, processes);
+            EngineGateway engine, LinkedProcessRepository processes,
+            CaseDefinitionVersionBindingRepository bindings) {
+        return new BpmnOrchestration(engine, processes, bindings);
     }
 
     @Bean

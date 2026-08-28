@@ -4,6 +4,7 @@ import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.orchestration.BpmnOrchestration;
 import org.casemgmt.orchestration.CaseOrchestration;
 import org.casemgmt.orchestration.CaseOrchestrationRegistry;
+import org.casemgmt.orchestration.EngineDeploymentIdentityResolver;
 import org.casemgmt.orchestration.PlanModelOrchestration;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.repo.AuditRepository;
@@ -37,6 +38,7 @@ import org.casemgmt.service.PlanItemService;
 import org.casemgmt.service.TransitionApplier;
 import org.casemgmt.service.AdHocActionService;
 import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
+import org.casemgmt.service.OrchestrationDeploymentReportService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -86,8 +88,9 @@ public class CaseManagementServiceConfiguration {
 
     @Bean
     public BpmnOrchestration bpmnOrchestration(
-            EngineGateway engine, LinkedProcessRepository processes) {
-        return new BpmnOrchestration(engine, processes);
+            EngineGateway engine, LinkedProcessRepository processes,
+            EngineDeploymentIdentityResolver identities) {
+        return new BpmnOrchestration(engine, processes, identities);
     }
 
     @Bean
@@ -106,8 +109,10 @@ public class CaseManagementServiceConfiguration {
             CaseDefinitionReleaseRepository repo,
             ObjectProvider<OrchestrationDeploymentPort> deployments) {
         OrchestrationDeploymentPort deployment = deployments.getIfAvailable(() ->
-                (releaseId, definitionKey, tenantId, content, mediaType) ->
-                        OrchestrationDeploymentPort.DeploymentResult.active(null));
+                (releaseId, definitionKey, tenantId, content, mediaType) -> {
+                    throw new org.casemgmt.engine.EngineException(
+                            "No orchestration deployment adapter is configured");
+                });
         return new CaseDefinitionReleaseService(repo, deployment);
     }
 
@@ -117,6 +122,13 @@ public class CaseManagementServiceConfiguration {
             CaseDefinitionVersionBindingRepository bindings,
             CaseDefinitionService definitions) {
         return new CaseDefinitionVersionService(releases, bindings, definitions);
+    }
+
+    @Bean
+    public OrchestrationDeploymentReportService orchestrationDeploymentReportService(
+            CaseDefinitionReleaseRepository releases,
+            CaseDefinitionVersionBindingRepository bindings) {
+        return new OrchestrationDeploymentReportService(releases, bindings);
     }
 
     @Bean

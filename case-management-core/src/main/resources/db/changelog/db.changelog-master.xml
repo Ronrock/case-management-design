@@ -15,4 +15,5 @@
   </changeSet>
 
   <include file="db/changelog/cm-poc-additions.xml"/>
+  <include file="db/changelog/cm-bpmn-release-activation.xml"/>
 </databaseChangeLog>

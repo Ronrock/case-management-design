@@ -1,7 +1,9 @@
 package org.casemgmt.engine.remote;
 
 import org.casemgmt.engine.*;
+import org.casemgmt.orchestration.DeploymentResourceManifest;
 import org.casemgmt.orchestration.OrchestrationDeploymentClient;
+import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.MediaType;
 import org.springframework.util.LinkedMultiValueMap;
@@ -13,6 +15,8 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 /**
@@ -49,8 +53,10 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
     }
 
     @Override
-    public String deploy(String releaseId, String definitionKey, String tenantId, byte[] content,
-                         String mediaType) {
+    public EngineDeploymentIdentity deploy(String releaseId, String definitionKey, String tenantId,
+                                           byte[] content, String mediaType) {
+        DeploymentResourceManifest approved = approvedManifest(
+                definitionKey, content, mediaType);
         String fileName = definitionKey + ("application/zip".equals(mediaType) ? ".zip" : ".bpmn");
         var body = new LinkedMultiValueMap<String, Object>();
         body.add("deployment-name", "case-release:" + releaseId);
@@ -76,7 +82,7 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             if (id == null || id.toString().isBlank()) {
                 throw new EngineException("deployOrchestration returned no deployment id");
             }
-            return id.toString();
+            return verifyDeployment(id.toString(), definitionKey, tenantId, approved);
         } catch (RestClientResponseException e) {
             throw new EngineException("deployOrchestration (POST /deployment/create) failed: "
                     + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
@@ -84,6 +90,180 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             throw new EngineException("deployOrchestration (POST /deployment/create) failed: "
                     + e.getMessage(), e);
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private EngineDeploymentIdentity verifyDeployment(
+            String deploymentId, String definitionKey, String tenantId,
+            DeploymentResourceManifest approved) {
+        try {
+            List<Map<String, Object>> definitions = client.get()
+                    .uri(builder -> builder.path("/process-definition")
+                            .queryParam("deploymentId", deploymentId).build())
+                    .retrieve()
+                    .body(List.class);
+            List<Map<String, Object>> deployed = definitions == null ? List.of() : definitions;
+            if (deployed.isEmpty()) {
+                throw deploymentMismatch(definitionKey, tenantId,
+                        "expected exactly one executable root but found 0");
+            }
+
+            List<Map<String, Object>> matchingKey = deployed.stream()
+                    .filter(definition -> definitionKey.equals(string(definition.get("key"))))
+                    .toList();
+            if (matchingKey.isEmpty()) {
+                List<String> actualKeys = deployed.stream()
+                        .map(definition -> string(definition.get("key")))
+                        .filter(Objects::nonNull).distinct().sorted().toList();
+                throw deploymentMismatch(definitionKey, tenantId,
+                        "definition key '" + definitionKey + "' was not present; found "
+                                + actualKeys);
+            }
+
+            List<Map<String, Object>> matchingTenant = matchingKey.stream()
+                    .filter(definition -> Objects.equals(tenantId,
+                            string(definition.get("tenantId"))))
+                    .toList();
+            if (matchingTenant.isEmpty()) {
+                List<String> actualTenants = matchingKey.stream()
+                        .map(definition -> displayTenant(string(definition.get("tenantId"))))
+                        .distinct().sorted().toList();
+                throw deploymentMismatch(definitionKey, tenantId,
+                        "tenant '" + displayTenant(tenantId) + "' did not match; found "
+                                + actualTenants);
+            }
+            if (matchingTenant.size() != 1) {
+                throw deploymentMismatch(definitionKey, tenantId,
+                        "expected exactly one executable root but found "
+                                + matchingTenant.size());
+            }
+
+            Map<String, Object> root = matchingTenant.getFirst();
+            String actualDeploymentId = string(root.get("deploymentId"));
+            if (!deploymentId.equals(actualDeploymentId)) {
+                throw deploymentMismatch(definitionKey, tenantId,
+                        "engine returned process definition for deployment '"
+                                + actualDeploymentId + "'");
+            }
+            Object version = root.get("version");
+            if (!(version instanceof Number number)) {
+                throw deploymentMismatch(definitionKey, tenantId,
+                        "engine returned no numeric process-definition version");
+            }
+            EngineDeploymentIdentity identity = new EngineDeploymentIdentity(
+                    deploymentId, string(root.get("id")),
+                    string(root.get("key")), number.intValue(), string(root.get("tenantId")));
+            DeploymentResourceManifest deployedManifest = readDeploymentManifest(
+                    deploymentId, definitionKey, tenantId);
+            if (!approved.matches(deployedManifest)) {
+                throw deploymentMismatch(definitionKey, tenantId,
+                        "resource manifest mismatch: "
+                                + approved.differenceFrom(deployedManifest));
+            }
+            return identity;
+        } catch (RestClientResponseException e) {
+            throw new EngineException("verifyOrchestrationDeployment (GET /process-definition) failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException("verifyOrchestrationDeployment (GET /process-definition) failed: "
+                    + e.getMessage(), e);
+        }
+    }
+
+    private static DeploymentResourceManifest approvedManifest(
+            String definitionKey, byte[] content, String mediaType) {
+        try {
+            return DeploymentResourceManifest.fromArtifact(definitionKey, content, mediaType);
+        } catch (IllegalArgumentException e) {
+            throw new EngineException("Approved orchestration resource manifest is invalid: "
+                    + e.getMessage(), e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private DeploymentResourceManifest readDeploymentManifest(
+            String deploymentId, String definitionKey, String tenantId) {
+        List<Map<String, Object>> response;
+        try {
+            response = client.get().uri(builder -> builder
+                            .path("/deployment/{deploymentId}/resources")
+                            .build(deploymentId))
+                    .retrieve()
+                    .body(List.class);
+        } catch (RestClientResponseException e) {
+            throw new EngineException("verifyOrchestrationResources (GET deployment resources) failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException("verifyOrchestrationResources (GET deployment resources) failed: "
+                    + e.getMessage(), e);
+        }
+
+        List<Map<String, Object>> resources = response == null ? List.of() : response;
+        if (resources.size() > DeploymentResourceManifest.MAX_RESOURCES) {
+            throw deploymentMismatch(definitionKey, tenantId,
+                    "resource manifest exceeds " + DeploymentResourceManifest.MAX_RESOURCES
+                            + " resources");
+        }
+        DeploymentResourceManifest.Builder manifest = DeploymentResourceManifest.builder();
+        for (Map<String, Object> resource : resources) {
+            String resourceId = string(resource.get("id"));
+            String resourceName = string(resource.get("name"));
+            String actualDeploymentId = string(resource.get("deploymentId"));
+            if (resourceId == null || resourceId.isBlank()
+                    || resourceName == null || resourceName.isBlank()) {
+                throw deploymentMismatch(definitionKey, tenantId,
+                        "resource manifest contains an entry without id or name");
+            }
+            if (!deploymentId.equals(actualDeploymentId)) {
+                throw deploymentMismatch(definitionKey, tenantId,
+                        "resource '" + resourceName + "' belongs to deployment '"
+                                + actualDeploymentId + "'");
+            }
+            readRemoteResource(manifest, deploymentId, resourceId, resourceName,
+                    definitionKey, tenantId);
+        }
+        return manifest.build();
+    }
+
+    private void readRemoteResource(
+            DeploymentResourceManifest.Builder manifest, String deploymentId,
+            String resourceId, String resourceName, String definitionKey, String tenantId) {
+        try {
+            client.get().uri(builder -> builder
+                            .path("/deployment/{deploymentId}/resources/{resourceId}/data")
+                            .build(deploymentId, resourceId))
+                    .exchange((request, response) -> {
+                        if (!response.getStatusCode().is2xxSuccessful()) {
+                            throw new EngineException("verifyOrchestrationResources (GET resource data) "
+                                    + "failed: " + response.getStatusCode());
+                        }
+                        try {
+                            manifest.add(resourceName, response.getBody());
+                        } catch (java.io.IOException | IllegalArgumentException e) {
+                            throw deploymentMismatch(definitionKey, tenantId,
+                                    "could not read resource '" + resourceName + "': "
+                                            + e.getMessage());
+                        }
+                        return null;
+                    });
+        } catch (RestClientException e) {
+            throw new EngineException("verifyOrchestrationResources (GET resource data) failed: "
+                    + e.getMessage(), e);
+        }
+    }
+
+    private static EngineException deploymentMismatch(
+            String definitionKey, String tenantId, String detail) {
+        return new EngineException("Deployment verification failed for definition key '"
+                + definitionKey + "' and tenant '" + displayTenant(tenantId) + "': " + detail);
+    }
+
+    private static String displayTenant(String tenantId) {
+        return tenantId == null ? "<none>" : tenantId;
+    }
+
+    private static String string(Object value) {
+        return value == null ? null : value.toString();
     }
 
     @Override
@@ -143,17 +323,39 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
 
     @Override
     public EngineProcessRef startProcess(StartProcessRequest request) {
+        Map<String, Object> definition = getExactDefinition(request.processDefinitionId());
+        if (!Objects.equals(string(definition.get("tenantId")), request.tenantId())) {
+            throw new EngineException("Process definition " + request.processDefinitionId()
+                    + " belongs to another tenant");
+        }
+        if (request.processDefinitionKey() != null
+                && !request.processDefinitionKey().equals(string(definition.get("key")))) {
+            throw new EngineException("Process definition " + request.processDefinitionId()
+                    + " does not match key " + request.processDefinitionKey());
+        }
         Map<String, Object> variables = new LinkedHashMap<>(
                 request.variables() == null ? Map.of() : request.variables());
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
 
-        Map<String, Object> response = post("startProcess",
-                "/process-definition/key/" + request.processDefinitionKey() + "/start",
+        Map<String, Object> response = postExactStart(request.processDefinitionId(),
                 Map.of("businessKey", request.caseId(), "variables", typed(variables)));
 
-        return new EngineProcessRef(String.valueOf(response.get("id")),
-                request.processDefinitionKey(), request.caseId());
+        return processRef(response, request.processDefinitionKey(), request.caseId());
+    }
+
+    @Override
+    public EngineProcessRef startProcessByKey(StartProcessByKeyRequest request) {
+        Map<String, Object> variables = new LinkedHashMap<>(request.variables());
+        variables.put(CASE_ID_VARIABLE, request.caseId());
+        variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
+
+        String encodedKey = URLEncoder.encode(request.processDefinitionKey(), StandardCharsets.UTF_8);
+        Map<String, Object> response = post("startProcessByKey",
+                "/process-definition/key/" + encodedKey + "/start",
+                Map.of("businessKey", request.caseId(), "variables", typed(variables)));
+
+        return processRef(response, request.processDefinitionKey(), request.caseId());
     }
 
     @Override
@@ -296,6 +498,22 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         }
     }
 
+    private Map<String, Object> getExactDefinition(String processDefinitionId) {
+        try {
+            return client.get().uri(builder -> builder
+                            .path("/process-definition/{processDefinitionId}")
+                            .build(processDefinitionId))
+                    .retrieve()
+                    .body(Map.class);
+        } catch (RestClientResponseException e) {
+            throw new EngineException("startProcess (definition GET " + processDefinitionId + ") failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException("startProcess (definition GET " + processDefinitionId
+                    + ") failed: " + e.getMessage(), e);
+        }
+    }
+
     private Map<String, Object> getIfPresent(String path) {
         try {
             return client.get().uri(path).retrieve().body(Map.class);
@@ -327,6 +545,33 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             // matters specifically for the remote gateway.
             throw new EngineException(operation + " (POST " + path + ") failed: " + e.getMessage(), e);
         }
+    }
+
+    private Map<String, Object> postExactStart(String processDefinitionId, Object body) {
+        try {
+            return client.post().uri(builder -> builder
+                            .path("/process-definition/{processDefinitionId}/start")
+                            .build(processDefinitionId))
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(Map.class);
+        } catch (RestClientResponseException e) {
+            throw new EngineException("startProcess (POST exact " + processDefinitionId + ") failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException("startProcess (POST exact " + processDefinitionId
+                    + ") failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static EngineProcessRef processRef(
+            Map<String, Object> response, String processDefinitionKey, String caseId) {
+        String processInstanceId = response == null ? null : string(response.get("id"));
+        if (processInstanceId == null || processInstanceId.isBlank()) {
+            throw new EngineException("Engine start returned no process-instance id");
+        }
+        return new EngineProcessRef(processInstanceId, processDefinitionKey, caseId);
     }
 
     /** engine-rest wants {"name": {"value": v, "type": "String"}} rather than plain values. */

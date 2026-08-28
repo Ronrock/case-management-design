@@ -103,32 +103,22 @@ class CollaborationServicesTest extends OracleTestBase {
         assertThat(gateway.startedProcesses).containsExactly("letter-process");
     }
 
-    /**
-     * Task 18 review round 2, Important 1: {@code CaseServiceTest.RecordingGateway#startProcess}
-     * (used by every other test in this class) always returns a non-null {@code "proc-1"}, so
-     * {@code LinkedProcessService.start}'s {@code ref.processInstanceId() == null ? id : ...}
-     * placeholder branch was never exercised by this suite — a future edit that flipped the
-     * ternary or dropped the null-guard would have compiled and passed all of it, then thrown
-     * {@code ORA-01400} (CM_LINKED_PROCESS.PROC_INST_ID_ is NOT NULL) the first time remote mode
-     * actually ran. This test uses a gateway that mimics {@code OutboxEngineGateway}'s contract —
-     * {@code startProcess} always returns a null {@code processInstanceId} — and asserts exactly
-     * what gets persisted: the row's own locally-minted id, not blank, not null, and marked
-     * {@code PENDING} rather than the embedded/remote-synchronous default of {@code SYNCED}.
-     */
+    /** A remote start persists correlation, while engine identity remains unknown and null. */
     @Test
-    void startingAProcessInRemoteModeUsesTheRowIdAsAPlaceholder() {
+    void startingAProcessInRemoteModeStoresCorrelationWithoutAPlaceholderIdentity() {
         LinkedProcessService remoteProcesses = TestServices.processService(dataSource(), new NullInstanceGateway());
 
         var row = remoteProcesses.start(caseId, null, "letter-process", Map.of(), alice);
 
-        assertThat(row.processInstanceId()).isEqualTo(row.id());
+        assertThat(row.correlationId()).isEqualTo(row.id());
+        assertThat(row.processInstanceId()).isNull();
         assertThat(row.engineSync()).isEqualTo(CaseTask.EngineSync.PENDING);
 
-        // Persisted, not just returned: the placeholder actually made it into CM_LINKED_PROCESS,
-        // via a fresh read rather than trusting the in-memory row start() handed back.
+        // Re-read persistence rather than trusting only the service return value.
         var reloaded = remoteProcesses.forCase(caseId).stream()
                 .filter(r -> r.id().equals(row.id())).findFirst().orElseThrow();
-        assertThat(reloaded.processInstanceId()).isEqualTo(row.id());
+        assertThat(reloaded.correlationId()).isEqualTo(row.id());
+        assertThat(reloaded.processInstanceId()).isNull();
         assertThat(reloaded.engineSync()).isEqualTo(CaseTask.EngineSync.PENDING);
     }
 
@@ -142,36 +132,23 @@ class CollaborationServicesTest extends OracleTestBase {
         public EngineProcessRef startProcess(StartProcessRequest r) {
             return new EngineProcessRef(null, r.processDefinitionKey(), r.caseId());
         }
+        public EngineProcessRef startProcessByKey(org.casemgmt.engine.StartProcessByKeyRequest r) {
+            return new EngineProcessRef(null, r.processDefinitionKey(), r.caseId());
+        }
         public void cancelProcess(String id, String reason) {}
         public List<EngineTaskRef> findTasks(EngineTaskQuery q) { return List.of(); }
     }
 
-    /**
-     * Task 18 review round 2, Important 2: proves the reconciliation loop actually closes, not
-     * merely that a correlation id exists (see {@link #startingAProcessInRemoteModeUsesTheRowIdAsAPlaceholder}
-     * for that narrower proof). Wires the genuine remote-mode path — {@code OutboxEngineGateway}
-     * enqueues a CM_ENGINE_COMMAND instead of calling the engine, {@code EngineCommandDispatcher}
-     * later drains it against a "real" delegate gateway (a stand-in for the actual remote Operaton
-     * engine) and reports the confirmed {@code processInstanceId} back — and asserts the end
-     * state: CM_LINKED_PROCESS.PROC_INST_ID_ holds the ENGINE's id afterward, not the placeholder
-     * {@code LinkedProcessService.start} minted, and ENGINE_SYNC_ has flipped to {@code SYNCED}.
-     *
-     * <p>Before this review round, {@code EngineCommandDispatcher} reported the confirmation keyed
-     * by {@code planItemId}, which this ad hoc process's {@code null} planItemId made structurally
-     * impossible to correlate on — the SyncReporter lambda below would simply never have been
-     * invoked with this row's id. Verified manually by reverting {@code EngineCommandDispatcher}'s
-     * START_PROCESS case to report {@code str(p, "planItemId")} instead of {@code
-     * str(p, "correlationId")}: this test then fails with the row still holding its placeholder
-     * id and {@code ENGINE_SYNC_} stuck at {@code PENDING}.
-     */
+    /** The dispatcher reconciles an asynchronous start against its durable correlation key. */
     @Test
-    void remoteModeReconciliationReplacesThePlaceholderWithTheRealEngineId() {
+    void remoteModeReconciliationStoresTheConfirmedRealEngineId() {
         EngineCommandRepository commands = new EngineCommandRepository(jdbc());
         OutboxEngineGateway outbox = new OutboxEngineGateway(commands, id -> {});
         LinkedProcessService remoteProcesses = TestServices.processService(dataSource(), outbox);
 
         var started = remoteProcesses.start(caseId, null, "letter-process", Map.of(), alice);
-        assertThat(started.processInstanceId()).isEqualTo(started.id());
+        assertThat(started.correlationId()).isEqualTo(started.id());
+        assertThat(started.processInstanceId()).isNull();
         assertThat(started.engineSync()).isEqualTo(CaseTask.EngineSync.PENDING);
 
         int pendingCommands = jdbc().sql(
@@ -181,8 +158,22 @@ class CollaborationServicesTest extends OracleTestBase {
 
         LinkedProcessRepository processRepo = new LinkedProcessRepository(jdbc());
         EngineGateway realEngine = new CaseServiceTest.RecordingGateway(); // returns EngineProcessRef("proc-1", key)
-        EngineCommandDispatcher dispatcher = new EngineCommandDispatcher(commands, realEngine,
-                (correlationId, sync, engineId) -> processRepo.markSync(correlationId, sync, engineId));
+        EngineCommandDispatcher dispatcher = new EngineCommandDispatcher(
+                commands, realEngine, new EngineCommandDispatcher.SyncReporter() {
+                    @Override
+                    public void report(String correlationId, CaseTask.EngineSync sync,
+                                       String engineId) {
+                        processRepo.markSync(correlationId, sync, null);
+                    }
+
+                    @Override
+                    public void confirmProcessStarted(String confirmedCaseId, String correlationId,
+                                                      String engineId,
+                                                      java.time.OffsetDateTime confirmedAt) {
+                        processRepo.confirmStarted(
+                                confirmedCaseId, correlationId, engineId, confirmedAt);
+                    }
+                });
 
         int processed = dispatcher.drainOnce();
         assertThat(processed).isEqualTo(1);

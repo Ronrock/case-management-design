@@ -8,6 +8,7 @@ import org.casemgmt.release.BpmnReleaseValidator;
 import org.casemgmt.release.CaseContractValidator;
 import org.casemgmt.release.JsonSchemaCaseContractValidator;
 import org.casemgmt.release.ReleaseKind;
+import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.JsonCodec;
 
@@ -17,12 +18,14 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import org.springframework.transaction.annotation.Transactional;
 
 public class CaseDefinitionReleaseService {
 
     public static final int MAX_RELEASE_BYTES = 25 * 1024 * 1024;
+    private static final int MAX_FAILURE_DETAIL = 2_000;
 
     private static final Map<ReleaseKind, Set<String>> MEDIA_TYPES = Map.of(
             ReleaseKind.ORCHESTRATION, Set.of("application/zip", "application/xml",
@@ -35,8 +38,10 @@ public class CaseDefinitionReleaseService {
     private final CaseContractValidator contracts;
 
     public CaseDefinitionReleaseService(CaseDefinitionReleaseRepository repository) {
-        this(repository, (releaseId, definitionKey, tenantId, content, mediaType) ->
-                OrchestrationDeploymentPort.DeploymentResult.active(null));
+        this(repository, (releaseId, definitionKey, tenantId, content, mediaType) -> {
+            throw new org.casemgmt.engine.EngineException(
+                    "No orchestration deployment adapter is configured");
+        });
     }
 
     public CaseDefinitionReleaseService(CaseDefinitionReleaseRepository repository,
@@ -56,28 +61,101 @@ public class CaseDefinitionReleaseService {
     public CaseDefinitionRelease publish(String key, String tenantId, ReleaseKind kind,
                                          String mediaType, byte[] content, String publishedBy) {
         byte[] bytes = snapshot(content);
-        String normalizedMediaType = validateSnapshot(key, kind, mediaType, bytes);
+        String normalizedMediaType = validateEnvelope(key, kind, mediaType, bytes);
         String digest = sha256(bytes);
         return repository.findByDigest(tenantId, key, kind, digest).orElseGet(() -> {
             String id = kind.name().toLowerCase(Locale.ROOT) + ":" + CaseIds.newId();
-            OrchestrationDeploymentPort.DeploymentResult deployment = kind == ReleaseKind.ORCHESTRATION
-                    ? deployments.deploy(id, key, tenantId, bytes, normalizedMediaType)
-                    : OrchestrationDeploymentPort.DeploymentResult.active(null);
-            CaseDefinitionRelease release = CaseDefinitionRelease.stored(
-                    id, key, tenantId, kind, normalizedMediaType, bytes, digest,
-                    deployment.status(), deployment.engineDeploymentId(),
-                    deployment.failureDetail(), publishedBy);
-            repository.insert(release);
-            return release;
+            CaseDefinitionRelease draft = CaseDefinitionRelease.draft(
+                    id, key, tenantId, kind, normalizedMediaType, bytes, digest, publishedBy);
+            repository.insert(draft);
+            try {
+                validateContent(key, kind, normalizedMediaType, bytes);
+            } catch (RuntimeException invalidContent) {
+                return transition(draft, ReleaseStatus.FAILED, null,
+                        boundFailure(invalidContent.getMessage()));
+            }
+            CaseDefinitionRelease validated = transition(
+                    draft, ReleaseStatus.VALIDATED, null, null);
+            if (kind != ReleaseKind.ORCHESTRATION) {
+                return transition(validated, ReleaseStatus.ACTIVE, null, null);
+            }
+
+            CaseDefinitionRelease deploying = transition(
+                    validated, ReleaseStatus.DEPLOYING, null, null);
+            OrchestrationDeploymentPort.DeploymentResult deployment;
+            try {
+                deployment = deployments.deploy(
+                        id, key, tenantId, bytes, normalizedMediaType);
+                validateDeploymentResult(key, tenantId, deployment);
+            } catch (RuntimeException failure) {
+                return transition(deploying, ReleaseStatus.FAILED, null,
+                        boundFailure(failure.getMessage()));
+            }
+            if (deployment.status() == ReleaseStatus.DEPLOYING) {
+                return deploying;
+            }
+            if (deployment.status() == ReleaseStatus.FAILED) {
+                return transition(deploying, ReleaseStatus.FAILED, null,
+                        boundFailure(deployment.failureDetail()));
+            }
+            return transition(deploying, ReleaseStatus.ACTIVE,
+                    deployment.identity(), null);
         });
+    }
+
+    private CaseDefinitionRelease transition(
+            CaseDefinitionRelease release, ReleaseStatus next,
+            org.casemgmt.orchestration.EngineDeploymentIdentity identity, String failureDetail) {
+        CaseDefinitionRelease transitioned = release.transitionTo(next, identity, failureDetail);
+        repository.transition(release.id(), release.status(), next, identity, failureDetail);
+        return transitioned;
+    }
+
+    private static String boundFailure(String detail) {
+        String diagnostic = detail == null || detail.isBlank()
+                ? "Orchestration deployment failed without a diagnostic" : detail;
+        if (diagnostic.length() <= MAX_FAILURE_DETAIL) return diagnostic;
+        return diagnostic.substring(0, MAX_FAILURE_DETAIL - 3) + "...";
+    }
+
+    private static void validateDeploymentResult(
+            String definitionKey, String tenantId,
+            OrchestrationDeploymentPort.DeploymentResult deployment) {
+        if (deployment == null) {
+            throw new org.casemgmt.engine.EngineException(
+                    "Orchestration deployment adapter returned no result");
+        }
+        if (deployment.status() == ReleaseStatus.ACTIVE && deployment.identity() == null) {
+            throw new org.casemgmt.engine.EngineException(
+                    "An active orchestration release requires a verified engine identity");
+        }
+        if (deployment.identity() != null
+                && (!definitionKey.equals(deployment.identity().processDefinitionKey())
+                || !Objects.equals(tenantId, deployment.identity().tenantId()))) {
+            throw new org.casemgmt.engine.EngineException(
+                    "Verified engine identity does not match the release key and tenant");
+        }
+        if (deployment.status() != ReleaseStatus.ACTIVE
+                && deployment.status() != ReleaseStatus.DEPLOYING
+                && deployment.status() != ReleaseStatus.FAILED) {
+            throw new org.casemgmt.engine.EngineException(
+                    "Orchestration deployment adapter returned invalid status "
+                            + deployment.status());
+        }
+        if (deployment.status() != ReleaseStatus.ACTIVE && deployment.identity() != null) {
+            throw new org.casemgmt.engine.EngineException(
+                    "Only an active orchestration deployment may carry an engine identity");
+        }
     }
 
     /** Runs every deterministic release check without persisting or deploying anything. */
     public void validateForPublication(String key, ReleaseKind kind, String mediaType, byte[] content) {
-        validateSnapshot(key, kind, mediaType, snapshot(content));
+        byte[] bytes = snapshot(content);
+        String normalizedMediaType = validateEnvelope(key, kind, mediaType, bytes);
+        validateContent(key, kind, normalizedMediaType, bytes);
     }
 
-    private String validateSnapshot(String key, ReleaseKind kind, String mediaType, byte[] bytes) {
+    private String validateEnvelope(String key, ReleaseKind kind, String mediaType, byte[] bytes) {
         if (key == null || key.isBlank()) {
             throw invalid("<unknown>", "Release requires a case-definition key");
         }
@@ -90,7 +168,6 @@ public class CaseDefinitionReleaseService {
             throw invalid(key, "Unsupported media type '" + normalizedMediaType
                     + "' for " + kind.name().toLowerCase(Locale.ROOT) + " release");
         }
-        validateContent(key, kind, normalizedMediaType, bytes);
         return normalizedMediaType;
     }
 

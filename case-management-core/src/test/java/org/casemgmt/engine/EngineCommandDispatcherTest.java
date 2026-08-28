@@ -99,8 +99,8 @@ class EngineCommandDispatcherTest extends OracleTestBase {
     void failedStartProcessReportsOnlyTheLinkedProcessCorrelationId() {
         var reports = new java.util.ArrayList<String>();
         var outbox = new OutboxEngineGateway(commands, id -> {});
-        outbox.startProcess(new StartProcessRequest("eng-a:4", "pi-4", "process-key",
-                Map.of(), "linked-process-1"));
+        outbox.startProcess(new StartProcessRequest("eng-a:4", "pi-4", "process-key:1:exact",
+                "process-key", null, Map.of(), "linked-process-1"));
 
         var dispatcher = new EngineCommandDispatcher(commands, new FailingGateway(),
                 (key, sync, engineId) -> reports.add(key + ":" + sync + ":" + engineId));

@@ -1,9 +1,14 @@
 package org.casemgmt.release;
 
+import org.casemgmt.orchestration.EngineDeploymentIdentity;
+import org.casemgmt.orchestration.OrchestrationMode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+
+import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -175,5 +180,86 @@ class ReleaseLifecycleTest {
 
         assertThatThrownBy(() -> draft.withStatus(ReleaseStatus.ACTIVE))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void bindingActivationRejectsANonActivePinnedConstituent() {
+        EngineDeploymentIdentity identity = identity();
+        CaseDefinitionVersionBinding draft = draftBinding();
+        CaseDefinitionRelease orchestration = release(
+                "orch-1", ReleaseKind.ORCHESTRATION, ReleaseStatus.ACTIVE, "o", identity);
+        CaseDefinitionRelease contract = release(
+                "contract-1", ReleaseKind.CONTRACT, ReleaseStatus.RETIRED, "c", null);
+        CaseDefinitionRelease presentation = release(
+                "presentation-1", ReleaseKind.PRESENTATION, ReleaseStatus.ACTIVE, "p", null);
+
+        assertThatThrownBy(() -> draft.activate(
+                orchestration, contract, presentation, identity, OffsetDateTime.now()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("contract-1")
+                .hasMessageContaining("RETIRED")
+                .hasMessageContaining("ACTIVE");
+    }
+
+    @Test
+    void bindingActivationRejectsAnIdentityForAnotherKeyOrTenant() {
+        CaseDefinitionVersionBinding draft = draftBinding();
+        EngineDeploymentIdentity approved = identity();
+        EngineDeploymentIdentity reported = new EngineDeploymentIdentity(
+                "deployment-2", "other:1:5", "other", 1, "t2");
+
+        assertThatThrownBy(() -> draft.activate(
+                release("orch-1", ReleaseKind.ORCHESTRATION, ReleaseStatus.ACTIVE, "o", approved),
+                release("contract-1", ReleaseKind.CONTRACT, ReleaseStatus.ACTIVE, "c", null),
+                release("presentation-1", ReleaseKind.PRESENTATION, ReleaseStatus.ACTIVE, "p", null),
+                reported, OffsetDateTime.now()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("exact engine identity");
+    }
+
+    @Test
+    void activationPreservesTheImmutableBindingAndPinsTheApprovedIdentity() {
+        CaseDefinitionVersionBinding draft = draftBinding();
+        EngineDeploymentIdentity identity = identity();
+        OffsetDateTime activatedAt = OffsetDateTime.parse("2026-08-28T09:00:00Z");
+
+        CaseDefinitionVersionBinding active = draft.activate(
+                release("orch-1", ReleaseKind.ORCHESTRATION, ReleaseStatus.ACTIVE, "o", identity),
+                release("contract-1", ReleaseKind.CONTRACT, ReleaseStatus.ACTIVE, "c", null),
+                release("presentation-1", ReleaseKind.PRESENTATION, ReleaseStatus.ACTIVE, "p", null),
+                identity, activatedAt);
+
+        assertThat(active.status()).isEqualTo(BindingStatus.ACTIVE);
+        assertThat(active.engineIdentity()).isEqualTo(identity);
+        assertThat(active.activatedAt()).isEqualTo(activatedAt);
+        assertThat(active.caseDefinitionId()).isEqualTo(draft.caseDefinitionId());
+        assertThat(active.orchestrationReleaseId()).isEqualTo(draft.orchestrationReleaseId());
+        assertThat(active.orchestrationSha256()).isEqualTo(draft.orchestrationSha256());
+        assertThat(active.contractReleaseId()).isEqualTo(draft.contractReleaseId());
+        assertThat(active.contractSha256()).isEqualTo(draft.contractSha256());
+        assertThat(active.presentationReleaseId()).isEqualTo(draft.presentationReleaseId());
+        assertThat(active.presentationSha256()).isEqualTo(draft.presentationSha256());
+    }
+
+    private static CaseDefinitionVersionBinding draftBinding() {
+        return new CaseDefinitionVersionBinding(
+                "t1:sample-case:1", "sample-case", "t1", "orch-1", "o".repeat(64),
+                "contract-1", "c".repeat(64), "presentation-1", "p".repeat(64),
+                ReleaseStatus.DEPLOYING, OrchestrationMode.BPMN, BindingStatus.DRAFT,
+                null, null, OffsetDateTime.now(), null, null, "alice");
+    }
+
+    private static CaseDefinitionRelease release(
+            String id, ReleaseKind kind, ReleaseStatus status, String digestSeed,
+            EngineDeploymentIdentity identity) {
+        return CaseDefinitionRelease.storedWithEngineIdentity(
+                id, "sample-case", "t1", kind, "application/json",
+                "{}".getBytes(StandardCharsets.UTF_8), digestSeed.repeat(64), status,
+                identity, null, "alice");
+    }
+
+    private static EngineDeploymentIdentity identity() {
+        return new EngineDeploymentIdentity(
+                "deployment-1", "sample-case:1:100", "sample-case", 1, "t1");
     }
 }
