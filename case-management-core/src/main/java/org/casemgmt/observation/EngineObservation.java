@@ -1,6 +1,7 @@
 package org.casemgmt.observation;
 
 import java.time.Instant;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -16,6 +17,8 @@ import java.util.Map;
  */
 public sealed interface EngineObservation permits ProcessObservation, UserTaskObservation,
         ActivityLifecycleObservation, MilestoneObservation {
+
+    String observationId();
 
     int observationVersion();
 
@@ -39,20 +42,29 @@ public sealed interface EngineObservation permits ProcessObservation, UserTaskOb
 
     Map<String, Object> attributes();
 
+    /** Returns the deterministic engine-fact digest used for application-level claiming. */
+    default String fingerprint() {
+        return ObservationFingerprint.of(this).value();
+    }
+
     /** Validates the identity fields shared by every concrete observation. */
     static void validateIdentity(
+            String observationId,
             int observationVersion,
             String source,
+            String tenantId,
             String caseId,
             String processInstanceId,
             String entityId,
             Enum<?> eventType,
             Instant engineOccurredAt,
             Instant receivedAt) {
+        requireNonBlank(observationId, "observationId");
         if (observationVersion < 1) {
             throw new IllegalArgumentException("observationVersion must be positive");
         }
         requireNonBlank(source, "source");
+        requireNonBlank(tenantId, "tenantId");
         requireNonBlank(caseId, "caseId");
         requireNonBlank(processInstanceId, "processInstanceId");
         requireNonBlank(entityId, "entityId");
@@ -83,8 +95,11 @@ public sealed interface EngineObservation permits ProcessObservation, UserTaskOb
     }
 
     private static Object immutableJsonValue(Object value) {
-        if (value == null || value instanceof String || value instanceof Boolean || value instanceof Number) {
+        if (value == null || value instanceof String || value instanceof Boolean) {
             return value;
+        }
+        if (value instanceof Number number) {
+            return immutableJsonNumber(number);
         }
         if (value instanceof Map<?, ?> map) {
             var copy = new LinkedHashMap<String, Object>();
@@ -105,6 +120,18 @@ public sealed interface EngineObservation permits ProcessObservation, UserTaskOb
             return Collections.unmodifiableList(copy);
         }
         throw new IllegalArgumentException("attribute values must be JSON-friendly");
+    }
+
+    private static BigDecimal immutableJsonNumber(Number value) {
+        if ((value instanceof Double doubleValue && !Double.isFinite(doubleValue))
+                || (value instanceof Float floatValue && !Float.isFinite(floatValue))) {
+            throw new IllegalArgumentException("attribute numbers must be finite");
+        }
+        try {
+            return new BigDecimal(value.toString());
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException("attribute numbers must be JSON-friendly", exception);
+        }
     }
 
     private static void requireNonBlank(String value, String field) {

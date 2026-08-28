@@ -5,6 +5,7 @@ import java.util.Map;
 
 /** Lifecycle evidence for one process instance. */
 public record ProcessObservation(
+        String observationId,
         int observationVersion,
         String source,
         String tenantId,
@@ -18,7 +19,7 @@ public record ProcessObservation(
         Map<String, Object> attributes) implements EngineObservation {
 
     public ProcessObservation {
-        EngineObservation.validateIdentity(observationVersion, source, caseId, processInstanceId, entityId,
+        EngineObservation.validateIdentity(observationId, observationVersion, source, tenantId, caseId, processInstanceId, entityId,
                 eventType, engineOccurredAt, receivedAt);
         attributes = EngineObservation.immutableAttributes(attributes);
     }

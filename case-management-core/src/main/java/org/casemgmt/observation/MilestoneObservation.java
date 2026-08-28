@@ -5,6 +5,7 @@ import java.util.Map;
 
 /** Lifecycle evidence for one case milestone. */
 public record MilestoneObservation(
+        String observationId,
         int observationVersion,
         String source,
         String tenantId,
@@ -18,7 +19,7 @@ public record MilestoneObservation(
         Map<String, Object> attributes) implements EngineObservation {
 
     public MilestoneObservation {
-        EngineObservation.validateIdentity(observationVersion, source, caseId, processInstanceId, entityId,
+        EngineObservation.validateIdentity(observationId, observationVersion, source, tenantId, caseId, processInstanceId, entityId,
                 eventType, engineOccurredAt, receivedAt);
         attributes = EngineObservation.immutableAttributes(attributes);
     }

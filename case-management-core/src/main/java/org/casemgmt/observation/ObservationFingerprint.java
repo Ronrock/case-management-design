@@ -4,7 +4,6 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -89,14 +88,14 @@ public record ObservationFingerprint(String value) {
             return canonical.append(')').toString();
         }
         if (value instanceof Map<?, ?> map) {
-            var entries = map.entrySet().stream()
-                    .map(entry -> Map.entry((String) entry.getKey(), entry.getValue()))
-                    .sorted(Map.Entry.comparingByKey(Comparator.naturalOrder()))
+            var keys = map.keySet().stream()
+                    .map(key -> (String) key)
+                    .sorted()
                     .toList();
-            var canonical = new StringBuilder("map(").append(entries.size()).append(':');
-            for (var entry : entries) {
-                canonical.append(lengthPrefixed(entry.getKey()));
-                canonical.append(lengthPrefixed(canonicalJson(entry.getValue())));
+            var canonical = new StringBuilder("map(").append(keys.size()).append(':');
+            for (var key : keys) {
+                canonical.append(lengthPrefixed(key));
+                canonical.append(lengthPrefixed(canonicalJson(map.get(key))));
             }
             return canonical.append(')').toString();
         }
