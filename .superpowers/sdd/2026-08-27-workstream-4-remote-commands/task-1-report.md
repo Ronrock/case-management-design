@@ -332,3 +332,85 @@ confirmation roundtrips.
 
 Result: all six affected/reactor-required modules succeeded. Final `git diff --check` completed
 cleanly, and the changed paths remain limited to the pure policy, its tests, and this report.
+
+## Persistence-readiness addendum
+
+The follow-up commit named `fix: make command policy persistence-ready` supersedes the round-three
+64-entry action-history limit and closes the remaining durable reconstruction gaps. The scope is
+still the pure command model and its tests: no repository, migration, REST API, gateway, or
+dispatcher implementation was added.
+
+### Unbounded append-only operator-action ledger
+
+Processed operator actions now use a positive `long` sequence and an immutable append-only list.
+The policy no longer rejects a legitimate new action merely because 64 actions already exist, and
+it never evicts old replay identities. Sequences must start at one and remain contiguous; sequence
+increment overflow fails instead of wrapping. Duplicate action IDs remain fail-closed: an exact
+historical action/evidence replay is a no-op, while reusing the ID with different content is
+rejected. This shape can be normalized by Task 2 into one uniquely keyed row per command and
+action ID while retaining a stable per-command order.
+
+### Audited attempt-counter reconstruction
+
+`budgetEpoch` must now equal the number of retained `RETRY_OVERRIDE` actions that explicitly reset
+an exhausted automatic budget. The lifetime attempt counter must equal
+`budgetEpoch * MAX_AUTOMATIC_ATTEMPTS + automaticAttemptsInBudget`; multiplication and addition use
+overflow-checked arithmetic. Consequently a database row cannot claim extra resets, omit an
+audited reset, lower or inflate its lifetime attempts, or wrap the counter without construction
+failing. A reset is still accepted only after the current six-attempt budget is exhausted and only
+with definitive reviewed-absence evidence.
+
+### Closed persisted diagnostics and canonical timestamps
+
+Persisted diagnostics are limited to the production policy's closed code-to-safe-summary
+vocabulary. Both fields must be absent together or match an exact approved pair; arbitrary text,
+including credential-shaped text shorter than the old 256-character limit, cannot be rehydrated.
+Dynamic HTTP codes are accepted only for the policy's defined status families and retain their
+single fixed safe summary.
+
+All decision times, retry times, and operator-action times are normalized during construction to
+UTC at Oracle-supported microsecond precision. Values outside years 0001 through 9999 are rejected.
+Generated saturated retry times continue to clamp at the same storage bounds. Tests reconstruct
+offset/nanosecond input in the form returned by a JDBC round trip and prove that equality and exact
+operator replay still hold.
+
+### Truthful migration provenance for historical `DONE`
+
+Historical PoC `DONE` rows are represented by `LegacyConfirmationEvidence`, not fabricated HTTP,
+observation, or reconciliation evidence. The migration-only factory binds the old row ID and
+migration reference to tenant, operation, command, command type, expected target, old `DONE`
+status, migrated time, and retained attempt count. Live confirmation construction explicitly
+rejects the `LEGACY_MIGRATION` source, and the legacy evidence constructor is private, preventing
+ordinary dispatch outcomes from manufacturing this provenance.
+
+The behavior is covered for all seven command types. A reconstructed legacy terminal decision
+retains its original evidence unchanged. Later live evidence is a conservative no-op only for
+claim, complete, and cancel commands where the existing remote identity can be proven equal to the
+expected target; command types that create a new remote identity reject enrichment because the old
+row does not prove equivalence.
+
+### Round-four TDD and verification evidence
+
+Each concern was first expressed as a failing test. The RED stages respectively exposed the old
+64-entry rejection, accepted forged epoch/counters, accepted arbitrary diagnostics, retained
+nanosecond/offset timestamps, and lacked a legacy evidence model.
+
+`./mvnw -pl case-management-core -Dtest=EngineCommandPolicyTest,EngineCommandDurableStateTest,EngineCommandLegacyMigrationTest test`
+
+Result: 1,394 tests passed, 0 failures, 0 errors, 0 skipped.
+
+`./mvnw -pl case-management-core -Dtest=EngineCommandDurableStateTest,EngineCommandPolicyTest,ExactStartOutboxTest,EngineCommandDispatcherRootConfirmationTest,StartProcessRequestTest,EngineCommandLegacyMigrationTest,StartProcessByKeyRequestTest test`
+
+Result: 1,408 tests passed, 0 failures, 0 errors, 0 skipped. This is the complete relevant
+non-Oracle engine gate.
+
+The broader engine-package run executed 1,411 tests. Its three Oracle integration classes could
+not start because Docker Desktop returned HTTP 503 (`Docker Desktop is unable to start`) even when
+Maven/Testcontainers was rerun with authorized host access. The 1,408 non-Oracle tests passed; the
+three errors were container-environment startup errors in `OutboxTransactionalIntegrationTest`,
+`EngineCommandDispatcherTest`, and `EngineCommandClaimSafetyTest`, not assertion or compilation
+failures.
+
+`./mvnw -pl case-management-core,case-management-engine-remote,case-management-spring-boot-starter -am -DskipTests package`
+
+Result: all six reactor projects succeeded (root, core, embedded, remote, REST, and starter).

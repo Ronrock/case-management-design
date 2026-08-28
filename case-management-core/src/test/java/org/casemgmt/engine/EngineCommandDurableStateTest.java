@@ -118,21 +118,21 @@ class EngineCommandDurableStateTest {
     }
 
     @Test
-    void boundedActionHistoryFailsClosedInsteadOfEvictingReplayProtection() {
-        List<EngineCommandPolicy.ProcessedAction> full = new ArrayList<>();
-        for (int i = 0; i < EngineCommandPolicy.MAX_PROCESSED_ACTION_HISTORY; i++) {
-            full.add(new EngineCommandPolicy.ProcessedAction(
-                    i + 1, action(MANUAL_REVIEW, "action:history-" + i, false, i), null));
+    void normalizedActionHistoryRemainsAppendablePastTheFormerArbitraryLimit() {
+        List<EngineCommandPolicy.ProcessedAction> history = new ArrayList<>();
+        for (int i = 0; i < 65; i++) {
+            history.add(new EngineCommandPolicy.ProcessedAction(
+                    i + 1L, action(MANUAL_REVIEW, "action:history-" + i, false, i), null));
         }
         var committed = decision(EngineCommandStatus.AWAITING_CONFIRMATION,
-                null, null, null, full);
+                null, null, null, history);
 
-        assertThatThrownBy(() -> POLICY.transition(state(committed),
+        var next = POLICY.transition(state(committed),
                 CommandDispatchOutcome.manualReviewRequested(
-                        action(MANUAL_REVIEW, "action:overflow", false,
-                                EngineCommandPolicy.MAX_PROCESSED_ACTION_HISTORY))))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("history capacity");
+                        action(MANUAL_REVIEW, "action:history-65", false, 65)));
+
+        assertThat(next.processedActions()).hasSize(66);
+        assertThat(next.processedActions().get(65).sequence()).isEqualTo(66L);
     }
 
     @ParameterizedTest(name = "{0} with {1} provenance is {2}")
@@ -178,7 +178,7 @@ class EngineCommandDurableStateTest {
         var processed = List.of(new EngineCommandPolicy.ProcessedAction(1, override, absence));
 
         assertThatCode(() -> new EngineCommandPolicy.CommandState(command(), newDecision(
-                EngineCommandStatus.RETRYABLE, true, 0, 1,
+                EngineCommandStatus.RETRYABLE, true, 6, 0, 1,
                 null, absence, override, processed))).doesNotThrowAnyException();
         assertInvalidReset(() -> newDecision(EngineCommandStatus.RETRYABLE, true, 0, 1,
                 null, null, override,
@@ -194,6 +194,35 @@ class EngineCommandDurableStateTest {
     }
 
     @Test
+    void budgetEpochAndAttemptCountersAreDerivedFromTheCompleteOverrideHistory() {
+        var absence = review(DEFINITIVE_ABSENCE, OPERATOR_REVIEW, "review:override-history");
+        var first = action(RETRY_OVERRIDE, "action:override-one", true, 0);
+        var second = action(RETRY_OVERRIDE, "action:override-two", true, 1);
+        var history = List.of(
+                new EngineCommandPolicy.ProcessedAction(1L, first, absence),
+                new EngineCommandPolicy.ProcessedAction(2L, second, absence));
+
+        assertThatCode(() -> new EngineCommandPolicy.CommandState(command(), newDecision(
+                EngineCommandStatus.RETRYABLE, true, 12, 0, 2,
+                null, absence, second, history))).doesNotThrowAnyException();
+        assertThatThrownBy(() -> new EngineCommandPolicy.CommandState(command(), newDecision(
+                EngineCommandStatus.RETRYABLE, true, 12, 0, 1,
+                null, absence, second, history)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("epoch");
+        assertThatThrownBy(() -> new EngineCommandPolicy.CommandState(command(), newDecision(
+                EngineCommandStatus.RETRYABLE, true, 11, 0, 2,
+                null, absence, second, history)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attempt");
+        assertThatThrownBy(() -> new EngineCommandPolicy.CommandState(command(), newDecision(
+                EngineCommandStatus.RETRYABLE, true, 13, 0, 2,
+                null, absence, second, history)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attempt");
+    }
+
+    @Test
     void forgedRehydratedBindingsTerminalStatesHistoryAndCountersFailClosed() {
         var confirmed = decisionFor(EngineCommandStatus.CONFIRMED,
                 ProvenanceFamily.CONFIRMATION);
@@ -202,7 +231,7 @@ class EngineCommandDurableStateTest {
                 CommandDispatchOutcome.RemoteState.TASK_CLAIMED, HTTP_RESPONSE,
                 "evidence:wrong-state");
         assertThatThrownBy(() -> new EngineCommandPolicy.CommandState(command(), newDecision(
-                EngineCommandStatus.CONFIRMED, false, 2, 1,
+                EngineCommandStatus.CONFIRMED, false, 2, 0,
                 wrongStateEvidence, null, null, List.of())))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("state");
@@ -274,6 +303,63 @@ class EngineCommandDurableStateTest {
                 1, retry, wrongReview))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("operation");
+    }
+
+    @Test
+    void persistedDiagnosticsAcceptOnlyTheExactTypedCodeAndDerivedSummary() {
+        assertThatThrownBy(() -> new EngineCommandPolicy.Decision(
+                EngineCommandStatus.PENDING, AT, null, "custom.code",
+                "A caller supplied this text", 2, 2, 0, false,
+                null, null, null, List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("diagnostic");
+        assertThatThrownBy(() -> new EngineCommandPolicy.Decision(
+                EngineCommandStatus.RETRYABLE, AT, AT.plusMinutes(1), "transport.not_sent",
+                "password=should-not-survive", 2, 2, 0, false,
+                null, null, null, List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("diagnostic");
+
+        var persisted = new EngineCommandPolicy.Decision(
+                EngineCommandStatus.RETRYABLE, AT, AT.plusMinutes(1), "transport.not_sent",
+                "Remote request sent zero bytes", 2, 2, 0, false,
+                null, null, null, List.of());
+        assertThat(persisted.errorCode()).isEqualTo("transport.not_sent");
+        assertThat(persisted.safeSummary()).isEqualTo("Remote request sent zero bytes");
+    }
+
+    @Test
+    void persistedTimestampsCanonicalizeToUtcOracleMicrosecondsBeforeReplay() {
+        OffsetDateTime jdbcUnstable = OffsetDateTime.parse(
+                "2026-08-28T14:00:00.123456789+02:00");
+        OffsetDateTime canonical = OffsetDateTime.parse("2026-08-28T12:00:00.123456Z");
+        var action = new CommandDispatchOutcome.OperatorAction(
+                "tenant-a", "operation-a", "command-a", TYPE, "task-a", MANUAL_REVIEW,
+                "action:canonical-time", "audit:canonical-time", jdbcUnstable, false);
+        var decision = new EngineCommandPolicy.Decision(
+                EngineCommandStatus.RETRYABLE, jdbcUnstable, jdbcUnstable.plusMinutes(1),
+                "transport.not_sent", "Remote request sent zero bytes",
+                2, 2, 0, false, null, null, null, List.of());
+
+        assertThat(action.performedAt()).isEqualTo(canonical);
+        assertThat(decision.decidedAt()).isEqualTo(canonical);
+        assertThat(decision.nextAttemptAt()).isEqualTo(canonical.plusMinutes(1));
+
+        var first = POLICY.transition(state(EngineCommandStatus.AWAITING_CONFIRMATION),
+                CommandDispatchOutcome.manualReviewRequested(action));
+        var reconstructed = new CommandDispatchOutcome.OperatorAction(
+                action.tenantId(), action.operationId(), action.commandId(), action.commandType(),
+                action.expectedTargetIdentity(), action.actionType(), action.actionId(),
+                action.auditReference(), canonical, action.overrideAutomaticAttemptCap());
+        assertThat(POLICY.transition(state(first),
+                CommandDispatchOutcome.manualReviewRequested(reconstructed))).isEqualTo(first);
+
+        assertThatThrownBy(() -> new CommandDispatchOutcome.OperatorAction(
+                "tenant-a", "operation-a", "command-a", TYPE, "task-a", MANUAL_REVIEW,
+                "action:before-oracle-range", "audit:before-oracle-range",
+                OffsetDateTime.parse("0000-12-31T23:59:59Z"), false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Oracle timestamp range");
     }
 
     @Test
@@ -382,7 +468,7 @@ class EngineCommandDurableStateTest {
             CommandDispatchOutcome.ReviewEvidence evidence,
             CommandDispatchOutcome.OperatorAction action,
             List<EngineCommandPolicy.ProcessedAction> history) {
-        return newDecision(status, false, 2, 1,
+        return newDecision(status, false, 2, 0,
                 confirmation, evidence, action, history);
     }
 
@@ -392,13 +478,36 @@ class EngineCommandDurableStateTest {
             CommandDispatchOutcome.ReviewEvidence evidence,
             CommandDispatchOutcome.OperatorAction action,
             List<EngineCommandPolicy.ProcessedAction> history) {
+        return newDecision(status, reset, 2, budget, epoch,
+                confirmation, evidence, action, history);
+    }
+
+    private static EngineCommandPolicy.Decision newDecision(
+            EngineCommandStatus status, boolean reset, long total, int budget, long epoch,
+            CommandDispatchOutcome.ConfirmationEvidence confirmation,
+            CommandDispatchOutcome.ReviewEvidence evidence,
+            CommandDispatchOutcome.OperatorAction action,
+            List<EngineCommandPolicy.ProcessedAction> history) {
+        String code = switch (status) {
+            case PENDING, DISPATCHING, CONFIRMED, CANCELLED -> null;
+            case RETRYABLE -> "transport.not_sent";
+            case AWAITING_CONFIRMATION -> "transport.possibly_sent";
+            case FAILED -> "attempts.exhausted";
+            case CONFLICT -> "response.duplicate";
+            case MANUAL_REVIEW -> "reconcile.inconclusive";
+        };
+        String summary = switch (status) {
+            case PENDING, DISPATCHING, CONFIRMED, CANCELLED -> null;
+            case RETRYABLE -> "Remote request sent zero bytes";
+            case AWAITING_CONFIRMATION -> "Remote request may have been sent";
+            case FAILED -> "Remote command exhausted automatic dispatch attempts";
+            case CONFLICT -> "Duplicate response lacked matching confirmation evidence";
+            case MANUAL_REVIEW -> "Reconciliation could not determine the remote outcome";
+        };
         return new EngineCommandPolicy.Decision(status, AT,
                 status == EngineCommandStatus.RETRYABLE ? AT.plusMinutes(1) : null,
-                status == EngineCommandStatus.CONFIRMED || status == EngineCommandStatus.CANCELLED
-                        ? null : "test.state",
-                status == EngineCommandStatus.CONFIRMED || status == EngineCommandStatus.CANCELLED
-                        ? null : "Test state",
-                2, budget, epoch, reset, confirmation, evidence, action, history);
+                code, summary,
+                total, budget, epoch, reset, confirmation, evidence, action, history);
     }
 
     private static void assertInvalidReset(Runnable construction) {

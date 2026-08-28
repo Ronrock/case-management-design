@@ -6,10 +6,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 
@@ -25,10 +27,11 @@ public final class EngineCommandPolicy {
     public static final int MAX_AUTOMATIC_RETRIES = 5;
     public static final int MAX_AUTOMATIC_ATTEMPTS = MAX_AUTOMATIC_RETRIES + 1;
     public static final int MAX_SAFE_SUMMARY_LENGTH = 256;
-    public static final int MAX_PROCESSED_ACTION_HISTORY = 64;
     public static final Duration MAX_RETRY_AFTER = Duration.ofDays(30);
     public static final OffsetDateTime MAX_PERSISTABLE_TIMESTAMP = OffsetDateTime.parse(
             "9999-12-31T23:59:59.999999Z");
+    public static final OffsetDateTime MIN_PERSISTABLE_TIMESTAMP = OffsetDateTime.parse(
+            "0001-01-01T00:00:00Z");
 
     private static final List<Duration> BACKOFF = List.of(
             Duration.ofMinutes(1), Duration.ofMinutes(5), Duration.ofMinutes(25),
@@ -139,6 +142,26 @@ public final class EngineCommandPolicy {
         return terminalStates(type);
     }
 
+    /** Explicit migration-only construction for historical PoC rows whose status was DONE. */
+    public static Decision migrateLegacyDone(
+            CommandContext command,
+            String legacyRowId,
+            String migrationReference,
+            OffsetDateTime migratedAt,
+            int legacyDispatchAttempts) {
+        Objects.requireNonNull(command, "command");
+        if (legacyDispatchAttempts < 0
+                || legacyDispatchAttempts > MAX_AUTOMATIC_ATTEMPTS) {
+            throw new IllegalArgumentException(
+                    "Legacy DONE attempts are outside the production automatic budget");
+        }
+        LegacyConfirmationEvidence evidence = new LegacyConfirmationEvidence(
+                command, legacyRowId, migrationReference);
+        return new Decision(EngineCommandStatus.CONFIRMED, migratedAt, null, null, null,
+                legacyDispatchAttempts, legacyDispatchAttempts, 0, false,
+                null, evidence, null, null, List.of());
+    }
+
     private static Set<CommandDispatchOutcome.RemoteState> terminalStates(
             EngineCommand.Type type) {
         Objects.requireNonNull(type, "type");
@@ -160,8 +183,13 @@ public final class EngineCommandPolicy {
     private Decision replayIfCommitted(Decision committed, CommandDispatchOutcome outcome) {
         if (committed.status() == EngineCommandStatus.CONFIRMED
                 && outcome.confirmationEvidence() != null) {
-            requireEquivalentConfirmation(
-                    committed.terminalConfirmation(), outcome.confirmationEvidence());
+            if (committed.terminalConfirmation() != null) {
+                requireEquivalentConfirmation(
+                        committed.terminalConfirmation(), outcome.confirmationEvidence());
+            } else {
+                requireCompatibleLegacyConfirmation(
+                        committed.legacyConfirmation(), outcome.confirmationEvidence());
+            }
             return committed;
         }
         CommandDispatchOutcome.OperatorAction incoming = outcome.operatorAction();
@@ -183,13 +211,11 @@ public final class EngineCommandPolicy {
 
     private static List<ProcessedAction> appendProcessedAction(
             Decision committed, CommandDispatchOutcome outcome) {
-        if (committed.processedActions().size() >= MAX_PROCESSED_ACTION_HISTORY) {
-            throw new IllegalStateException(
-                    "Processed operator action history capacity is exhausted");
-        }
         List<ProcessedAction> appended = new ArrayList<>(committed.processedActions());
+        long nextSequence = appended.isEmpty()
+                ? 1L : Math.incrementExact(appended.get(appended.size() - 1).sequence());
         appended.add(new ProcessedAction(
-                appended.size() + 1, outcome.operatorAction(), outcome.reviewEvidence()));
+                nextSequence, outcome.operatorAction(), outcome.reviewEvidence()));
         return List.copyOf(appended);
     }
 
@@ -210,6 +236,16 @@ public final class EngineCommandPolicy {
         if (committed.remoteState() != incoming.remoteState()) {
             throw new IllegalArgumentException(
                     "Confirmation remote state differs from committed evidence");
+        }
+    }
+
+    private static void requireCompatibleLegacyConfirmation(
+            LegacyConfirmationEvidence legacy,
+            CommandDispatchOutcome.ConfirmationEvidence incoming) {
+        if (!EXISTING_REMOTE_TARGET.contains(incoming.commandType())
+                || !legacy.expectedTargetIdentity().equals(incoming.remoteIdentity())) {
+            throw new IllegalArgumentException(
+                    "Live result identity cannot be proven equivalent to legacy DONE evidence");
         }
     }
 
@@ -341,6 +377,9 @@ public final class EngineCommandPolicy {
         if (committed.terminalConfirmation() != null) {
             validateConfirmationFields(command, committed.terminalConfirmation());
         }
+        if (committed.legacyConfirmation() != null) {
+            validateLegacyConfirmation(command, committed.legacyConfirmation());
+        }
         if (committed.decisionEvidence() != null) {
             validateReviewFields(command, committed.decisionEvidence());
         }
@@ -352,6 +391,20 @@ public final class EngineCommandPolicy {
             if (processed.reviewEvidence() != null) {
                 validateReviewFields(command, processed.reviewEvidence());
             }
+        }
+    }
+
+    private static void validateLegacyConfirmation(
+            CommandContext command, LegacyConfirmationEvidence evidence) {
+        same(command.tenantId(), evidence.tenantId(), "tenant");
+        same(command.operationId(), evidence.operationId(), "operation");
+        same(command.commandId(), evidence.commandId(), "command");
+        if (command.commandType() != evidence.commandType()) {
+            throw new IllegalArgumentException("Legacy confirmation command type mismatch");
+        }
+        same(command.expectedTargetIdentity(), evidence.expectedTargetIdentity(), "target");
+        if (evidence.oldStatus() != LegacyCommandStatus.DONE) {
+            throw new IllegalArgumentException("Legacy confirmation must retain DONE status");
         }
     }
 
@@ -533,8 +586,24 @@ public final class EngineCommandPolicy {
     }
 
     private static OffsetDateTime clamp(OffsetDateTime value) {
-        return value.toInstant().compareTo(MAX_PERSISTABLE_TIMESTAMP.toInstant()) >= 0
-                ? MAX_PERSISTABLE_TIMESTAMP : value.withOffsetSameInstant(ZoneOffset.UTC);
+        if (value.toInstant().compareTo(MAX_PERSISTABLE_TIMESTAMP.toInstant()) >= 0) {
+            return MAX_PERSISTABLE_TIMESTAMP;
+        }
+        if (value.toInstant().compareTo(MIN_PERSISTABLE_TIMESTAMP.toInstant()) <= 0) {
+            return MIN_PERSISTABLE_TIMESTAMP;
+        }
+        return OffsetDateTime.ofInstant(
+                value.toInstant().truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC);
+    }
+
+    static OffsetDateTime canonicalPersistedTimestamp(OffsetDateTime value, String field) {
+        Objects.requireNonNull(value, field);
+        Instant instant = value.toInstant();
+        if (instant.isBefore(MIN_PERSISTABLE_TIMESTAMP.toInstant())
+                || instant.isAfter(MAX_PERSISTABLE_TIMESTAMP.toInstant())) {
+            throw new IllegalArgumentException(field + " is outside the Oracle timestamp range");
+        }
+        return OffsetDateTime.ofInstant(instant.truncatedTo(ChronoUnit.MICROS), ZoneOffset.UTC);
     }
 
     private static String safeCode(String value) {
@@ -586,13 +655,13 @@ public final class EngineCommandPolicy {
      * lifetime of the command and are never replaced or evicted by the policy.
      */
     public record ProcessedAction(
-            int sequence,
+            long sequence,
             CommandDispatchOutcome.OperatorAction action,
             CommandDispatchOutcome.ReviewEvidence reviewEvidence) {
         public ProcessedAction {
-            if (sequence < 1 || sequence > MAX_PROCESSED_ACTION_HISTORY) {
+            if (sequence < 1) {
                 throw new IllegalArgumentException(
-                        "Processed operator action sequence is outside its bounded range");
+                        "Processed operator action sequence must be positive");
             }
             Objects.requireNonNull(action, "action");
             if (reviewEvidence != null) {
@@ -624,6 +693,166 @@ public final class EngineCommandPolicy {
         }
     }
 
+    public enum LegacyCommandStatus {
+        DONE
+    }
+
+    /** Truthful provenance for a historical PoC row migrated from DONE to CONFIRMED. */
+    public static final class LegacyConfirmationEvidence {
+        private final String tenantId;
+        private final String operationId;
+        private final String commandId;
+        private final EngineCommand.Type commandType;
+        private final String expectedTargetIdentity;
+        private final String legacyRowId;
+        private final LegacyCommandStatus oldStatus;
+        private final String migrationReference;
+
+        private LegacyConfirmationEvidence(
+                CommandContext command, String legacyRowId, String migrationReference) {
+            this.tenantId = command.tenantId();
+            this.operationId = command.operationId();
+            this.commandId = command.commandId();
+            this.commandType = command.commandType();
+            this.expectedTargetIdentity = command.expectedTargetIdentity();
+            this.legacyRowId = safeLegacyReference(legacyRowId, "legacyRowId");
+            this.oldStatus = LegacyCommandStatus.DONE;
+            this.migrationReference = safeLegacyReference(
+                    migrationReference, "migrationReference");
+        }
+
+        public String tenantId() { return tenantId; }
+        public String operationId() { return operationId; }
+        public String commandId() { return commandId; }
+        public EngineCommand.Type commandType() { return commandType; }
+        public String expectedTargetIdentity() { return expectedTargetIdentity; }
+        public String legacyRowId() { return legacyRowId; }
+        public LegacyCommandStatus oldStatus() { return oldStatus; }
+        public String migrationReference() { return migrationReference; }
+        public CommandDispatchOutcome.ConfirmationSource source() {
+            return CommandDispatchOutcome.ConfirmationSource.LEGACY_MIGRATION;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) {
+                return true;
+            }
+            if (!(other instanceof LegacyConfirmationEvidence that)) {
+                return false;
+            }
+            return tenantId.equals(that.tenantId)
+                    && operationId.equals(that.operationId)
+                    && commandId.equals(that.commandId)
+                    && commandType == that.commandType
+                    && expectedTargetIdentity.equals(that.expectedTargetIdentity)
+                    && legacyRowId.equals(that.legacyRowId)
+                    && oldStatus == that.oldStatus
+                    && migrationReference.equals(that.migrationReference);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(tenantId, operationId, commandId, commandType,
+                    expectedTargetIdentity, legacyRowId, oldStatus, migrationReference);
+        }
+
+        @Override
+        public String toString() {
+            return "LegacyConfirmationEvidence[tenantId=" + tenantId
+                    + ", operationId=" + operationId
+                    + ", commandId=" + commandId
+                    + ", commandType=" + commandType
+                    + ", expectedTargetIdentity=" + expectedTargetIdentity
+                    + ", legacyRowId=" + legacyRowId
+                    + ", oldStatus=" + oldStatus
+                    + ", migrationReference=" + migrationReference + "]";
+        }
+    }
+
+    private static String safeLegacyReference(String value, String field) {
+        if (value == null || !value.matches("[A-Za-z0-9._:-]{1,160}")) {
+            throw new IllegalArgumentException(field + " is not a safe opaque reference");
+        }
+        String lower = value.toLowerCase(Locale.ROOT);
+        if (lower.contains("authorization") || lower.contains("bearer")
+                || lower.contains("password") || lower.contains("secret")
+                || lower.contains("token")) {
+            throw new IllegalArgumentException(field + " must not contain credential material");
+        }
+        return value;
+    }
+
+    /** Closed vocabulary for diagnostics that may be persisted or exposed by operation APIs. */
+    public enum DiagnosticCode {
+        TRANSPORT_NOT_SENT("transport.not_sent", "Remote request sent zero bytes"),
+        TRANSPORT_POSSIBLY_SENT("transport.possibly_sent", "Remote request may have been sent"),
+        RESPONSE_MALFORMED("response.malformed",
+                "Remote response was not valid confirmation evidence"),
+        RESPONSE_DUPLICATE("response.duplicate",
+                "Duplicate response lacked matching confirmation evidence"),
+        DISPATCH_LEASE_EXPIRED("dispatch.lease_expired",
+                "Dispatch lease expired with an unknown remote outcome"),
+        RESPONSE_UNCONFIRMED("response.unconfirmed",
+                "Accepted response lacked matching confirmation evidence"),
+        RESPONSE_AMBIGUOUS("response.ambiguous", "Remote request may have been accepted"),
+        HTTP_CONFLICT("http.409.conflict", "Remote engine reported a command conflict"),
+        TARGET_NOT_FOUND("target.not_found",
+                "Cancellation target was not found without terminal proof"),
+        HTTP_NOT_ACCEPTED(null, "Remote endpoint proved the request was not accepted"),
+        HTTP_REJECTED(null, "Remote endpoint definitively rejected the request"),
+        RECONCILIATION_ABSENT("reconcile.absent",
+                "Reconciliation proved the remote effect is absent"),
+        RECONCILIATION_INCONCLUSIVE("reconcile.inconclusive",
+                "Reconciliation could not determine the remote outcome"),
+        ATTEMPTS_EXHAUSTED("attempts.exhausted",
+                "Remote command exhausted automatic dispatch attempts"),
+        REVIEW_REQUESTED("review.requested", "Operator requested manual review"),
+        RECONCILIATION_REQUESTED("reconcile.requested",
+                "Operator requested reconciliation"),
+        REVIEW_RETRY("review.retry", "Reviewed evidence permits another dispatch attempt");
+
+        private final String fixedCode;
+        private final String summary;
+
+        DiagnosticCode(String fixedCode, String summary) {
+            this.fixedCode = fixedCode;
+            this.summary = summary;
+        }
+
+        private boolean matches(String code) {
+            if (fixedCode != null) {
+                return fixedCode.equals(code);
+            }
+            if (this == HTTP_NOT_ACCEPTED) {
+                return code.matches("http\\.(408|425|429|5[0-9]{2})\\.not_accepted");
+            }
+            if (!code.matches("http\\.[1-4][0-9]{2}\\.rejected")) {
+                return false;
+            }
+            int status = Integer.parseInt(code.substring(5, 8));
+            return status < 200 || status >= 300
+                    && status != 408 && status != 409 && status != 425 && status != 429;
+        }
+
+        private static void requireExact(String code, String summary) {
+            if (code == null || summary == null) {
+                if (code != null || summary != null) {
+                    throw new IllegalArgumentException(
+                            "Persisted diagnostic code and summary must both be present");
+                }
+                return;
+            }
+            for (DiagnosticCode candidate : values()) {
+                if (candidate.matches(code) && candidate.summary.equals(summary)) {
+                    return;
+                }
+            }
+            throw new IllegalArgumentException(
+                    "Persisted diagnostic is not an exact member of the safe vocabulary");
+        }
+    }
+
     public record Decision(
             EngineCommandStatus status,
             OffsetDateTime decidedAt,
@@ -635,12 +864,16 @@ public final class EngineCommandPolicy {
             long budgetEpoch,
             boolean automaticBudgetReset,
             CommandDispatchOutcome.ConfirmationEvidence terminalConfirmation,
+            LegacyConfirmationEvidence legacyConfirmation,
             CommandDispatchOutcome.ReviewEvidence decisionEvidence,
             CommandDispatchOutcome.OperatorAction appliedOperatorAction,
             List<ProcessedAction> processedActions) {
         public Decision {
             Objects.requireNonNull(status, "status");
-            Objects.requireNonNull(decidedAt, "decidedAt");
+            decidedAt = canonicalPersistedTimestamp(decidedAt, "decidedAt");
+            if (nextAttemptAt != null) {
+                nextAttemptAt = canonicalPersistedTimestamp(nextAttemptAt, "nextAttemptAt");
+            }
             processedActions = List.copyOf(
                     Objects.requireNonNull(processedActions, "processedActions"));
             if (totalDispatchAttempts < 0) {
@@ -675,25 +908,27 @@ public final class EngineCommandPolicy {
                 throw new IllegalArgumentException(
                         "Only retry decisions may reset the automatic budget");
             }
-            if ((status == EngineCommandStatus.CONFIRMED) != (terminalConfirmation != null)) {
+            if (terminalConfirmation != null && legacyConfirmation != null) {
                 throw new IllegalArgumentException(
-                        "Confirmed decisions must retain exactly one terminal confirmation");
+                        "Confirmed decisions cannot mix live and legacy provenance");
             }
-            if (processedActions.size() > MAX_PROCESSED_ACTION_HISTORY) {
+            if ((status == EngineCommandStatus.CONFIRMED)
+                    != (terminalConfirmation != null || legacyConfirmation != null)) {
                 throw new IllegalArgumentException(
-                        "Processed operator action history exceeds its bounded capacity");
+                        "Confirmed decisions must retain exactly one terminal provenance");
             }
             HashSet<String> actionIds = new HashSet<>();
-            int expectedSequence = 1;
+            long expectedSequence = 1L;
             for (ProcessedAction processed : processedActions) {
                 if (!actionIds.add(processed.action().actionId())) {
                     throw new IllegalArgumentException(
                             "Processed operator action history contains a duplicate action ID");
                 }
-                if (processed.sequence() != expectedSequence++) {
+                if (processed.sequence() != expectedSequence) {
                     throw new IllegalArgumentException(
                             "Processed operator action history sequence must be contiguous");
                 }
+                expectedSequence = Math.incrementExact(expectedSequence);
             }
             if (appliedOperatorAction != null) {
                 if (processedActions.isEmpty()) {
@@ -701,7 +936,8 @@ public final class EngineCommandPolicy {
                             "Applied operator action must be retained in processed history");
                 }
                 ProcessedAction applied = new ProcessedAction(
-                        processedActions.size(), appliedOperatorAction, decisionEvidence);
+                        processedActions.get(processedActions.size() - 1).sequence(),
+                        appliedOperatorAction, decisionEvidence);
                 if (!processedActions.get(processedActions.size() - 1).equals(applied)) {
                     throw new IllegalArgumentException(
                             "Applied operator action must be the last exact history entry");
@@ -731,6 +967,29 @@ public final class EngineCommandPolicy {
                 throw new IllegalArgumentException(
                         "Cancelled decisions must retain their applied CANCEL action");
             }
+            long auditedBudgetResets = processedActions.stream()
+                    .map(ProcessedAction::action)
+                    .filter(action -> action.actionType()
+                            == CommandDispatchOutcome.ActionType.RETRY_OVERRIDE)
+                    .filter(CommandDispatchOutcome.OperatorAction::overrideAutomaticAttemptCap)
+                    .count();
+            if (budgetEpoch != auditedBudgetResets) {
+                throw new IllegalArgumentException(
+                        "Budget epoch must equal the audited retry override history count");
+            }
+            long expectedLifetimeAttempts;
+            try {
+                expectedLifetimeAttempts = Math.addExact(
+                        Math.multiplyExact(budgetEpoch, (long) MAX_AUTOMATIC_ATTEMPTS),
+                        automaticAttemptsInBudget);
+            } catch (ArithmeticException ex) {
+                throw new IllegalArgumentException(
+                        "Audited attempt history exceeds the lifetime counter range", ex);
+            }
+            if (totalDispatchAttempts != expectedLifetimeAttempts) {
+                throw new IllegalArgumentException(
+                        "Lifetime attempts must equal exhausted budgets plus current attempts");
+            }
             validateDecisionEvidence(status, decisionEvidence, appliedOperatorAction);
             if (status == EngineCommandStatus.CONFIRMED
                     && (decisionEvidence != null || appliedOperatorAction != null)) {
@@ -748,9 +1007,28 @@ public final class EngineCommandPolicy {
                 throw new IllegalArgumentException(
                         "Manual review decisions require review or operator provenance");
             }
-            if (safeSummary != null && safeSummary.length() > MAX_SAFE_SUMMARY_LENGTH) {
-                throw new IllegalArgumentException("Safe summary exceeds its storage bound");
-            }
+            DiagnosticCode.requireExact(errorCode, safeSummary);
+        }
+
+        /** Compatibility constructor for callers without historical actions yet. */
+        public Decision(
+                EngineCommandStatus status,
+                OffsetDateTime decidedAt,
+                OffsetDateTime nextAttemptAt,
+                String errorCode,
+                String safeSummary,
+                long totalDispatchAttempts,
+                int automaticAttemptsInBudget,
+                long budgetEpoch,
+                boolean automaticBudgetReset,
+                CommandDispatchOutcome.ConfirmationEvidence terminalConfirmation,
+                CommandDispatchOutcome.ReviewEvidence decisionEvidence,
+                CommandDispatchOutcome.OperatorAction appliedOperatorAction,
+                List<ProcessedAction> processedActions) {
+            this(status, decidedAt, nextAttemptAt, errorCode, safeSummary,
+                    totalDispatchAttempts, automaticAttemptsInBudget, budgetEpoch,
+                    automaticBudgetReset, terminalConfirmation, null, decisionEvidence,
+                    appliedOperatorAction, processedActions);
         }
 
         /** Compatibility constructor for callers without historical actions yet. */
@@ -769,7 +1047,7 @@ public final class EngineCommandPolicy {
                 CommandDispatchOutcome.OperatorAction appliedOperatorAction) {
             this(status, decidedAt, nextAttemptAt, errorCode, safeSummary,
                     totalDispatchAttempts, automaticAttemptsInBudget, budgetEpoch,
-                    automaticBudgetReset, terminalConfirmation, decisionEvidence,
+                    automaticBudgetReset, terminalConfirmation, null, decisionEvidence,
                     appliedOperatorAction, appliedOperatorAction == null
                             ? List.of()
                             : List.of(new ProcessedAction(

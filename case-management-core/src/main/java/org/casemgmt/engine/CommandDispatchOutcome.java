@@ -68,7 +68,8 @@ public record CommandDispatchOutcome(
         HTTP_RESPONSE,
         DUPLICATE_RESPONSE,
         OBSERVATION,
-        RECONCILIATION
+        RECONCILIATION,
+        LEGACY_MIGRATION
     }
 
     public enum ReviewSource {
@@ -136,6 +137,10 @@ public record CommandDispatchOutcome(
             remoteIdentity = identifier(remoteIdentity, "remoteIdentity");
             Objects.requireNonNull(remoteState, "remoteState");
             Objects.requireNonNull(source, "source");
+            if (source == ConfirmationSource.LEGACY_MIGRATION) {
+                throw new IllegalArgumentException(
+                        "Live confirmation evidence cannot claim legacy migration provenance");
+            }
             evidenceReference = safeReference(evidenceReference, "evidenceReference");
         }
     }
@@ -181,7 +186,8 @@ public record CommandDispatchOutcome(
             Objects.requireNonNull(actionType, "actionType");
             actionId = safeReference(actionId, "actionId");
             auditReference = safeReference(auditReference, "auditReference");
-            Objects.requireNonNull(performedAt, "performedAt");
+            performedAt = EngineCommandPolicy.canonicalPersistedTimestamp(
+                    performedAt, "performedAt");
             if (overrideAutomaticAttemptCap && actionType != ActionType.RETRY_OVERRIDE) {
                 throw new IllegalArgumentException(
                         "Only a retry override action may reset the automatic attempt budget");

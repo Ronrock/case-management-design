@@ -49,7 +49,7 @@ class EngineCommandPolicyTest {
 
     private static final long TOTAL = 2;
     private static final int BUDGET_ATTEMPTS = 2;
-    private static final long BUDGET_EPOCH = 1;
+    private static final long BUDGET_EPOCH = 0;
 
     @ParameterizedTest(name = "{0} {1} after {2}")
     @MethodSource("completeDecisionMatrix")
@@ -77,7 +77,7 @@ class EngineCommandPolicyTest {
 
     private static Scenario[] scenarios(EngineCommand.Type type) {
         var dispatch = decision(EngineCommandStatus.DISPATCHING, NOW_OFFSET, null,
-                null, null, 3, 3, 1, false, null, null, null);
+                null, null, 3, 3, 0, false, null, null, null);
         var retry = decision(EngineCommandStatus.RETRYABLE, NOW_OFFSET, SECOND_RETRY,
                 "transport.not_sent", "Remote request sent zero bytes",
                 TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, null);
@@ -251,9 +251,13 @@ class EngineCommandPolicyTest {
     }
 
     static Stream<Arguments> confirmationSourcePermutations() {
+        var liveSources = Stream.of(CommandDispatchOutcome.ConfirmationSource.values())
+                .filter(source -> source
+                        != CommandDispatchOutcome.ConfirmationSource.LEGACY_MIGRATION)
+                .toList();
         return Stream.of(EngineCommand.Type.values()).flatMap(type ->
-                Stream.of(CommandDispatchOutcome.ConfirmationSource.values()).flatMap(first ->
-                        Stream.of(CommandDispatchOutcome.ConfirmationSource.values()).map(later ->
+                liveSources.stream().flatMap(first ->
+                        liveSources.stream().map(later ->
                                 Arguments.of(type, first, later))));
     }
 
@@ -376,8 +380,9 @@ class EngineCommandPolicyTest {
                 1, 1, 0, false, null, null, null));
 
         var exhaustedReview = decision(EngineCommandStatus.MANUAL_REVIEW, PRIOR, null,
-                "prior.review", "Prior review", 10,
-                EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS, 3,
+                "reconcile.inconclusive",
+                "Reconciliation could not determine the remote outcome", 6,
+                EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS, 0,
                 false, null,
                 review(type, INCONCLUSIVE,
                         CommandDispatchOutcome.ReviewSource.RECONCILIATION), null);
@@ -389,7 +394,7 @@ class EngineCommandPolicyTest {
                 CommandDispatchOutcome.retryAfterReviewedAbsence(absence, override));
         var expectedOverride = decision(EngineCommandStatus.RETRYABLE, NOW_OFFSET, NOW_OFFSET,
                 "review.retry", "Reviewed evidence permits another dispatch attempt",
-                10, 0, 4, true, null, absence, override);
+                6, 0, 1, true, null, absence, override);
         assertThat(overridden).isEqualTo(expectedOverride);
         assertThat(POLICY.transition(new EngineCommandPolicy.CommandState(
                 command(type), overridden),
@@ -400,35 +405,24 @@ class EngineCommandPolicyTest {
                 command(type), overridden), CommandDispatchOutcome.dispatchRequested());
         assertThat(nextDispatch).isEqualTo(new EngineCommandPolicy.Decision(
                 EngineCommandStatus.DISPATCHING, NOW_OFFSET, null, null, null,
-                11, 1, 4, false, null, null, null,
+                7, 1, 1, false, null, null, null,
                 java.util.List.of(new EngineCommandPolicy.ProcessedAction(
                         1, override, absence))));
     }
 
     @Test
-    void lifetimeAndEpochCountersNeverOverflow() {
-        EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
-        var lifetimeMax = decision(EngineCommandStatus.RETRYABLE, PRIOR, PRIOR.plusMinutes(1),
-                "prior.retry", "Prior retry", Long.MAX_VALUE, 0, 1,
-                false, null, null, null);
-        assertThatThrownBy(() -> POLICY.transition(new EngineCommandPolicy.CommandState(
-                command(type), lifetimeMax), CommandDispatchOutcome.dispatchRequested()))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("lifetime");
-
-        var epochMax = decision(EngineCommandStatus.MANUAL_REVIEW, PRIOR, null,
-                "prior.review", "Prior review", 20,
-                EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS, Long.MAX_VALUE,
-                false, null,
-                review(type, INCONCLUSIVE,
-                        CommandDispatchOutcome.ReviewSource.RECONCILIATION), null);
-        var absence = review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW);
-        var override = operator(type, RETRY_OVERRIDE,
-                "action:epoch-overflow", true, NOW_OFFSET);
-        assertThatThrownBy(() -> POLICY.transition(new EngineCommandPolicy.CommandState(
-                command(type), epochMax),
-                CommandDispatchOutcome.retryAfterReviewedAbsence(absence, override)))
-                .isInstanceOf(IllegalStateException.class)
+    void lifetimeAndEpochCountersCannotBeForgedBeyondTheirAuditedHistory() {
+        assertThatThrownBy(() -> decision(EngineCommandStatus.RETRYABLE, PRIOR,
+                PRIOR.plusMinutes(1), "transport.not_sent",
+                "Remote request sent zero bytes", Long.MAX_VALUE, 1, 0,
+                false, null, null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Lifetime attempts");
+        assertThatThrownBy(() -> decision(EngineCommandStatus.RETRYABLE, PRIOR,
+                PRIOR.plusMinutes(1), "transport.not_sent",
+                "Remote request sent zero bytes", 1, 1, Long.MAX_VALUE,
+                false, null, null, null))
+                .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("epoch");
     }
 
@@ -637,22 +631,29 @@ class EngineCommandPolicyTest {
                     null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
                     false, null, null, null);
             case RETRYABLE -> decision(status, PRIOR, PRIOR.plusMinutes(20),
-                    "prior.retry", "Prior retry", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    "transport.not_sent", "Remote request sent zero bytes",
+                    TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
                     false, null, null, null);
             case AWAITING_CONFIRMATION -> decision(status, PRIOR, null,
-                    "prior.ambiguous", "Prior ambiguity", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    "transport.possibly_sent", "Remote request may have been sent",
+                    TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
                     false, null, null, null);
             case CONFIRMED -> decision(status, PRIOR, null,
                     null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
                     false, confirmation(type, HTTP_RESPONSE), null, null);
             case FAILED -> decision(status, PRIOR, null,
-                    "prior.failed", "Prior failure", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    "attempts.exhausted", "Remote command exhausted automatic dispatch attempts",
+                    TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
                     false, null, null, null);
             case CONFLICT -> decision(status, PRIOR, null,
-                    "prior.conflict", "Prior conflict", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    "response.duplicate",
+                    "Duplicate response lacked matching confirmation evidence",
+                    TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
                     false, null, null, null);
             case MANUAL_REVIEW -> decision(status, PRIOR, null,
-                    "prior.review", "Prior review", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    "reconcile.inconclusive",
+                    "Reconciliation could not determine the remote outcome",
+                    TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
                     false, null,
                     review(type, INCONCLUSIVE,
                             CommandDispatchOutcome.ReviewSource.RECONCILIATION), null);
@@ -703,6 +704,8 @@ class EngineCommandPolicyTest {
             case DUPLICATE_RESPONSE -> CommandDispatchOutcome.duplicateResponse(evidence);
             case OBSERVATION -> CommandDispatchOutcome.observation(evidence);
             case RECONCILIATION -> CommandDispatchOutcome.reconciliationConfirmed(evidence);
+            case LEGACY_MIGRATION -> throw new IllegalArgumentException(
+                    "Legacy migration is not a live confirmation outcome");
         };
     }
 
@@ -720,6 +723,7 @@ class EngineCommandPolicyTest {
             case DUPLICATE_RESPONSE -> "duplicate";
             case OBSERVATION -> "observation";
             case RECONCILIATION -> "reconciliation";
+            case LEGACY_MIGRATION -> "legacy-migration";
         };
     }
 
