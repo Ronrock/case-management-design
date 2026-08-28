@@ -126,6 +126,70 @@ class DefaultEngineObservationHandlerTest {
     }
 
     @Test
+    void rootTerminationPublishesOnlyTheWhitelistedCancellationReason() {
+        ProcessObservation observation = new ProcessObservation("obs-cancel", 1,
+                "operaton:embedded", "tenant-a", "case-1", "process-1", "process-1", 12L,
+                ProcessObservation.EventType.TERMINATED, OCCURRED, RECEIVED,
+                authorityAttributes("cancellationReason", "customer withdrew",
+                        "secret", "must-not-leak", "arbitrary", "must-not-leak-either"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(projections.observeFromHandler(any(ProcessCompletionObservation.class)))
+                .thenReturn(new ProcessProjectionResult(true, 8));
+
+        handler.apply(observation);
+
+        ArgumentCaptor<CaseEvent> event = ArgumentCaptor.forClass(CaseEvent.class);
+        verify(events).publish(event.capture());
+        assertThat(event.getValue().type()).isEqualTo("case.cancelled");
+        assertThat(event.getValue().data())
+                .containsEntry("reason", "customer withdrew")
+                .doesNotContainKey("cancellationReason")
+                .doesNotContainKey("secret")
+                .doesNotContainKey("arbitrary");
+        assertThat(event.getValue().data().toString()).doesNotContain("must-not-leak");
+    }
+
+    @Test
+    void rootTerminationWithoutAUserReasonMatchesTheServiceEmptyReasonPayload() {
+        ProcessObservation observation = new ProcessObservation("obs-cancel-no-reason", 1,
+                "operaton:embedded", "tenant-a", "case-1", "process-1", "process-1", 12L,
+                ProcessObservation.EventType.TERMINATED, OCCURRED, RECEIVED,
+                authorityAttributes());
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(projections.observeFromHandler(any(ProcessCompletionObservation.class)))
+                .thenReturn(new ProcessProjectionResult(true, 8));
+
+        handler.apply(observation);
+
+        ArgumentCaptor<CaseEvent> event = ArgumentCaptor.forClass(CaseEvent.class);
+        verify(events).publish(event.capture());
+        assertThat(event.getValue().data()).containsEntry("reason", "");
+    }
+
+    @Test
+    void childTerminationDoesNotExposeCancellationReason() {
+        ProcessObservation observation = new ProcessObservation("obs-child-cancel", 1,
+                "operaton:embedded", "tenant-a", "case-1", "child-1", "child-1", 12L,
+                ProcessObservation.EventType.TERMINATED, OCCURRED, RECEIVED,
+                authorityAttributes("cancellationReason", "child detail"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(processes.findByCase("case-1")).thenReturn(List.of(
+                rootLink("process-1"),
+                new LinkedProcessRepository.LinkedProcessRow("link-child", "case-1", null,
+                        "link-child", "child-1", "child-process", "ACTIVE",
+                        CaseTask.EngineSync.SYNCED, false)));
+        when(projections.observeFromHandler(any(ProcessCompletionObservation.class)))
+                .thenReturn(new ProcessProjectionResult(false, 7));
+
+        handler.apply(observation);
+
+        ArgumentCaptor<CaseEvent> event = ArgumentCaptor.forClass(CaseEvent.class);
+        verify(events).publish(event.capture());
+        assertThat(event.getValue().type()).isEqualTo("case.process.transitioned");
+        assertThat(event.getValue().data()).doesNotContainKey("reason");
+    }
+
+    @Test
     void completedUserTaskProjectsThenMapsOnlyApprovedOutputBeforeLifecycleEffects() {
         UserTaskObservation observation = new UserTaskObservation("obs-task", 1,
                 "operaton:embedded", "tenant-a", "case-1", "process-1", "task-1", 5L,

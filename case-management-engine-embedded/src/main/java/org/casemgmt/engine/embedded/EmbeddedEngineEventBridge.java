@@ -241,6 +241,11 @@ public final class EmbeddedEngineEventBridge {
             type = process.getDeleteReason() == null
                     ? ProcessObservation.EventType.COMPLETED
                     : ProcessObservation.EventType.TERMINATED;
+            if (type == ProcessObservation.EventType.TERMINATED
+                    && !EmbeddedEngineGateway.CASE_MANAGEMENT_CANCELLATION_MARKER.equals(
+                            process.getDeleteReason())) {
+                attributes.put("cancellationReason", process.getDeleteReason());
+            }
             engineDate = process.getEndTime();
         } else if (HistoryEvent.ACTIVITY_EVENT_TYPE_START.equals(process.getEventType())
                 && process.getStartTime() != null) {

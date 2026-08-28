@@ -226,6 +226,26 @@ class EmbeddedEngineEventBridgeTest {
         assertThat(observations.getAllValues().get(0).attributes())
                 .containsEntry("processDefinitionId", "child-definition")
                 .containsEntry("processDefinitionKey", "child-process");
+        assertThat(observations.getAllValues().get(1).attributes())
+                .containsEntry("cancellationReason", "deleted by operator");
+        assertThat(observations.getAllValues().get(2).attributes())
+                .doesNotContainKey("cancellationReason");
+    }
+
+    @Test
+    void internalBodylessCancellationMarkerClassifiesTerminationWithoutBecomingUserData() {
+        bridge.onHistory(processHistory("process-1", "definition-1", "complaint-process",
+                "tenant-a", EmbeddedEngineGateway.CASE_MANAGEMENT_CANCELLATION_MARKER, 44));
+
+        ArgumentCaptor<EngineObservation> observation =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler).apply(observation.capture());
+        assertThat(observation.getValue())
+                .isInstanceOfSatisfying(ProcessObservation.class, process -> {
+                    assertThat(process.eventType()).isEqualTo(
+                            ProcessObservation.EventType.TERMINATED);
+                    assertThat(process.attributes()).doesNotContainKey("cancellationReason");
+                });
     }
 
     @Test

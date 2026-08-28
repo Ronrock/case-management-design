@@ -25,6 +25,29 @@ import static org.mockito.Mockito.verify;
 class EmbeddedEngineGatewayResponseTest {
 
     @Test
+    void bodylessCancellationStillUsesAnExplicitEngineDeletionMarker() {
+        RuntimeService runtime = mock(RuntimeService.class);
+        EmbeddedEngineGateway gateway = new EmbeddedEngineGateway(
+                mock(TaskService.class), runtime, mock(RepositoryService.class));
+
+        gateway.cancelProcess("process-42", null);
+
+        verify(runtime).deleteProcessInstance("process-42",
+                EmbeddedEngineGateway.CASE_MANAGEMENT_CANCELLATION_MARKER);
+    }
+
+    @Test
+    void suppliedCancellationReasonIsPreservedForEngineHistory() {
+        RuntimeService runtime = mock(RuntimeService.class);
+        EmbeddedEngineGateway gateway = new EmbeddedEngineGateway(
+                mock(TaskService.class), runtime, mock(RepositoryService.class));
+
+        gateway.cancelProcess("process-42", "customer withdrew");
+
+        verify(runtime).deleteProcessInstance("process-42", "customer withdrew");
+    }
+
+    @Test
     void keyStartPinsTheTenantScopedExactDefinitionIdentity() {
         RuntimeService runtime = mock(RuntimeService.class);
         RepositoryService repository = mock(RepositoryService.class);

@@ -8,7 +8,6 @@ import org.casemgmt.domain.CaseState;
 import org.casemgmt.domain.PlanItemDefinition;
 import org.casemgmt.domain.PlanItemType;
 import org.casemgmt.domain.TaskState;
-import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
 import org.casemgmt.event.EventTypes;
 import org.casemgmt.observation.SlaLifecyclePort;
@@ -40,6 +39,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.operaton.bpm.engine.ProcessEngineException;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.TaskService;
@@ -66,7 +66,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -121,11 +121,10 @@ class ProductionEmbeddedLifecycleIT {
         }
 
         @Bean
-        PausingEmbeddedEngineGateway pausingEmbeddedEngineGateway(
-                TaskService taskService, RuntimeService runtimeService,
-                RepositoryService repositoryService) {
-            return new PausingEmbeddedEngineGateway(
-                    taskService, runtimeService, repositoryService);
+        @Primary
+        PausingCaseRepository pausingCaseRepository(
+                @Qualifier("dataSource") DataSource dataSource) {
+            return new PausingCaseRepository(dataSource);
         }
 
         @Bean("consumerDataSource")
@@ -191,43 +190,54 @@ class ProductionEmbeddedLifecycleIT {
                                     java.time.Instant occurredAt) { }
     }
 
-    static final class PausingEmbeddedEngineGateway extends EmbeddedEngineGateway {
-        private final AtomicBoolean pauseNextCancellation = new AtomicBoolean();
-        private volatile CountDownLatch cancellationEntered = new CountDownLatch(0);
-        private volatile CountDownLatch releaseCancellation = new CountDownLatch(0);
+    /** Test-only seam at the production serialization boundary, after the API owns the row lock. */
+    static final class PausingCaseRepository extends CaseRepository {
+        private final AtomicReference<Thread> lockOwner = new AtomicReference<>();
+        private volatile CountDownLatch ownerLocked = new CountDownLatch(0);
+        private volatile CountDownLatch contenderAtLock = new CountDownLatch(0);
+        private volatile CountDownLatch releaseOwner = new CountDownLatch(0);
 
-        PausingEmbeddedEngineGateway(
-                TaskService taskService, RuntimeService runtimeService,
-                RepositoryService repositoryService) {
-            super(taskService, runtimeService, repositoryService);
+        PausingCaseRepository(DataSource dataSource) {
+            super(dataSource);
         }
 
-        void pauseNextCancellation() {
-            cancellationEntered = new CountDownLatch(1);
-            releaseCancellation = new CountDownLatch(1);
-            pauseNextCancellation.set(true);
+        void pauseNextOwner() {
+            ownerLocked = new CountDownLatch(1);
+            contenderAtLock = new CountDownLatch(1);
+            releaseOwner = new CountDownLatch(1);
+            lockOwner.set(null);
         }
 
-        void awaitCancellationEntry() {
-            await(cancellationEntered, "case-service engine cancellation");
+        void awaitOwnerLock() {
+            await(ownerLocked, "case-service case-row lock");
         }
 
-        void releaseCancellation() {
-            releaseCancellation.countDown();
+        void awaitContender() {
+            await(contenderAtLock, "competing callback at case-row lock");
+        }
+
+        void releaseOwner() {
+            releaseOwner.countDown();
         }
 
         void reset() {
-            pauseNextCancellation.set(false);
-            releaseCancellation.countDown();
+            lockOwner.set(Thread.currentThread());
+            releaseOwner.countDown();
         }
 
         @Override
-        public void cancelProcess(String processInstanceId, String reason) {
-            if (pauseNextCancellation.compareAndSet(true, false)) {
-                cancellationEntered.countDown();
-                await(releaseCancellation, "release of case-service engine cancellation");
+        public void lockForObservation(String caseId) {
+            Thread current = Thread.currentThread();
+            if (lockOwner.compareAndSet(null, current)) {
+                super.lockForObservation(caseId);
+                ownerLocked.countDown();
+                await(releaseOwner, "release of case-service case-row lock");
+                return;
             }
-            super.cancelProcess(processInstanceId, reason);
+            if (current != lockOwner.get()) {
+                contenderAtLock.countDown();
+            }
+            super.lockForObservation(caseId);
         }
     }
 
@@ -237,12 +247,11 @@ class ProductionEmbeddedLifecycleIT {
     @Autowired @Qualifier("caseJdbcClient") JdbcClient jdbc;
     @Autowired @Qualifier("consumerJdbcClient") JdbcClient consumerJdbc;
     @Autowired DataSource dataSource;
-    @Autowired CaseRepository cases;
+    @Autowired PausingCaseRepository cases;
     @Autowired LinkedProcessRepository processes;
     @Autowired LinkedProcessService linkedProcesses;
     @Autowired CaseTaskService caseTasks;
     @Autowired FailingSlaLifecyclePort failures;
-    @Autowired PausingEmbeddedEngineGateway pausingEngine;
     @Autowired EmbeddedTransactionResourceValidator transactionResourceValidator;
     @Autowired RecordingPlanModelObservationHandler planModelObservations;
     @Autowired @Qualifier("caseManagementCaseService") CaseService caseService;
@@ -278,7 +287,7 @@ class ProductionEmbeddedLifecycleIT {
         failures.failCreatedTask = false;
         failures.failCompletedTask = false;
         failures.failTerminatedProcess = false;
-        pausingEngine.reset();
+        cases.reset();
         planModelObservations.clear();
     }
 
@@ -425,8 +434,32 @@ class ProductionEmbeddedLifecycleIT {
         assertProjectedTask(stageTask.getId(), created.id(), "TERMINATED", null);
         assertPlanItem(created.id(), "STAGE", "TERMINATED");
         assertThat(eventCount(created.id(), EventTypes.CASE_CANCELLED)).isEqualTo(1);
+        assertThat(eventData(created.id(), EventTypes.CASE_CANCELLED))
+                .singleElement()
+                .satisfies(data -> assertThat(data)
+                        .containsEntry("reason", "customer withdrew")
+                        .doesNotContainKey("cancellationReason"));
         assertThat(auditActionCount(created.id(), "engine.process.terminated")).isEqualTo(1);
         assertThat(auditActionCount(created.id(), "case.cancel")).isEqualTo(1);
+    }
+
+    @Test
+    void bodylessPublicCancellationRemainsCancellationAndKeepsTheDomainReasonNull() {
+        var created = caseService.create("production-root", TENANT,
+                "business-api-cancel-no-reason", "API cancel without reason",
+                CasePriority.MEDIUM, Map.of(), ACTOR);
+
+        var cancelled = caseService.cancel(created.id(), cases.require(created.id()).version(),
+                null, ACTOR);
+
+        assertThat(cancelled.state()).isEqualTo(CaseState.CANCELLED);
+        assertThat(cancelled.cancelReason()).isNull();
+        assertThat(cases.require(created.id()).cancelReason()).isNull();
+        assertThat(observationCount(created.id(), "PROCESS", "TERMINATED")).isEqualTo(1);
+        assertThat(observationCount(created.id(), "PROCESS", "COMPLETED")).isZero();
+        assertThat(eventData(created.id(), EventTypes.CASE_CANCELLED))
+                .singleElement()
+                .satisfies(data -> assertThat(data).containsEntry("reason", ""));
     }
 
     @Test
@@ -463,14 +496,14 @@ class ProductionEmbeddedLifecycleIT {
                 "business-api-cancel-race", "API cancel race", CasePriority.MEDIUM,
                 Map.of(), ACTOR);
         long expectedVersion = cases.require(created.id()).version();
-        pausingEngine.pauseNextCancellation();
+        cases.pauseNextOwner();
         ExecutorService pool = Executors.newFixedThreadPool(2);
         CountDownLatch externalStarted = new CountDownLatch(1);
         try {
             Future<CaseInstance> apiCancellation = pool.submit(() ->
                     caseService.cancel(created.id(), expectedVersion,
                             "serialized request", ACTOR));
-            pausingEngine.awaitCancellationEntry();
+            cases.awaitOwnerLock();
 
             Future<Throwable> externalTermination = pool.submit(() -> {
                 externalStarted.countDown();
@@ -483,13 +516,19 @@ class ProductionEmbeddedLifecycleIT {
                 }
             });
             await(externalStarted, "external engine termination start");
+            cases.awaitContender();
 
             assertThatThrownBy(() -> externalTermination.get(1, TimeUnit.SECONDS))
                     .isInstanceOf(TimeoutException.class);
-            pausingEngine.releaseCancellation();
+            cases.releaseOwner();
 
             var cancelled = apiCancellation.get(10, TimeUnit.SECONDS);
-            externalTermination.get(10, TimeUnit.SECONDS);
+            Throwable raceLoser = externalTermination.get(10, TimeUnit.SECONDS);
+            assertThat(raceLoser)
+                    .as("the command that lost the serialized deletion race")
+                    .isInstanceOf(ProcessEngineException.class)
+                    .hasMessageContaining("process instance")
+                    .hasMessageContaining("empty");
             assertThat(cancelled.state()).isEqualTo(CaseState.CANCELLED);
             assertThat(cancelled.cancelReason()).isEqualTo("serialized request");
             assertThat(cases.require(created.id()).version()).isEqualTo(expectedVersion + 2);
@@ -501,7 +540,7 @@ class ProductionEmbeddedLifecycleIT {
             assertThat(auditActionCount(created.id(), "engine.process.terminated")).isEqualTo(1);
             assertThat(auditActionCount(created.id(), "case.cancel")).isEqualTo(1);
         } finally {
-            pausingEngine.releaseCancellation();
+            cases.releaseOwner();
             pool.shutdownNow();
         }
     }
@@ -723,6 +762,16 @@ class ProductionEmbeddedLifecycleIT {
                 .param("caseId", caseId)
                 .param("type", "%" + type)
                 .query(Integer.class).single();
+    }
+
+    private List<Map<String, Object>> eventData(String caseId, String type) {
+        return jdbc.sql("SELECT DATA_JSON_ FROM CM_EVENT WHERE SUBJECT_ = :caseId "
+                        + "AND TYPE_ LIKE :type ORDER BY SEQ_")
+                .param("caseId", caseId)
+                .param("type", "%" + type)
+                .query(String.class).list().stream()
+                .map(org.casemgmt.repo.JsonCodec::toMap)
+                .toList();
     }
 
     private int auditActionCount(String caseId, String action) {

@@ -233,6 +233,24 @@ class CaseServiceTest extends OracleTestBase {
                 .allMatch(i -> i.state().isEnded());
     }
 
+    @Test
+    void serviceOwnedCancellationPublishesTheSameNullAndNonNullReasonContract() {
+        CaseInstance withReason = cases.create("widget-review", "t1", "reasoned", "Reasoned",
+                CasePriority.MEDIUM, Map.of(), alice);
+        CaseInstance withoutReason = cases.create("widget-review", "t1", "bodyless", "Bodyless",
+                CasePriority.MEDIUM, Map.of(), alice);
+
+        transactions.executeWithoutResult(status ->
+                cases.cancel(withReason.id(), withReason.version(), "customer withdrew", alice));
+        transactions.executeWithoutResult(status ->
+                cases.cancel(withoutReason.id(), withoutReason.version(), null, alice));
+
+        assertThat(cancellationEventData(withReason.id()))
+                .containsEntry("reason", "customer withdrew");
+        assertThat(cancellationEventData(withoutReason.id()))
+                .containsEntry("reason", "");
+    }
+
     /**
      * Companion to {@link #closeSweepsALeftoverActiveItemAndEmitsATransitionedEventForIt} for
      * {@link CaseService#cancel}'s own (pre-existing) sweep. Straight after create(), "setupStage"
@@ -329,6 +347,15 @@ class CaseServiceTest extends OracleTestBase {
         int countAfter = planItems.findByCase(created.id()).size();
 
         assertThat(countAfter).isEqualTo(countBefore);
+    }
+
+    private Map<String, Object> cancellationEventData(String caseId) {
+        return JsonCodec.toMap(jdbc().sql("""
+                SELECT DATA_JSON_ FROM CM_EVENT
+                WHERE SUBJECT_ = :caseId AND TYPE_ LIKE '%case.cancelled'""")
+                .param("caseId", caseId)
+                .query(String.class)
+                .single());
     }
 
     static class RecordingGateway implements EngineGateway {

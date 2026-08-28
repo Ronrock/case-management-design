@@ -392,9 +392,16 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
     private static CaseEvent event(EngineObservation observation, CaseInstance caseInstance,
                                    SlaLifecyclePort.TerminalState rootTerminal) {
         String type = eventType(observation, rootTerminal);
+        Map<String, Object> data = safeMetadata(observation, ApplyStatus.APPLIED);
+        if (EventTypes.CASE_CANCELLED.equals(type)
+                && observation instanceof ProcessObservation process
+                && process.eventType() == ProcessObservation.EventType.TERMINATED) {
+            Object reason = process.attributes().get("cancellationReason");
+            data.put("reason", reason instanceof String text ? text : "");
+        }
         return new CaseEvent(CaseIds.newId(), observation.source(), type,
                 observation.caseId(), caseInstance.tenantId(), at(observation.engineOccurredAt()),
-                Map.copyOf(safeMetadata(observation, ApplyStatus.APPLIED)));
+                Map.copyOf(data));
     }
 
     private static String eventType(EngineObservation observation,

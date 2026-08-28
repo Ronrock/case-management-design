@@ -226,6 +226,20 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
     }
 
     @Test
+    void cancellingACaseWithoutARequestBodyPreservesANullDomainReason() {
+        Map<String, Object> created = deployAndCreateCase();
+        String id = (String) created.get("id");
+
+        ResponseEntity<Map> cancelled = alice().post().uri("/cases/{id}/cancel", id)
+                .header("If-Match", "\"0\"")
+                .retrieve().toEntity(Map.class);
+
+        assertThat(cancelled.getStatusCode().value()).isEqualTo(200);
+        assertThat(cancelled.getBody()).containsEntry("state", "CANCELLED")
+                .containsEntry("cancelReason", null);
+    }
+
+    @Test
     void aConsumerDiscoversCaseTypesAndTheirFormsWithoutKnowingAnyOfThemUpFront() {
         deployDefinition();
 

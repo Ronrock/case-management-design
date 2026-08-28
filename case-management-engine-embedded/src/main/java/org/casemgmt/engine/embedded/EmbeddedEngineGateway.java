@@ -25,6 +25,12 @@ public class EmbeddedEngineGateway implements EngineGateway {
     public static final String CASE_ID_VARIABLE = "caseId";
     /** Reserved high-entropy persisted start correlation; never accepted from caller variables. */
     public static final String LIFECYCLE_CORRELATION_VARIABLE = "__casemgmtLifecycleCorrelation";
+    /**
+     * Non-null delete reason used when the caller did not supply a business reason. Operaton
+     * distinguishes a normal end from a deletion solely through the presence of this value.
+     */
+    static final String CASE_MANAGEMENT_CANCELLATION_MARKER =
+            "case-management:cancelled-without-reason";
     private static final String PLAN_ITEM_VARIABLE = "planItemId";
 
     private final TaskService taskService;
@@ -192,7 +198,8 @@ public class EmbeddedEngineGateway implements EngineGateway {
     @Override
     public void cancelProcess(String processInstanceId, String reason) {
         try {
-            runtimeService.deleteProcessInstance(processInstanceId, reason);
+            runtimeService.deleteProcessInstance(processInstanceId,
+                    reason == null ? CASE_MANAGEMENT_CANCELLATION_MARKER : reason);
         } catch (ProcessEngineException e) {
             throw new EngineException("Could not cancel process " + processInstanceId, e);
         }
