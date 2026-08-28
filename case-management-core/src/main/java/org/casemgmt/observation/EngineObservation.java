@@ -64,7 +64,9 @@ public sealed interface EngineObservation permits ProcessObservation, UserTaskOb
             throw new IllegalArgumentException("observationVersion must be positive");
         }
         requireNonBlank(source, "source");
-        requireNonBlank(tenantId, "tenantId");
+        if (tenantId != null) {
+            requireNonBlank(tenantId, "tenantId");
+        }
         requireNonBlank(caseId, "caseId");
         requireNonBlank(processInstanceId, "processInstanceId");
         requireNonBlank(entityId, "entityId");

@@ -119,13 +119,22 @@ class ObservationFingerprintTest {
     }
 
     @Test
-    void rejectsBlankEnvelopeObservationIdsAndTenantIds() {
+    void allowsTenantlessObservationsButRejectsBlankTenantIds() {
         assertThrows(IllegalArgumentException.class, () -> new ProcessObservation(
                 " ", 1, "operaton:embedded", "tenant-a", "case-100", "process-100", "process-100", 7L,
                 ProcessObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT, Map.of()));
-        assertThrows(IllegalArgumentException.class, () -> new ProcessObservation(
-                "obs-process-tenant", 1, "operaton:embedded", null, "case-100", "process-100", "process-100", 7L,
-                ProcessObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT, Map.of()));
+        var tenantless = new ProcessObservation(
+                "obs-process-tenantless", 1, "operaton:embedded", null, "case-100", "process-100", "process-100", 7L,
+                ProcessObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT, Map.of());
+        var tenantlessRedelivery = new ProcessObservation(
+                "obs-process-tenantless-redelivery", 1, "operaton:embedded", null, "case-100", "process-100", "process-100", 7L,
+                ProcessObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT, Map.of());
+        var namedTenant = new ProcessObservation(
+                "obs-process-named-tenant", 1, "operaton:embedded", "tenant-a", "case-100", "process-100", "process-100", 7L,
+                ProcessObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT, Map.of());
+
+        assertEquals(tenantless.fingerprint(), tenantlessRedelivery.fingerprint());
+        assertNotEquals(tenantless.fingerprint(), namedTenant.fingerprint());
         assertThrows(IllegalArgumentException.class, () -> new ProcessObservation(
                 "obs-process-blank-tenant", 1, "operaton:embedded", " ", "case-100", "process-100", "process-100", 7L,
                 ProcessObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT, Map.of()));
