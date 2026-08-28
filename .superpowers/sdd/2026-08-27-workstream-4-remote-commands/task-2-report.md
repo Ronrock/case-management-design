@@ -323,3 +323,73 @@ Verification:
 - the focused Oracle repository and both restart suites were attempted with escalated Docker
   access. Docker Desktop again returned `Status 503: Docker Desktop is unable to start` before the
   Testcontainers/Oracle startup gate, so the new Oracle test methods remain compile-verified only.
+
+## Review hardening round 3
+
+Commit: `fix: separate command migration provenance`
+
+The final hash is recorded in the handoff. This round separates the immutable PoC migration
+baseline from the command's current policy state, removes the database-package hashing dependency,
+and adds strict final-state deployment gates.
+
+### Immutable migration baseline and evolving current state
+
+- Migrated rows now retain dedicated raw attempts, created time, reconstructed old update time,
+  baseline decision time, and a baseline-active marker alongside the existing raw payload, error,
+  claim token/time, and original status. Repository-owned transitions clear only the active marker;
+  every raw field and deterministic legacy tenant/operation/idempotency/target binding remains
+  immutable.
+- An active baseline must still be the exact version-zero migration decision with no action
+  history. Once the marker is cleared, rehydration requires a positive repository version and
+  validates the current decision through the normal per-status tuple rules while continuing to
+  compare every immutable legacy field. A forged version alone cannot turn an untouched baseline
+  into an evolved command.
+- Oracle tests evolve old `PENDING` and `RETRYING` rows through claim and transport outcome, and an
+  old `CLAIMED` row through reconciliation confirmation. They verify the current decisions can
+  change without altering raw payload, attempts, or creation evidence. Forged fixtures cover raw
+  payload/error/attempt/time/claim fields, baseline decision time, and deterministic bindings for
+  all five old statuses.
+- The current-state validator now has an explicit matrix for created/decided/updated ordering,
+  lease ownership, dispatch timestamp, terminal timestamp, diagnostic, pending, intent JSON, and
+  confirmation/action evidence tuples. A parameterized Oracle test builds every native status and
+  proves timestamp corruption is rejected for each one.
+
+### Full CLOB digest without Oracle package grants
+
+- The earlier `DBMS_CRYPTO` approach is superseded. A Liquibase Java custom change streams the
+  complete retained CLOB through UTF-8 SHA-256 and writes the lower-case digest. It needs only the
+  application's ordinary table privileges and does not depend on a `SYS.DBMS_CRYPTO` execute grant.
+- The unit proof hashes a Unicode character stream well beyond 32 KiB and compares it with an
+  independent Java SHA-256 calculation. The Oracle migration test retains its over-32-KiB CLOB
+  fixture and compares the persisted digest with the same full-content Java policy.
+
+### Strict final-state migration gates
+
+- Prefix guards remain restart-tolerant while Oracle DDL may be partially applied. Final
+  `runAlways` guards now require the complete production command/action and Workstream 3
+  observation structures on every subsequent deployment.
+- The command gate requires the exact final column counts/signatures, enabled and validated checks
+  and FK, and all eight valid/visible indexes. The observation gate requires the full ledger
+  column set, final 128-character process/engine definition fields, enabled and validated final
+  checks, and all five valid/visible indexes. The preceding `runAlways` structural guards verify
+  exact constraint definitions and exact index ownership, uniqueness, expressions, order, and
+  column counts.
+- Full-apply mutation tests remove or disable production constraints/indexes and revert observation
+  status/width/index structures; rerunning Liquibase must halt rather than silently record success.
+
+### Round-3 verification
+
+- strict RED: static changelog tests first failed because the final command/observation guards and
+  streaming digest change did not exist; the digest unit test initially failed compilation because
+  the custom change class did not exist.
+- `./mvnw -pl case-management-core -Dtest=AppliedObservationChangelogStaticValidationTest,Ws2ChangelogStaticValidationTest,JsonCodecCanonicalizationTest,LegacyMigrationBoundaryTest,EngineCommandPayloadDigestBackfillTest,EngineCommandPolicyTest,EngineCommandDurableStateTest,EngineCommandLegacyMigrationTest,EngineCommandNormalizedActionLedgerTest,ExactStartOutboxTest test`
+  — 1,430 tests passed; zero failures/errors/skips.
+- `./mvnw -pl case-management-spring-boot-starter -am -DskipTests compile` — all six selected and
+  reactor-required modules compiled successfully.
+- `./mvnw -pl case-management-core -DskipTests test-compile` — all 96 core test sources compiled.
+- `git diff --check` — clean.
+- The focused Oracle command for `EngineCommandMigrationRestartIntegrationTest`,
+  `EngineCommandRepositoryProductionTest`, and `AppliedObservationMigrationRestartIntegrationTest`
+  was attempted with escalated Docker access on 2026-08-29. Docker Desktop returned HTTP 503
+  before Testcontainers could start Oracle, so the new live migration/evolution/mutation methods
+  remain compile-verified but could not execute in this environment.

@@ -58,7 +58,8 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
             "cm-engine-observation-hardening-task-process-index",
             "cm-engine-observation-channel-engine-id",
             "cm-engine-observation-channel-child-definition",
-            "cm-engine-observation-channel-engine-index");
+            "cm-engine-observation-channel-engine-index",
+            "cm-engine-observation-final-state-guard");
 
     @BeforeAll
     static void captureOracleUrl() throws Exception {
@@ -111,6 +112,19 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                 .hasRootCauseMessage(malformedState.expectedFailureMessage());
         assertThat(appliedChangeSets(scenarioJdbc))
                 .doesNotContain(malformedState.guardedChangeSet());
+    }
+
+    @ParameterizedTest(name = "final observation guard rejects post-apply drift: {0}")
+    @EnumSource(FinalMutation.class)
+    void finalObservationGuardRejectsPostApplyDrift(FinalMutation mutation) throws Exception {
+        recreateSchema();
+        DataSource scenario = new DriverManagerDataSource(
+                jdbcUrl, SCHEMA, SCHEMA_PASSWORD);
+        migrate(scenario);
+        mutation.apply(JdbcClient.create(scenario));
+
+        assertThatThrownBy(() -> migrate(scenario))
+                .hasRootCauseMessage("Engine observation final structure is incompatible");
     }
 
     private static void recreateInitialTable(DataSource scenarioDataSource,
@@ -436,5 +450,33 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
 
         String guardedChangeSet() { return guardedChangeSet; }
         String expectedFailureMessage() { return expectedFailureMessage; }
+    }
+
+    private enum FinalMutation {
+        REVERTED_OLD_STATUS {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS")
+                        .update();
+                jdbc.sql("ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS "
+                        + "CHECK (STATUS_ IN ('CLAIMED','APPLIED','FAILED'))").update();
+            }
+        },
+        REVERTED_PLAN_PROCESS_WIDTH {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER TABLE CM_PLAN_ITEM MODIFY PROC_INST_ID_ VARCHAR2(64)").update();
+            }
+        },
+        REMOVED_PLAN_PROCESS_INDEX {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("DROP INDEX IX_CM_PI_PROC_INST").update();
+            }
+        },
+        REMOVED_TASK_PROCESS_INDEX {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("DROP INDEX IX_CM_TASK_PROC_INST").update();
+            }
+        };
+
+        abstract void apply(JdbcClient jdbc);
     }
 }

@@ -4,6 +4,8 @@ import org.casemgmt.OracleTestBase;
 import org.casemgmt.repo.EngineCommandRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -89,6 +91,21 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
             assertThat(leased.leaseExpiresAt()).isEqualTo(NOW.plusMinutes(5));
         });
         assertThat(second).isEmpty();
+    }
+
+    @ParameterizedTest(name = "rejects forged current timestamps for {0}")
+    @EnumSource(EngineCommandStatus.class)
+    void rejectsForgedCurrentTimestampTupleForEveryStatus(EngineCommandStatus status) {
+        var command = commandInStatus(status);
+        JdbcClient.create(dataSource()).sql("""
+                UPDATE CM_ENGINE_COMMAND
+                SET UPDATED_AT_=UPDATED_AT_ + INTERVAL '1' SECOND
+                WHERE ID_=:id
+                """).param("id", command.commandId()).update();
+
+        assertThatThrownBy(() -> repository.require("tenant-a", command.operationId()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("decision/update timestamps");
     }
 
     @Test
@@ -424,6 +441,69 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
         } catch (EngineCommandRepository.IdempotencyConflictException conflict) {
             return "CONFLICT";
         }
+    }
+
+    private EngineCommandRepository.StoredCommand commandInStatus(EngineCommandStatus status) {
+        String suffix = status.name().toLowerCase(java.util.Locale.ROOT);
+        String commandId = "matrix-" + suffix;
+        String operationId = "matrix-op-" + suffix;
+        repository.submit(request(commandId, operationId, "matrix-key-" + suffix));
+        if (status == EngineCommandStatus.PENDING) {
+            return repository.require("tenant-a", operationId);
+        }
+        if (status == EngineCommandStatus.CONFIRMED) {
+            var evidence = new CommandDispatchOutcome.ConfirmationEvidence(
+                    "tenant-a", operationId, commandId, EngineCommand.Type.COMPLETE_TASK,
+                    "task-a", "task-a", CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                    CommandDispatchOutcome.ConfirmationSource.OBSERVATION,
+                    "matrix-evidence-" + suffix);
+            var pending = repository.require("tenant-a", operationId);
+            return repository.applyOutcome("tenant-a", operationId, pending.version(),
+                    CommandDispatchOutcome.observation(evidence));
+        }
+        if (status == EngineCommandStatus.CANCELLED) {
+            var pending = repository.require("tenant-a", operationId);
+            var cancel = matrixAction(commandId, operationId,
+                    CommandDispatchOutcome.ActionType.CANCEL);
+            repository.applyOperatorOutcome("tenant-a", operationId, pending.version(),
+                    CommandDispatchOutcome.cancelUnsent(cancel));
+            return repository.require("tenant-a", operationId);
+        }
+
+        var lease = repository.claimDue("matrix-worker-" + suffix, 1,
+                NOW, Duration.ofMinutes(5)).getFirst();
+        if (status == EngineCommandStatus.DISPATCHING) {
+            return lease.command();
+        }
+        CommandDispatchOutcome outcome = switch (status) {
+            case RETRYABLE -> CommandDispatchOutcome.transportFailure(
+                    CommandDispatchOutcome.TransportFailure.PRE_SEND_ZERO_BYTES);
+            case AWAITING_CONFIRMATION, MANUAL_REVIEW -> CommandDispatchOutcome.http(
+                    202, CommandDispatchOutcome.Acceptance.ACCEPTED, null, null);
+            case FAILED -> CommandDispatchOutcome.http(
+                    400, CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED, null, null);
+            case CONFLICT -> CommandDispatchOutcome.http(
+                    409, CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED, null, null);
+            default -> throw new IllegalArgumentException("Unsupported matrix status " + status);
+        };
+        var committed = repository.commitLeaseOutcome(
+                "tenant-a", operationId, lease.leaseToken(), lease.command().version(), outcome);
+        if (status != EngineCommandStatus.MANUAL_REVIEW) {
+            return committed;
+        }
+        var review = matrixAction(commandId, operationId,
+                CommandDispatchOutcome.ActionType.MANUAL_REVIEW);
+        repository.applyOperatorOutcome("tenant-a", operationId, committed.version(),
+                CommandDispatchOutcome.manualReviewRequested(review));
+        return repository.require("tenant-a", operationId);
+    }
+
+    private static CommandDispatchOutcome.OperatorAction matrixAction(
+            String commandId, String operationId, CommandDispatchOutcome.ActionType type) {
+        return new CommandDispatchOutcome.OperatorAction(
+                "tenant-a", operationId, commandId, EngineCommand.Type.COMPLETE_TASK,
+                "task-a", type, "matrix-action-" + type.name().toLowerCase(
+                        java.util.Locale.ROOT), "matrix-audit", NOW.plusSeconds(10), false);
     }
 
     private static CommandDispatchOutcome.OperatorAction action(

@@ -26,6 +26,9 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.io.StringReader;
+import java.time.Clock;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -43,6 +46,7 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
             "cm-production-engine-command-columns-guard",
             "cm-production-engine-command-columns",
             "cm-production-engine-command-backfill",
+            "cm-production-engine-command-payload-digest-backfill",
             "cm-production-engine-command-required",
             "cm-production-engine-command-status-guard",
             "cm-production-engine-command-drop-poc-status",
@@ -63,7 +67,8 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
             "cm-engine-command-due-index",
             "cm-engine-command-lease-index",
             "cm-engine-command-case-status-index",
-            "cm-engine-command-review-index");
+            "cm-engine-command-review-index",
+            "cm-production-engine-command-final-state-guard");
     private static String jdbcUrl;
 
     @BeforeAll
@@ -99,6 +104,15 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                 "pending|PENDING|0|0|PENDING|old-pending|boom-pending|-|-|-|-|N",
                 "retrying|RETRYABLE|1|1|RETRYING|old-retrying|boom-retrying|-|-|-|-|N");
         assertThat(mappedRows(jdbc)).containsExactlyElementsOf(first);
+        assertThat(jdbc.sql("""
+                SELECT COUNT(*) FROM CM_ENGINE_COMMAND
+                WHERE RAW_LEGACY_ATTEMPTS_=ATTEMPTS_
+                  AND RAW_LEGACY_CREATED_AT_=CREATED_AT_
+                  AND RAW_LEGACY_UPDATED_AT_=CREATED_AT_
+                  AND MIGRATION_BASELINE_ACTIVE_=1
+                  AND MIGRATION_BASELINE_DECIDED_AT_=CASE WHEN ORIGINAL_STATUS_='DONE'
+                    THEN LEGACY_MIGRATED_AT_ ELSE CREATED_AT_ END
+                """).query(Integer.class).single()).isEqualTo(5);
         var rehydratedDone = new EngineCommandRepository(scenario)
                 .require("__legacy_unscoped__", "done");
         assertThat(rehydratedDone.state().committedDecision().status())
@@ -139,6 +153,52 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                 .containsEntry("raw", "é".repeat(40_000));
     }
 
+    @Test
+    void legacyBaselineRemainsImmutableWhileRepositoryOwnedDecisionsEvolve() throws Exception {
+        DataSource scenario = recreateBaseline();
+        JdbcClient jdbc = JdbcClient.create(scenario);
+        seedLegacyRows(jdbc);
+        migrate(scenario);
+        OffsetDateTime now = OffsetDateTime.parse("2030-01-01T12:00:00Z");
+        var repository = new EngineCommandRepository(scenario,
+                Clock.fixed(now.plusSeconds(10).toInstant(), ZoneOffset.UTC));
+
+        var leases = repository.claimDue("migration-worker", 2,
+                now, java.time.Duration.ofMinutes(5));
+        assertThat(leases).hasSize(2);
+        for (var lease : leases) {
+            repository.commitLeaseOutcome("__legacy_unscoped__",
+                    lease.command().operationId(), lease.leaseToken(), lease.command().version(),
+                    org.casemgmt.engine.CommandDispatchOutcome.transportFailure(
+                            org.casemgmt.engine.CommandDispatchOutcome.TransportFailure
+                                    .PRE_SEND_ZERO_BYTES));
+        }
+
+        var claimed = repository.require("__legacy_unscoped__", "claimed");
+        var confirmation = new org.casemgmt.engine.CommandDispatchOutcome.ConfirmationEvidence(
+                "__legacy_unscoped__", "claimed", "claimed",
+                org.casemgmt.engine.EngineCommand.Type.COMPLETE_TASK, "case-a", "case-a",
+                org.casemgmt.engine.CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                org.casemgmt.engine.CommandDispatchOutcome.ConfirmationSource.RECONCILIATION,
+                "reconcile-claimed");
+        repository.applyOutcome("__legacy_unscoped__", "claimed", claimed.version(),
+                org.casemgmt.engine.CommandDispatchOutcome.reconciliationConfirmed(confirmation));
+
+        assertThat(repository.require("__legacy_unscoped__", "pending").state()
+                .committedDecision().status()).isEqualTo(EngineCommandStatus.RETRYABLE);
+        assertThat(repository.require("__legacy_unscoped__", "retrying").state()
+                .committedDecision().status()).isEqualTo(EngineCommandStatus.RETRYABLE);
+        assertThat(repository.require("__legacy_unscoped__", "claimed").state()
+                .committedDecision().status()).isEqualTo(EngineCommandStatus.CONFIRMED);
+        assertThat(jdbc.sql("""
+                SELECT COUNT(*) FROM CM_ENGINE_COMMAND
+                WHERE ORIGINAL_STATUS_ IS NOT NULL AND MIGRATION_BASELINE_ACTIVE_=0
+                  AND DBMS_LOB.COMPARE(RAW_LEGACY_PAYLOAD_,PAYLOAD_JSON_)=0
+                  AND RAW_LEGACY_ATTEMPTS_=ATTEMPTS_
+                  AND RAW_LEGACY_CREATED_AT_=CREATED_AT_
+                """).query(Integer.class).single()).isEqualTo(3);
+    }
+
     @ParameterizedTest(name = "rejects forged historical tuple: {0}")
     @MethodSource("forgedHistoricalTuples")
     void rejectsForgedHistoricalTupleForEveryLegacyStatus(
@@ -157,6 +217,19 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         return Stream.of(
                 Arguments.of("pending raw error", "pending",
                         "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_ERROR_='other' WHERE ID_='pending'"),
+                Arguments.of("pending raw attempts", "pending",
+                        "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_ATTEMPTS_=1 WHERE ID_='pending'"),
+                Arguments.of("pending raw created time", "pending",
+                        "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_CREATED_AT_="
+                                + "RAW_LEGACY_CREATED_AT_ + INTERVAL '1' SECOND "
+                                + "WHERE ID_='pending'"),
+                Arguments.of("pending raw updated time", "pending",
+                        "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_UPDATED_AT_="
+                                + "RAW_LEGACY_UPDATED_AT_ + INTERVAL '1' SECOND "
+                                + "WHERE ID_='pending'"),
+                Arguments.of("pending raw payload", "pending",
+                        "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_PAYLOAD_='{}' "
+                                + "WHERE ID_='pending'"),
                 Arguments.of("pending claim tuple", "pending",
                         "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_CLAIM_TOKEN_='forged', "
                                 + "RAW_LEGACY_CLAIMED_AT_=SYSTIMESTAMP WHERE ID_='pending'"),
@@ -174,11 +247,31 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                                 + "WHERE ID_='dead'"),
                 Arguments.of("historical decision time", "pending",
                         "UPDATE CM_ENGINE_COMMAND SET DECIDED_AT_=DECIDED_AT_ + INTERVAL '1' SECOND "
-                                + "WHERE ID_='pending'"));
+                                + "WHERE ID_='pending'"),
+                Arguments.of("retrying update time", "retrying",
+                        "UPDATE CM_ENGINE_COMMAND SET UPDATED_AT_=UPDATED_AT_ + INTERVAL '1' SECOND "
+                                + "WHERE ID_='retrying'"),
+                Arguments.of("claimed baseline decision time", "claimed",
+                        "UPDATE CM_ENGINE_COMMAND SET MIGRATION_BASELINE_DECIDED_AT_="
+                                + "MIGRATION_BASELINE_DECIDED_AT_ + INTERVAL '1' SECOND "
+                                + "WHERE ID_='claimed'"),
+                Arguments.of("done confirmation time", "done",
+                        "UPDATE CM_ENGINE_COMMAND SET CONFIRMED_AT_=CONFIRMED_AT_ + INTERVAL '1' SECOND "
+                                + "WHERE ID_='done'"),
+                Arguments.of("pending deterministic binding", "pending",
+                        "UPDATE CM_ENGINE_COMMAND SET IDEMPOTENCY_KEY_='forged' WHERE ID_='pending'"),
+                Arguments.of("retrying deterministic binding", "retrying",
+                        "UPDATE CM_ENGINE_COMMAND SET IDEMPOTENCY_KEY_='forged' WHERE ID_='retrying'"),
+                Arguments.of("claimed deterministic binding", "claimed",
+                        "UPDATE CM_ENGINE_COMMAND SET IDEMPOTENCY_KEY_='forged' WHERE ID_='claimed'"),
+                Arguments.of("done deterministic binding", "done",
+                        "UPDATE CM_ENGINE_COMMAND SET IDEMPOTENCY_KEY_='forged' WHERE ID_='done'"),
+                Arguments.of("dead deterministic binding", "dead",
+                        "UPDATE CM_ENGINE_COMMAND SET IDEMPOTENCY_KEY_='forged' WHERE ID_='dead'"));
     }
 
     @ParameterizedTest(name = "resumes after {0} production changesets")
-    @ValueSource(ints = {0, 1, 2, 3, 6, 9, 13, 18, 24})
+    @ValueSource(ints = {0, 1, 2, 3, 4, 7, 10, 14, 19, 25, 26})
     void resumesAndRerunsAfterEveryRepresentativeOracleDdlPrefix(int prefix) throws Exception {
         DataSource scenario = recreateBaseline();
         updateNext(scenario, prefix);
@@ -202,6 +295,17 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         assertThatThrownBy(() -> migrate(scenario))
                 .hasStackTraceContaining("incompatible");
         assertThat(appliedChangeSets(jdbc)).doesNotContain(malformed.guard);
+    }
+
+    @ParameterizedTest(name = "final production guard rejects post-apply drift: {0}")
+    @EnumSource(FinalMutation.class)
+    void finalProductionGuardRejectsPostApplyDrift(FinalMutation mutation) throws Exception {
+        DataSource scenario = recreateBaseline();
+        migrate(scenario);
+        mutation.apply(JdbcClient.create(scenario));
+
+        assertThatThrownBy(() -> migrate(scenario))
+                .hasStackTraceContaining("incompatible");
     }
 
     private static void installMalformed(JdbcClient jdbc, MalformedObject malformed) {
@@ -238,48 +342,48 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                 "cm-production-engine-command-columns-guard"),
         STATUS_CONSTRAINT(0, null, "cm-production-engine-command-status-guard"),
         ACTION_TABLE(0, null, "cm-engine-command-action-table-guard"),
-        ACTION_DEFAULT(10, null, "cm-production-engine-command-invariants-guard"),
-        COUNTER_CONSTRAINT_DISABLED(12, null,
+        ACTION_DEFAULT(11, null, "cm-production-engine-command-invariants-guard"),
+        COUNTER_CONSTRAINT_DISABLED(13, null,
                 "cm-production-engine-command-invariants-guard"),
-        COUNTER_CONSTRAINT_WRONG_TABLE(10, null,
+        COUNTER_CONSTRAINT_WRONG_TABLE(11, null,
                 "cm-production-engine-command-invariants-guard"),
-        COUNTER_CONSTRAINT(10, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
+        COUNTER_CONSTRAINT(11, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
                 + "CK_CM_ENGCMD_COUNTERS CHECK (TOTAL_DISPATCH_ATTEMPTS_ >= 0)",
                 "cm-production-engine-command-invariants-guard"),
-        LEASE_CONSTRAINT(10, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
+        LEASE_CONSTRAINT(11, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
                 + "CK_CM_ENGCMD_LEASE CHECK (LEASE_TOKEN_ IS NULL)",
                 "cm-production-engine-command-invariants-guard"),
-        ACTION_CONSTRAINT(10, "ALTER TABLE CM_ENGINE_COMMAND_ACTION ADD CONSTRAINT "
+        ACTION_CONSTRAINT(11, "ALTER TABLE CM_ENGINE_COMMAND_ACTION ADD CONSTRAINT "
                 + "CK_CM_ECA_INVARIANTS CHECK (SEQUENCE_ > 0)",
                 "cm-production-engine-command-invariants-guard"),
-        ACTION_FK(10, "ALTER TABLE CM_ENGINE_COMMAND_ACTION ADD CONSTRAINT FK_CM_ECA_COMMAND "
+        ACTION_FK(11, "ALTER TABLE CM_ENGINE_COMMAND_ACTION ADD CONSTRAINT FK_CM_ECA_COMMAND "
                 + "FOREIGN KEY (OPERATION_ID_) REFERENCES CM_ENGINE_COMMAND(ID_)",
                 "cm-production-engine-command-objects-guard"),
-        ACTION_ID_INDEX(10, "CREATE UNIQUE INDEX UQ_CM_ECA_ACTION "
+        ACTION_ID_INDEX(11, "CREATE UNIQUE INDEX UQ_CM_ECA_ACTION "
                 + "ON CM_ENGINE_COMMAND_ACTION(ACTION_ID_)",
                 "cm-production-engine-command-objects-guard"),
-        ACTION_SEQUENCE_INDEX(10, "CREATE UNIQUE INDEX UQ_CM_ECA_SEQUENCE "
+        ACTION_SEQUENCE_INDEX(11, "CREATE UNIQUE INDEX UQ_CM_ECA_SEQUENCE "
                 + "ON CM_ENGINE_COMMAND_ACTION(SEQUENCE_)",
                 "cm-production-engine-command-objects-guard"),
-        OPERATION_INDEX(10, "CREATE INDEX UQ_CM_ENGCMD_OPERATION "
+        OPERATION_INDEX(11, "CREATE INDEX UQ_CM_ENGCMD_OPERATION "
                 + "ON CM_ENGINE_COMMAND(TENANT_ID_, OPERATION_ID_)",
                 "cm-production-engine-command-objects-guard"),
-        OPERATION_INDEX_TRAILING(10, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_OPERATION "
+        OPERATION_INDEX_TRAILING(11, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_OPERATION "
                 + "ON CM_ENGINE_COMMAND(CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END, "
                 + "TENANT_ID_, OPERATION_ID_, ID_)",
                 "cm-production-engine-command-objects-guard"),
-        IDEMPOTENCY_INDEX(10, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_IDEMPOTENCY "
+        IDEMPOTENCY_INDEX(11, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_IDEMPOTENCY "
                 + "ON CM_ENGINE_COMMAND(TENANT_ID_, OPERATION_ID_)",
                 "cm-production-engine-command-objects-guard"),
-        DUE_INDEX(10, "CREATE INDEX IX_CM_ENGCMD_PROD_DUE ON CM_ENGINE_COMMAND(STATUS_)",
+        DUE_INDEX(11, "CREATE INDEX IX_CM_ENGCMD_PROD_DUE ON CM_ENGINE_COMMAND(STATUS_)",
                 "cm-production-engine-command-objects-guard"),
-        DUE_INDEX_UNUSABLE(21, null, "cm-production-engine-command-objects-guard"),
-        LEASE_INDEX(10, "CREATE INDEX IX_CM_ENGCMD_LEASE ON CM_ENGINE_COMMAND(LEASE_EXPIRES_AT_)",
+        DUE_INDEX_UNUSABLE(22, null, "cm-production-engine-command-objects-guard"),
+        LEASE_INDEX(11, "CREATE INDEX IX_CM_ENGCMD_LEASE ON CM_ENGINE_COMMAND(LEASE_EXPIRES_AT_)",
                 "cm-production-engine-command-objects-guard"),
-        CASE_STATUS_INDEX(10, "CREATE INDEX IX_CM_ENGCMD_CASE_STATUS "
+        CASE_STATUS_INDEX(11, "CREATE INDEX IX_CM_ENGCMD_CASE_STATUS "
                 + "ON CM_ENGINE_COMMAND(CASE_ID_, STATUS_)",
                 "cm-production-engine-command-objects-guard"),
-        REVIEW_INDEX(10, "CREATE INDEX IX_CM_ENGCMD_REVIEW ON CM_ENGINE_COMMAND(UPDATED_AT_)",
+        REVIEW_INDEX(11, "CREATE INDEX IX_CM_ENGCMD_REVIEW ON CM_ENGINE_COMMAND(UPDATED_AT_)",
                 "cm-production-engine-command-objects-guard");
 
         private final int prefix;
@@ -291,6 +395,28 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
             this.ddl = ddl;
             this.guard = guard;
         }
+    }
+
+    private enum FinalMutation {
+        REMOVED_COUNTER_CONSTRAINT {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER TABLE CM_ENGINE_COMMAND DROP CONSTRAINT CK_CM_ENGCMD_COUNTERS")
+                        .update();
+            }
+        },
+        DISABLED_LEASE_CONSTRAINT {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER TABLE CM_ENGINE_COMMAND DISABLE NOVALIDATE CONSTRAINT CK_CM_ENGCMD_LEASE")
+                        .update();
+            }
+        },
+        REMOVED_DUE_INDEX {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("DROP INDEX IX_CM_ENGCMD_PROD_DUE").update();
+            }
+        };
+
+        abstract void apply(JdbcClient jdbc);
     }
 
     private static DataSource recreateBaseline() throws Exception {
@@ -362,9 +488,11 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                     'PAYLOAD_DIGEST_','LEASE_TOKEN_','LEASE_OWNER_','LEASE_EXPIRES_AT_',
                     'TOTAL_DISPATCH_ATTEMPTS_','AUTO_ATTEMPTS_','BUDGET_EPOCH_','ROW_VERSION_',
                     'ACTION_COUNT_','ACTION_HIGH_WATER_','LEGACY_STATUS_','RAW_LEGACY_PAYLOAD_',
-                    'RAW_LEGACY_CLAIM_TOKEN_','RAW_LEGACY_CLAIMED_AT_')
+                    'RAW_LEGACY_CLAIM_TOKEN_','RAW_LEGACY_CLAIMED_AT_',
+                    'RAW_LEGACY_ATTEMPTS_','RAW_LEGACY_CREATED_AT_','RAW_LEGACY_UPDATED_AT_',
+                    'MIGRATION_BASELINE_DECIDED_AT_','MIGRATION_BASELINE_ACTIVE_')
                 ORDER BY COLUMN_NAME
-                """).query(String.class).list()).hasSize(17);
+                """).query(String.class).list()).hasSize(22);
         assertThat(jdbc.sql("""
                 SELECT INDEX_NAME FROM USER_INDEXES WHERE INDEX_NAME IN
                   ('UQ_CM_ENGCMD_OPERATION','UQ_CM_ENGCMD_IDEMPOTENCY','IX_CM_ENGCMD_PROD_DUE',

@@ -34,7 +34,9 @@ public class ProductionEngineCommandStore {
             LEGACY_MIGRATION_REF_, LEGACY_MIGRATED_AT_, LEGACY_FAILURE_COUNT_,
             LEASE_TOKEN_, LEASE_OWNER_, LEASE_EXPIRES_AT_, DISPATCHED_AT_, CONFIRMED_AT_,
             FAILED_AT_, RAW_LEGACY_PAYLOAD_, RAW_LEGACY_ERROR_, RAW_LEGACY_CLAIM_TOKEN_,
-            RAW_LEGACY_CLAIMED_AT_, ORIGINAL_STATUS_, ATTEMPTS_, LAST_ERROR_, CLAIM_TOKEN_,
+            RAW_LEGACY_CLAIMED_AT_, RAW_LEGACY_ATTEMPTS_, RAW_LEGACY_CREATED_AT_,
+            RAW_LEGACY_UPDATED_AT_, MIGRATION_BASELINE_DECIDED_AT_,
+            MIGRATION_BASELINE_ACTIVE_, ORIGINAL_STATUS_, ATTEMPTS_, LAST_ERROR_, CLAIM_TOKEN_,
             CLAIMED_AT_, CREATED_AT_, UPDATED_AT_""";
 
     /** Compatibility lease used until Task 3 passes explicit lease ownership to the dispatcher. */
@@ -100,6 +102,8 @@ public class ProductionEngineCommandStore {
                     SAFE_SUMMARY_='Accepted response lacked matching confirmation evidence',
                     LEASE_TOKEN_=NULL, LEASE_OWNER_=NULL, LEASE_EXPIRES_AT_=NULL,
                     UPDATED_AT_=SYSTIMESTAMP, DECIDED_AT_=SYSTIMESTAMP,
+                    MIGRATION_BASELINE_ACTIVE_=CASE
+                      WHEN ORIGINAL_STATUS_ IS NULL THEN NULL ELSE 0 END,
                     ROW_VERSION_=ROW_VERSION_+1
                 WHERE ID_ = :id AND STATUS_='DISPATCHING'""")
             .param("id", id).update();
@@ -109,11 +113,13 @@ public class ProductionEngineCommandStore {
     public void markRetry(String id, String error, OffsetDateTime nextAttempt) {
         jdbc.sql("""
                 UPDATE CM_ENGINE_COMMAND SET STATUS_ = 'RETRYABLE',
-                    LAST_ERROR_ = NULL, NEXT_ATTEMPT_AT_ = :next,
+                    NEXT_ATTEMPT_AT_ = :next,
                     SAFE_ERROR_CODE_='transport.not_sent',
                     SAFE_SUMMARY_='Remote request sent zero bytes',
                     LEASE_TOKEN_=NULL, LEASE_OWNER_=NULL, LEASE_EXPIRES_AT_=NULL,
                     UPDATED_AT_=SYSTIMESTAMP, DECIDED_AT_=SYSTIMESTAMP,
+                    MIGRATION_BASELINE_ACTIVE_=CASE
+                      WHEN ORIGINAL_STATUS_ IS NULL THEN NULL ELSE 0 END,
                     ROW_VERSION_=ROW_VERSION_+1
                 WHERE ID_ = :id AND STATUS_='DISPATCHING'""")
             .param("next", nextAttempt).param("id", id).update();
@@ -123,10 +129,12 @@ public class ProductionEngineCommandStore {
     public void markDead(String id, String error) {
         jdbc.sql("""
                 UPDATE CM_ENGINE_COMMAND SET STATUS_ = 'FAILED',
-                    LAST_ERROR_ = NULL, SAFE_ERROR_CODE_='attempts.exhausted',
+                    SAFE_ERROR_CODE_='attempts.exhausted',
                     SAFE_SUMMARY_='Remote command exhausted automatic dispatch attempts',
                     LEASE_TOKEN_=NULL, LEASE_OWNER_=NULL, LEASE_EXPIRES_AT_=NULL,
                     FAILED_AT_=SYSTIMESTAMP, UPDATED_AT_=SYSTIMESTAMP, DECIDED_AT_=SYSTIMESTAMP,
+                    MIGRATION_BASELINE_ACTIVE_=CASE
+                      WHEN ORIGINAL_STATUS_ IS NULL THEN NULL ELSE 0 END,
                     ROW_VERSION_=ROW_VERSION_+1
                 WHERE ID_ = :id AND STATUS_='DISPATCHING'""")
             .param("id", id).update();
@@ -601,6 +609,8 @@ public class ProductionEngineCommandStore {
                   LEASE_EXPIRES_AT_=:leaseExpires,
                   DISPATCHED_AT_=CASE WHEN :startingDispatch=1 THEN :decidedAt
                                       ELSE DISPATCHED_AT_ END,
+                  MIGRATION_BASELINE_ACTIVE_=CASE
+                    WHEN ORIGINAL_STATUS_ IS NULL THEN NULL ELSE 0 END,
                   ROW_VERSION_=ROW_VERSION_+1
                 WHERE ID_=:commandId AND ROW_VERSION_=:expectedVersion
                   AND STATUS_=:expectedStatus
@@ -767,6 +777,20 @@ public class ProductionEngineCommandStore {
     private static void validatePersistedTuple(
             java.sql.ResultSet rs, EngineCommandPolicy.Decision decision)
             throws java.sql.SQLException {
+        OffsetDateTime createdAt = Objects.requireNonNull(
+                rs.getObject("CREATED_AT_", OffsetDateTime.class), "persisted createdAt");
+        OffsetDateTime updatedAt = Objects.requireNonNull(
+                rs.getObject("UPDATED_AT_", OffsetDateTime.class), "persisted updatedAt");
+        OffsetDateTime decidedAt = decision.decidedAt();
+        boolean untouchedLegacyDone = "DONE".equals(rs.getString("ORIGINAL_STATUS_"))
+                && Integer.valueOf(1).equals(
+                        rs.getObject("MIGRATION_BASELINE_ACTIVE_", Integer.class));
+        if (decidedAt.isBefore(createdAt)
+                || !updatedAt.equals(decidedAt)
+                && !(untouchedLegacyDone && updatedAt.equals(createdAt))) {
+            throw new IllegalArgumentException(
+                    "Persisted decision/update timestamps do not match repository semantics");
+        }
         boolean dispatching = decision.status() == EngineCommandStatus.DISPATCHING;
         boolean completeLease = rs.getString("LEASE_TOKEN_") != null
                 && rs.getString("LEASE_OWNER_") != null
@@ -798,6 +822,45 @@ public class ProductionEngineCommandStore {
                 || patch != null && !patch.equals(JsonCodec.canonicalJson(patch))) {
             throw new IllegalArgumentException("Persisted intent JSON is not canonical");
         }
+        Integer rawAttempts = rs.getObject("RAW_LEGACY_ATTEMPTS_", Integer.class);
+        long migrationAttempts = rawAttempts == null ? 0L : rawAttempts
+                + ("CLAIMED".equals(rs.getString("ORIGINAL_STATUS_"))
+                || "DONE".equals(rs.getString("ORIGINAL_STATUS_")) ? 1L : 0L);
+        if (decision.totalDispatchAttempts() < migrationAttempts) {
+            throw new IllegalArgumentException(
+                    "Current dispatch attempts precede the immutable migration baseline");
+        }
+        OffsetDateTime dispatchedAt = rs.getObject("DISPATCHED_AT_", OffsetDateTime.class);
+        boolean postMigrationDispatch = decision.totalDispatchAttempts() > migrationAttempts;
+        boolean dispatchTimeExact = dispatching
+                ? postMigrationDispatch && Objects.equals(dispatchedAt, decidedAt)
+                : postMigrationDispatch == (dispatchedAt != null);
+        if (!dispatchTimeExact || dispatchedAt != null
+                && (dispatchedAt.isBefore(createdAt) || dispatchedAt.isAfter(decidedAt))) {
+            throw new IllegalArgumentException(
+                    "Persisted dispatch timestamp does not match attempt history");
+        }
+        boolean initialLegacy = rs.getString("ORIGINAL_STATUS_") != null
+                && Integer.valueOf(1).equals(
+                        rs.getObject("MIGRATION_BASELINE_ACTIVE_", Integer.class));
+        boolean diagnosticStatus = switch (decision.status()) {
+            case RETRYABLE, AWAITING_CONFIRMATION, FAILED, CONFLICT, MANUAL_REVIEW -> true;
+            default -> false;
+        };
+        if (!initialLegacy && diagnosticStatus != (decision.errorCode() != null)) {
+            throw new IllegalArgumentException(
+                    "Persisted diagnostic tuple does not match command status");
+        }
+        if (!diagnosticStatus && decision.errorCode() != null) {
+            throw new IllegalArgumentException(
+                    "Persisted command status cannot retain diagnostics");
+        }
+        if (decision.status() == EngineCommandStatus.PENDING
+                && (decision.totalDispatchAttempts() != 0
+                || dispatchedAt != null || decision.actionLedgerSummary().actionCount() != 0)) {
+            throw new IllegalArgumentException(
+                    "Pending commands must remain undispatched and action-free");
+        }
     }
 
     private static void validateEvidenceShape(java.sql.ResultSet rs)
@@ -826,7 +889,12 @@ public class ProductionEngineCommandStore {
                 rs.getString("LEGACY_MIGRATION_REF_"), rs.getObject("LEGACY_MIGRATED_AT_"),
                 rs.getObject("LEGACY_FAILURE_COUNT_"), rs.getString("RAW_LEGACY_PAYLOAD_"),
                 rs.getString("RAW_LEGACY_ERROR_"), rs.getString("RAW_LEGACY_CLAIM_TOKEN_"),
-                rs.getObject("RAW_LEGACY_CLAIMED_AT_")};
+                rs.getObject("RAW_LEGACY_CLAIMED_AT_"),
+                rs.getObject("RAW_LEGACY_ATTEMPTS_"),
+                rs.getObject("RAW_LEGACY_CREATED_AT_"),
+                rs.getObject("RAW_LEGACY_UPDATED_AT_"),
+                rs.getObject("MIGRATION_BASELINE_DECIDED_AT_"),
+                rs.getObject("MIGRATION_BASELINE_ACTIVE_")};
         if (original == null) {
             if (countPresent(legacyFields) != 0 || rs.getInt("ATTEMPTS_") != 0
                     || rs.getString("LAST_ERROR_") != null
@@ -846,36 +914,72 @@ public class ProductionEngineCommandStore {
             case "DEAD" -> EngineCommandStatus.FAILED;
             default -> throw new IllegalArgumentException("Unknown retained legacy status");
         };
-        int oldAttempts = rs.getInt("ATTEMPTS_");
+        Integer oldAttemptsValue = rs.getObject("RAW_LEGACY_ATTEMPTS_", Integer.class);
+        if (oldAttemptsValue == null) {
+            throw new IllegalArgumentException("Persisted legacy attempts baseline is missing");
+        }
+        int oldAttempts = oldAttemptsValue;
         long expectedAttempts = oldAttempts
                 + (original.equals("CLAIMED") || original.equals("DONE") ? 1L : 0L);
-        boolean retryDue = rs.getObject("NEXT_ATTEMPT_AT_") != null;
         boolean claimed = original.equals("CLAIMED");
         boolean done = original.equals("DONE");
         OffsetDateTime createdAt = rs.getObject("CREATED_AT_", OffsetDateTime.class);
-        OffsetDateTime updatedAt = rs.getObject("UPDATED_AT_", OffsetDateTime.class);
+        OffsetDateTime rawCreatedAt = rs.getObject(
+                "RAW_LEGACY_CREATED_AT_", OffsetDateTime.class);
+        OffsetDateTime rawUpdatedAt = rs.getObject(
+                "RAW_LEGACY_UPDATED_AT_", OffsetDateTime.class);
         OffsetDateTime migratedAt = rs.getObject("LEGACY_MIGRATED_AT_", OffsetDateTime.class);
-        boolean exact = oldAttempts >= 0
-                && decision.status() == mapped
-                && decision.totalDispatchAttempts() == expectedAttempts
-                && decision.automaticAttemptsInBudget() == expectedAttempts
-                && retryDue == original.equals("RETRYING")
+        OffsetDateTime baselineDecidedAt = rs.getObject(
+                "MIGRATION_BASELINE_DECIDED_AT_", OffsetDateTime.class);
+        Integer baselineActive = rs.getObject("MIGRATION_BASELINE_ACTIVE_", Integer.class);
+        EngineCommand.Type type = EngineCommand.Type.valueOf(rs.getString("TYPE_"));
+        java.util.Map<String, Object> payload = JsonCodec.toMap(payloadJson);
+        String expectedTarget = legacyTarget(type, payload, rs.getString("CASE_ID_"));
+        boolean immutableBaseline = oldAttempts >= 0
                 && Objects.equals(payloadJson, rs.getString("RAW_LEGACY_PAYLOAD_"))
+                && rs.getInt("ATTEMPTS_") == oldAttempts
                 && Objects.equals(rs.getString("LAST_ERROR_"), rs.getString("RAW_LEGACY_ERROR_"))
+                && Objects.equals(createdAt, rawCreatedAt)
+                && Objects.equals(rawUpdatedAt, rawCreatedAt)
+                && Objects.equals(baselineDecidedAt, done ? migratedAt : rawCreatedAt)
+                && "__legacy_unscoped__".equals(rs.getString("TENANT_ID_"))
+                && rs.getString("ID_").equals(rs.getString("OPERATION_ID_"))
+                && ("legacy:" + rs.getString("ID_")).equals(rs.getString("IDEMPOTENCY_KEY_"))
+                && Objects.equals(expectedTarget, rs.getString("TARGET_IDENTITY_"))
+                && rs.getString("CORRELATION_JSON_") == null
+                && rs.getString("CANONICAL_PATCH_JSON_") == null
+                && rs.getObject("EXPECTED_CASE_VERSION_") == null
                 && rs.getString("CLAIM_TOKEN_") == null && rs.getObject("CLAIMED_AT_") == null
                 && (rs.getString("RAW_LEGACY_CLAIM_TOKEN_") != null) == claimed
                 && (rs.getObject("RAW_LEGACY_CLAIMED_AT_") != null) == claimed
-                && rs.getObject("DISPATCHED_AT_") == null
-                && Objects.equals(updatedAt, createdAt)
-                && Objects.equals(decision.decidedAt(), done ? migratedAt : createdAt)
                 && (rs.getString("LEGACY_ROW_ID_") != null) == done
                 && (rs.getString("LEGACY_STATUS_") != null) == done
                 && (rs.getString("LEGACY_MIGRATION_REF_") != null) == done
                 && (migratedAt != null) == done
-                && (rs.getObject("LEGACY_FAILURE_COUNT_") != null) == done;
-        if (!exact) {
+                && (rs.getObject("LEGACY_FAILURE_COUNT_") != null) == done
+                && (baselineActive != null && (baselineActive == 0 || baselineActive == 1));
+        if (!immutableBaseline) {
             throw new IllegalArgumentException(
                     "Persisted legacy command does not match its retained historical tuple");
+        }
+        if (baselineActive == 1) {
+            boolean exactInitial = rs.getLong("ROW_VERSION_") == 0
+                    && decision.actionLedgerSummary().actionCount() == 0
+                    && decision.status() == mapped
+                    && decision.totalDispatchAttempts() == expectedAttempts
+                    && decision.automaticAttemptsInBudget() == expectedAttempts
+                    && (rs.getObject("NEXT_ATTEMPT_AT_") != null)
+                        == original.equals("RETRYING")
+                    && rs.getObject("DISPATCHED_AT_") == null
+                    && Objects.equals(decision.decidedAt(), baselineDecidedAt);
+            if (!exactInitial) {
+                throw new IllegalArgumentException(
+                        "Untouched legacy command no longer matches its migration decision");
+            }
+        } else if (rs.getLong("ROW_VERSION_") <= 0 || done
+                || decision.totalDispatchAttempts() < expectedAttempts) {
+            throw new IllegalArgumentException(
+                    "Evolved legacy command lacks a coherent repository transition");
         }
     }
 
@@ -1159,16 +1263,21 @@ public class ProductionEngineCommandStore {
     }
 
     private static String legacyTarget(EngineCommand command) {
-        String key = switch (command.type()) {
+        return legacyTarget(command.type(), command.payload(), command.caseId());
+    }
+
+    private static String legacyTarget(
+            EngineCommand.Type type, java.util.Map<String, Object> payload, String caseId) {
+        String key = switch (type) {
             case CREATE_TASK -> "planItemId";
             case CLAIM_TASK, COMPLETE_TASK -> "engineTaskId";
-            case START_PROCESS -> command.payload().containsKey("processDefinitionId")
+            case START_PROCESS -> payload.containsKey("processDefinitionId")
                     ? "processDefinitionId" : "processDefinitionKey";
             case CANCEL_PROCESS -> "processInstanceId";
             case DEPLOY_ORCHESTRATION -> "definitionKey";
             case CORRELATE_MESSAGE -> "messageName";
         };
-        Object value = command.payload().get(key);
-        return value instanceof String text && !text.isBlank() ? text : command.caseId();
+        Object value = payload.get(key);
+        return value instanceof String text && !text.isBlank() ? text : caseId;
     }
 }

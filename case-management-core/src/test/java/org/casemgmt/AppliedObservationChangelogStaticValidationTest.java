@@ -99,9 +99,11 @@ class AppliedObservationChangelogStaticValidationTest {
             var changes = liquibase.getDatabaseChangeLog().getChangeSets();
             assertThat(changes).extracting(change -> change.getId())
                     .contains("cm-applied-engine-observation",
-                            "cm-engine-observation-hardening-kind")
+                            "cm-engine-observation-hardening-kind",
+                            "cm-engine-observation-final-state-guard")
                     .containsSubsequence(
                             "cm-engine-observation-channel-engine-index",
+                            "cm-engine-observation-final-state-guard",
                             "cm-production-engine-command-columns-guard");
 
             var appliedObservation = changes.stream()
@@ -182,6 +184,7 @@ class AppliedObservationChangelogStaticValidationTest {
                         "cm-production-engine-command-columns-guard",
                         "cm-production-engine-command-columns",
                         "cm-production-engine-command-backfill",
+                        "cm-production-engine-command-payload-digest-backfill",
                         "cm-production-engine-command-required",
                         "cm-production-engine-command-status-guard",
                         "cm-production-engine-command-drop-poc-status",
@@ -194,6 +197,8 @@ class AppliedObservationChangelogStaticValidationTest {
                         "cm-production-engine-command-lease-invariants",
                         "cm-engine-command-action-invariants",
                         "cm-production-engine-command-objects-guard");
+        assertThat(production).extracting(change -> change.getId())
+                .endsWith("cm-production-engine-command-final-state-guard");
         assertThat(production.stream().filter(change -> change.getId().endsWith("guard")))
                 .allSatisfy(guard -> {
                     assertThat(guard.getPreconditions()).isNotNull();
@@ -209,10 +214,12 @@ class AppliedObservationChangelogStaticValidationTest {
         assertThat(productionSql)
                 .contains("RAW_LEGACY_CLAIM_TOKEN_ = CLAIM_TOKEN_")
                 .contains("RAW_LEGACY_CLAIMED_AT_ = CLAIMED_AT_")
+                .contains("RAW_LEGACY_ATTEMPTS_ = ATTEMPTS_")
                 .contains("CLAIM_TOKEN_ = NULL")
                 .contains("CLAIMED_AT_ = NULL")
                 .contains("CM_ENGINE_COMMAND_ACTION")
-                .contains("UQ_CM_ENGCMD_IDEMPOTENCY");
+                .contains("UQ_CM_ENGCMD_IDEMPOTENCY")
+                .doesNotContain("DBMS_CRYPTO");
     }
 
     private static java.util.List<liquibase.changelog.ChangeSet> parsedChanges() throws Exception {

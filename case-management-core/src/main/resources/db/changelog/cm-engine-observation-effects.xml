@@ -6,7 +6,8 @@
 
   <!-- One durable row per tenant authority and deterministic engine fact. This is additive so
        a rolling application deployment can introduce lifecycle effects without rewriting history. -->
-  <changeSet id="cm-applied-engine-observation-structure-guard" author="casemgmt">
+  <changeSet id="cm-applied-engine-observation-structure-guard" author="casemgmt"
+             runAlways="true">
     <preConditions onFail="HALT" onError="HALT"
                    onFailMessage="CM_APPLIED_ENGINE_OBSERVATION has an incompatible structure">
       <or>
@@ -92,7 +93,8 @@
   <!-- Oracle's ordinary (TENANT_ID_, FINGERPRINT_) unique index accepts multiple NULL
        tenants. The first expression is always 0 or 1, so tenant-less rows are indexed and
        cannot collide with a named tenant; unlike a sentinel it cannot alias a legal tenant. -->
-  <changeSet id="cm-applied-engine-observation-authority-index-structure-guard" author="casemgmt">
+  <changeSet id="cm-applied-engine-observation-authority-index-structure-guard" author="casemgmt"
+             runAlways="true">
     <preConditions onFail="HALT" onError="HALT"
                    onFailMessage="UQ_CM_AEO_AUTH_FINGERPRINT has an incompatible structure">
       <or>
@@ -135,7 +137,8 @@
     </sql>
   </changeSet>
 
-  <changeSet id="cm-applied-engine-observation-status-index-structure-guard" author="casemgmt">
+  <changeSet id="cm-applied-engine-observation-status-index-structure-guard" author="casemgmt"
+             runAlways="true">
     <preConditions onFail="HALT" onError="HALT"
                    onFailMessage="IX_CM_AEO_STATUS has an incompatible structure">
       <or>
@@ -366,5 +369,57 @@
       <column name="PROCESS_INSTANCE_ID_"/><column name="OBSERVATION_KIND_"/>
       <column name="ENTITY_ID_"/><column name="STATUS_"/>
     </createIndex>
+  </changeSet>
+
+  <!-- Earlier guards accept absent objects so every Oracle auto-commit prefix can resume. This
+       final runAlways gate requires the complete post-migration contract on every later start. -->
+  <changeSet id="cm-engine-observation-final-state-guard" author="casemgmt" runAlways="true">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="Engine observation final structure is incompatible">
+      <and>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN
+            (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+             WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION')=19
+            AND EXISTS (SELECT 1 FROM USER_TAB_COLUMNS
+              WHERE TABLE_NAME='CM_PLAN_ITEM' AND COLUMN_NAME='PROC_INST_ID_'
+                AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128
+                AND NULLABLE='Y' AND DATA_DEFAULT IS NULL)
+            AND EXISTS (SELECT 1 FROM USER_TAB_COLUMNS
+              WHERE TABLE_NAME='CM_TASK' AND COLUMN_NAME='PROC_INST_ID_'
+                AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128
+                AND NULLABLE='Y' AND DATA_DEFAULT IS NULL)
+            AND EXISTS (SELECT 1 FROM USER_TAB_COLUMNS
+              WHERE TABLE_NAME='CM_LINKED_PROCESS' AND COLUMN_NAME='PROC_DEF_ID_'
+                AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128
+                AND NULLABLE='Y' AND DATA_DEFAULT IS NULL)
+            THEN 1 ELSE 0 END FROM DUAL
+        ]]></sqlCheck>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN COUNT(*)=1 AND
+            MAX(CASE WHEN TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION'
+              AND CONSTRAINT_TYPE='C' AND STATUS='ENABLED' AND VALIDATED='VALIDATED' THEN
+              REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"]','') END)=
+              'STATUS_IN(''CLAIMED'',''APPLIED'',''IGNORED_STALE'',''FAILED'')'
+            THEN 1 ELSE 0 END FROM USER_CONSTRAINTS
+          WHERE CONSTRAINT_NAME='CK_CM_AEO_STATUS'
+        ]]></sqlCheck>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN COUNT(*)=1 AND
+            MAX(CASE WHEN TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION'
+              AND CONSTRAINT_TYPE='C' AND STATUS='ENABLED' AND VALIDATED='VALIDATED' THEN
+              REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"''()]','') END)=
+              'STATUS_!=APPLIEDORAPPLIED_AT_ISNOTNULLANDSTATUS_!=IGNORED_STALEORIGNORED_AT_ISNOTNULLANDSTATUS_!=FAILEDORFAILED_AT_ISNOTNULL'
+            THEN 1 ELSE 0 END FROM USER_CONSTRAINTS
+          WHERE CONSTRAINT_NAME='CK_CM_AEO_STATUS_TS'
+        ]]></sqlCheck>
+        <sqlCheck expectedResult="5"><![CDATA[
+          SELECT COUNT(*) FROM USER_INDEXES WHERE STATUS='VALID' AND VISIBILITY='VISIBLE'
+            AND INDEX_NAME IN ('UQ_CM_AEO_AUTH_FINGERPRINT','IX_CM_AEO_STATUS',
+              'IX_CM_PI_PROC_INST','IX_CM_TASK_PROC_INST','IX_CM_AEO_ENGINE_ENTITY')
+        ]]></sqlCheck>
+      </and>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
   </changeSet>
 </databaseChangeLog>
