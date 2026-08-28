@@ -234,6 +234,24 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
     }
 
     @Test
+    void exactTerminalObservationReplayDoesNotAdvanceVersionOrRewriteDecision() {
+        repository.submit(request("command-a", "operation-a", "key-a"));
+        var pending = repository.require("tenant-a", "operation-a");
+        var evidence = new CommandDispatchOutcome.ConfirmationEvidence(
+                "tenant-a", "operation-a", "command-a", EngineCommand.Type.COMPLETE_TASK,
+                "task-a", "task-a", CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                CommandDispatchOutcome.ConfirmationSource.OBSERVATION, "evidence-a");
+        var confirmed = repository.applyOutcome("tenant-a", "operation-a", pending.version(),
+                CommandDispatchOutcome.observation(evidence));
+
+        var replay = repository.applyOutcome("tenant-a", "operation-a", confirmed.version(),
+                CommandDispatchOutcome.observation(evidence));
+
+        assertThat(replay).isEqualTo(confirmed);
+        assertThat(replay.version()).isEqualTo(confirmed.version());
+    }
+
+    @Test
     void actionInsertAndSummaryCasAreAtomicAndCollisionReloadIsExactOrConflict() {
         repository.submit(request("command-a", "operation-a", "key-a"));
         repository.claimDue("worker-a", 1, NOW, Duration.ofMinutes(5));

@@ -460,6 +460,51 @@
           AND REVIEW_REFERENCE_ IS NOT NULL)))]]></sql>
   </changeSet>
 
+  <changeSet id="cm-production-engine-command-normalize-retry-time" author="casemgmt">
+    <sql><![CDATA[
+      UPDATE CM_ENGINE_COMMAND
+      SET NEXT_ATTEMPT_AT_=DECIDED_AT_ + NUMTODSINTERVAL(1,'SECOND')
+      WHERE STATUS_='RETRYABLE'
+        AND (NEXT_ATTEMPT_AT_ IS NULL OR NEXT_ATTEMPT_AT_ <= DECIDED_AT_)
+        AND MIGRATION_BASELINE_ACTIVE_=1
+    ]]></sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-temporal-guard" author="casemgmt" runAlways="true">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="CK_CM_ENGCMD_TEMPORAL has an incompatible definition">
+      <sqlCheck expectedResult="1"><![CDATA[
+        SELECT CASE WHEN COUNT(*)=0 OR
+          MAX(CASE WHEN TABLE_NAME='CM_ENGINE_COMMAND' AND CONSTRAINT_TYPE='C'
+            AND STATUS='ENABLED' AND VALIDATED='VALIDATED' THEN
+            REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]\"]','') END)=
+            '((STATUS_=''RETRYABLE''ANDNEXT_ATTEMPT_AT_ISNOTNULLANDNEXT_ATTEMPT_AT_>DECIDED_AT_)OR(STATUS_<>''RETRYABLE''ANDNEXT_ATTEMPT_AT_ISNULL))AND((STATUS_=''DISPATCHING''ANDLEASE_EXPIRES_AT_>DECIDED_AT_)ORSTATUS_<>''DISPATCHING'')AND((STATUS_=''CONFIRMED''ANDCONFIRMED_AT_=DECIDED_AT_)OR(STATUS_<>''CONFIRMED''ANDCONFIRMED_AT_ISNULL))AND((STATUS_=''FAILED''ANDFAILED_AT_=DECIDED_AT_)OR(STATUS_<>''FAILED''ANDFAILED_AT_ISNULL))AND(DISPATCHED_AT_ISNULLOR(DISPATCHED_AT_>=CREATED_AT_ANDDISPATCHED_AT_<=DECIDED_AT_))AND(TOTAL_DISPATCH_ATTEMPTS_>0ORDISPATCHED_AT_ISNULL)'
+          THEN 1 ELSE 0 END FROM USER_CONSTRAINTS
+        WHERE CONSTRAINT_NAME='CK_CM_ENGCMD_TEMPORAL'
+      ]]></sqlCheck>
+    </preConditions>
+    <sql>BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-production-engine-command-temporal-invariants" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE CONSTRAINT_NAME='CK_CM_ENGCMD_TEMPORAL'</sqlCheck>
+    </preConditions>
+    <sql><![CDATA[ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT CK_CM_ENGCMD_TEMPORAL CHECK (
+      ((STATUS_='RETRYABLE' AND NEXT_ATTEMPT_AT_ IS NOT NULL AND NEXT_ATTEMPT_AT_ > DECIDED_AT_)
+        OR (STATUS_<>'RETRYABLE' AND NEXT_ATTEMPT_AT_ IS NULL))
+      AND ((STATUS_='DISPATCHING' AND LEASE_EXPIRES_AT_ > DECIDED_AT_)
+        OR STATUS_<>'DISPATCHING')
+      AND ((STATUS_='CONFIRMED' AND CONFIRMED_AT_=DECIDED_AT_)
+        OR (STATUS_<>'CONFIRMED' AND CONFIRMED_AT_ IS NULL))
+      AND ((STATUS_='FAILED' AND FAILED_AT_=DECIDED_AT_)
+        OR (STATUS_<>'FAILED' AND FAILED_AT_ IS NULL))
+      AND (DISPATCHED_AT_ IS NULL
+        OR (DISPATCHED_AT_ >= CREATED_AT_ AND DISPATCHED_AT_ <= DECIDED_AT_))
+      AND (TOTAL_DISPATCH_ATTEMPTS_ > 0 OR DISPATCHED_AT_ IS NULL))]]></sql>
+  </changeSet>
+
   <!-- One fail-closed gate validates every restart-sensitive named object before any
        existence-only create changeSet may be marked ran. Absent objects are valid prefixes;
        same-named objects are valid only with the exact ownership/order/uniqueness contract. -->
@@ -637,6 +682,9 @@
     <preConditions onFail="HALT" onError="HALT"
                    onFailMessage="CM_ENGINE_COMMAND final production structure is incompatible">
       <and>
+        <customPrecondition className="org.casemgmt.migration.OracleFinalSchemaPrecondition">
+          <param name="contract" value="production-command"/>
+        </customPrecondition>
         <sqlCheck expectedResult="1"><![CDATA[
           SELECT CASE WHEN
             (SELECT COUNT(*) FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_ENGINE_COMMAND')=61

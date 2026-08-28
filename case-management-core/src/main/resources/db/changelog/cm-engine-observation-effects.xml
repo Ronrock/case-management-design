@@ -377,6 +377,9 @@
     <preConditions onFail="HALT" onError="HALT"
                    onFailMessage="Engine observation final structure is incompatible">
       <and>
+        <customPrecondition className="org.casemgmt.migration.OracleFinalSchemaPrecondition">
+          <param name="contract" value="engine-observation"/>
+        </customPrecondition>
         <sqlCheck expectedResult="1"><![CDATA[
           SELECT CASE WHEN
             (SELECT COUNT(*) FROM USER_TAB_COLUMNS

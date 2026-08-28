@@ -453,6 +453,18 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
     }
 
     private enum FinalMutation {
+        CHANGED_INITIAL_COLUMN {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION MODIFY SOURCE_ VARCHAR2(129)")
+                        .update();
+            }
+        },
+        CHANGED_LATER_COLUMN {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION MODIFY ENGINE_ID_ VARCHAR2(129)")
+                        .update();
+            }
+        },
         REVERTED_OLD_STATUS {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS")
@@ -474,6 +486,25 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
         REMOVED_TASK_PROCESS_INDEX {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("DROP INDEX IX_CM_TASK_PROC_INST").update();
+            }
+        },
+        REPLACED_AUTHORITY_INDEX {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("DROP INDEX UQ_CM_AEO_AUTH_FINGERPRINT").update();
+                jdbc.sql("CREATE UNIQUE INDEX UQ_CM_AEO_AUTH_FINGERPRINT "
+                        + "ON CM_APPLIED_ENGINE_OBSERVATION(TENANT_ID_, FINGERPRINT_)").update();
+            }
+        },
+        REPLACED_STATUS_INDEX {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("DROP INDEX IX_CM_AEO_STATUS").update();
+                jdbc.sql("CREATE INDEX IX_CM_AEO_STATUS "
+                        + "ON CM_APPLIED_ENGINE_OBSERVATION(STATUS_)").update();
+            }
+        },
+        UNUSABLE_ENGINE_ENTITY_INDEX {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER INDEX IX_CM_AEO_ENGINE_ENTITY UNUSABLE").update();
             }
         };
 

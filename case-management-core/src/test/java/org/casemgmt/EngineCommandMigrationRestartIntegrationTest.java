@@ -58,6 +58,9 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
             "cm-production-engine-command-counter-invariants",
             "cm-production-engine-command-lease-invariants",
             "cm-engine-command-action-invariants",
+            "cm-production-engine-command-normalize-retry-time",
+            "cm-production-engine-command-temporal-guard",
+            "cm-production-engine-command-temporal-invariants",
             "cm-production-engine-command-objects-guard",
             "cm-engine-command-action-fk",
             "cm-engine-command-action-id-unique",
@@ -260,6 +263,12 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                                 + "WHERE ID_='done'"),
                 Arguments.of("pending deterministic binding", "pending",
                         "UPDATE CM_ENGINE_COMMAND SET IDEMPOTENCY_KEY_='forged' WHERE ID_='pending'"),
+                Arguments.of("pending marker-only evolution", "pending",
+                        "UPDATE CM_ENGINE_COMMAND SET MIGRATION_BASELINE_ACTIVE_=0, ROW_VERSION_=1 "
+                                + "WHERE ID_='pending'"),
+                Arguments.of("retryable marker-only evolution", "retrying",
+                        "UPDATE CM_ENGINE_COMMAND SET MIGRATION_BASELINE_ACTIVE_=0, ROW_VERSION_=1 "
+                                + "WHERE ID_='retrying'"),
                 Arguments.of("retrying deterministic binding", "retrying",
                         "UPDATE CM_ENGINE_COMMAND SET IDEMPOTENCY_KEY_='forged' WHERE ID_='retrying'"),
                 Arguments.of("claimed deterministic binding", "claimed",
@@ -398,6 +407,22 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
     }
 
     private enum FinalMutation {
+        CHANGED_INITIAL_COLUMN {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER TABLE CM_ENGINE_COMMAND MODIFY CASE_ID_ VARCHAR2(141)").update();
+            }
+        },
+        CHANGED_PRODUCTION_COLUMN {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER TABLE CM_ENGINE_COMMAND MODIFY LEASE_OWNER_ VARCHAR2(129)").update();
+            }
+        },
+        CHANGED_ACTION_COLUMN {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER TABLE CM_ENGINE_COMMAND_ACTION MODIFY ACTION_ID_ VARCHAR2(161)")
+                        .update();
+            }
+        },
         REMOVED_COUNTER_CONSTRAINT {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("ALTER TABLE CM_ENGINE_COMMAND DROP CONSTRAINT CK_CM_ENGCMD_COUNTERS")
@@ -413,6 +438,18 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         REMOVED_DUE_INDEX {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("DROP INDEX IX_CM_ENGCMD_PROD_DUE").update();
+            }
+        },
+        REPLACED_REVIEW_INDEX {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("DROP INDEX IX_CM_ENGCMD_REVIEW").update();
+                jdbc.sql("CREATE INDEX IX_CM_ENGCMD_REVIEW ON CM_ENGINE_COMMAND(UPDATED_AT_)")
+                        .update();
+            }
+        },
+        UNUSABLE_ACTION_INDEX {
+            @Override void apply(JdbcClient jdbc) {
+                jdbc.sql("ALTER INDEX UQ_CM_ECA_SEQUENCE UNUSABLE").update();
             }
         };
 

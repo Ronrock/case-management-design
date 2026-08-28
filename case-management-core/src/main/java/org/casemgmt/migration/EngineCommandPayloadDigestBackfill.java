@@ -63,7 +63,8 @@ public final class EngineCommandPayloadDigestBackfill implements CustomTaskChang
         } catch (NoSuchAlgorithmException ex) {
             throw new IllegalStateException("SHA-256 is required by the Java runtime", ex);
         }
-        try (var sink = new DigestOutputStream(OutputStream.nullOutputStream(), digest);
+        try (source;
+             var sink = new DigestOutputStream(OutputStream.nullOutputStream(), digest);
              var utf8 = new OutputStreamWriter(sink, StandardCharsets.UTF_8)) {
             char[] buffer = new char[8192];
             for (int read; (read = source.read(buffer)) >= 0; ) {

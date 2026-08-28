@@ -393,3 +393,62 @@ and adds strict final-state deployment gates.
   was attempted with escalated Docker access on 2026-08-29. Docker Desktop returned HTTP 503
   before Testcontainers could start Oracle, so the new live migration/evolution/mutation methods
   remain compile-verified but could not execute in this environment.
+
+## Review hardening round 4
+
+Commit: `fix: enforce final command schema`
+
+The final hash is recorded in the handoff. This round closes the exhaustive final-schema and
+migrated-baseline/current-state findings without changing the restart-tolerant prefix guards.
+
+### Exact final schema contracts
+
+- both final `runAlways` gates now invoke a strict Oracle metadata contract. The production
+  contract checks all 61 `CM_ENGINE_COMMAND` and all 15 `CM_ENGINE_COMMAND_ACTION` columns for
+  exact type dimensions, BYTE character semantics, nullability, and normalized defaults. The
+  Workstream 3 contract checks all 19 observation-ledger columns plus the hardened plan-item,
+  task, and linked-process columns.
+- the same contracts validate enabled/validated named checks, the action foreign-key target and
+  ordered columns, the command primary key and backing index, and every legacy/new command and
+  observation index for current-schema ownership, target table, uniqueness, validity, visibility,
+  and exact total ordered columns or expressions.
+- post-apply Oracle mutation coverage now changes an original column, later command/observation
+  columns, an action column, the original observation authority/status indexes, and unusable or
+  replaced later indexes. The descriptor unit tests independently prove the 61/15/19 inventories,
+  the hardened related columns, constraints/indexes, metadata normalization, and fail-closed
+  column matching.
+
+### Migration baseline, CAS, and time coherence
+
+- an inactive migration marker is accepted only for a later policy-reachable decision with a
+  causal attempt, normalized action, confirmation, or review fact appropriate to the resulting
+  status. Marker/version-only `PENDING`, same-state `RETRYABLE`, impossible terminal-baseline
+  dispatches, and evidence-free terminal/review states are rejected; valid retry, operator,
+  observation, and reconciliation paths remain accepted.
+- decision writes now compare the baseline marker, current-action pointer, payload digest/full raw
+  CLOB equality, original status, and all retained raw scalar/timestamp values in the same CAS.
+  Exact no-op outcome replays return the current row without clearing the baseline marker or
+  advancing the row version.
+- `RETRYABLE` requires `NEXT_ATTEMPT_AT_ > DECIDED_AT_`; `DISPATCHING` requires
+  `LEASE_EXPIRES_AT_ > DECIDED_AT_`. A new restart-safe temporal constraint also enforces those
+  relations, exact terminal timestamps, and dispatched-time bounds. A separate additive correction
+  normalizes only untouched migrated retry rows before installing the constraint, preserving the
+  checksum of the original migration changeset.
+- the streaming digest helper now owns and closes every payload `Reader`, including Oracle CLOB
+  readers.
+
+### Round-4 verification
+
+- strict RED: the new reader-ownership test failed until the digest helper closed its input; the
+  expanded static ordering expectation failed when the new guarded temporal changesets first
+  appeared and was then updated to the intended order.
+- focused policy/durable/legacy/action/static/schema/digest suite: 1,430 tests passed, zero
+  failures/errors/skips.
+- `./mvnw -pl case-management-core -DskipTests test-compile` — all 98 core test sources compiled.
+- `./mvnw -pl case-management-spring-boot-starter -am -DskipTests compile` — all six selected and
+  reactor-required modules compiled successfully.
+- focused Oracle command/repository/observation restart suites were attempted. Testcontainers could
+  not access either configured Docker socket (`Operation not permitted`; no valid Docker
+  environment), so the Oracle mutation, CAS, no-op, and migration-cycle scenarios are
+  compile-verified but were not runtime-executed here.
+- `git diff --check` — clean.

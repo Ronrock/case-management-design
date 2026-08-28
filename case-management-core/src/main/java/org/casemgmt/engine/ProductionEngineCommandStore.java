@@ -339,6 +339,9 @@ public class ProductionEngineCommandStore {
             }
             EngineCommandPolicy.Decision decision = new EngineCommandPolicy(clock)
                     .transition(current.state(), outcome);
+            if (decision.equals(current.state().committedDecision())) {
+                return current;
+            }
             int updated = persistDecision(current, decision, expectedVersion,
                     current.state().committedDecision().actionLedgerSummary(), null, false);
             if (updated != 1) {
@@ -367,6 +370,9 @@ public class ProductionEngineCommandStore {
             }
             EngineCommandPolicy.Decision decision = new EngineCommandPolicy(clock)
                     .transition(current.state(), outcome);
+            if (decision.equals(current.state().committedDecision())) {
+                return current;
+            }
             int updated = persistDecision(current, decision, expectedVersion,
                     current.state().committedDecision().actionLedgerSummary(), null, false);
             if (updated != 1) {
@@ -617,6 +623,19 @@ public class ProductionEngineCommandStore {
                   AND ACTION_COUNT_=:expectedCount AND ACTION_HIGH_WATER_=:expectedHighWater
                   AND ACTION_RESET_COUNT_=:expectedResetCount
                   AND ACTION_CANCEL_COUNT_=:expectedCancelCount
+                  AND DECODE(CURRENT_ACTION_SEQ_,:expectedCurrentAction,1,0)=1
+                  AND DECODE(MIGRATION_BASELINE_ACTIVE_,:expectedBaselineActive,1,0)=1
+                  AND DECODE(ORIGINAL_STATUS_,:expectedOriginalStatus,1,0)=1
+                  AND DECODE(RAW_LEGACY_ERROR_,:expectedRawError,1,0)=1
+                  AND DECODE(RAW_LEGACY_CLAIM_TOKEN_,:expectedRawClaimToken,1,0)=1
+                  AND DECODE(RAW_LEGACY_CLAIMED_AT_,:expectedRawClaimedAt,1,0)=1
+                  AND DECODE(RAW_LEGACY_ATTEMPTS_,:expectedRawAttempts,1,0)=1
+                  AND DECODE(RAW_LEGACY_CREATED_AT_,:expectedRawCreatedAt,1,0)=1
+                  AND DECODE(RAW_LEGACY_UPDATED_AT_,:expectedRawUpdatedAt,1,0)=1
+                  AND DECODE(MIGRATION_BASELINE_DECIDED_AT_,:expectedBaselineDecidedAt,1,0)=1
+                  AND PAYLOAD_DIGEST_=:expectedPayloadDigest
+                  AND (ORIGINAL_STATUS_ IS NULL
+                       OR DBMS_LOB.COMPARE(RAW_LEGACY_PAYLOAD_,PAYLOAD_JSON_)=0)
                 """).param("status", decision.status().name())
                 .param("nextAttempt", decision.nextAttemptAt())
                 .param("decidedAt", decision.decidedAt())
@@ -651,7 +670,18 @@ public class ProductionEngineCommandStore {
                 .param("expectedCount", expectedSummary.actionCount())
                 .param("expectedHighWater", expectedSummary.highWaterSequence())
                 .param("expectedResetCount", expectedSummary.automaticBudgetResetCount())
-                .param("expectedCancelCount", expectedSummary.cancellationCount()).update();
+                .param("expectedCancelCount", expectedSummary.cancellationCount())
+                .param("expectedCurrentAction", prior.migrationCas().currentActionSequence())
+                .param("expectedBaselineActive", prior.migrationCas().baselineActive())
+                .param("expectedOriginalStatus", prior.migrationCas().originalStatus())
+                .param("expectedRawError", prior.migrationCas().rawError())
+                .param("expectedRawClaimToken", prior.migrationCas().rawClaimToken())
+                .param("expectedRawClaimedAt", prior.migrationCas().rawClaimedAt())
+                .param("expectedRawAttempts", prior.migrationCas().rawAttempts())
+                .param("expectedRawCreatedAt", prior.migrationCas().rawCreatedAt())
+                .param("expectedRawUpdatedAt", prior.migrationCas().rawUpdatedAt())
+                .param("expectedBaselineDecidedAt", prior.migrationCas().baselineDecidedAt())
+                .param("expectedPayloadDigest", prior.payloadDigest()).update();
     }
 
     private StoredCommand requireByCommandId(String commandId) {
@@ -771,7 +801,17 @@ public class ProductionEngineCommandStore {
                 rs.getString("CANONICAL_PATCH_JSON_"),
                 rs.getObject("EXPECTED_CASE_VERSION_", Long.class),
                 new EngineCommandPolicy.CommandState(context, decision),
-                version, createdAt, updatedAt);
+                version, createdAt, updatedAt, new MigrationCas(
+                        rs.getObject("MIGRATION_BASELINE_ACTIVE_", Integer.class),
+                        rs.getString("ORIGINAL_STATUS_"),
+                        rs.getString("RAW_LEGACY_ERROR_"),
+                        rs.getString("RAW_LEGACY_CLAIM_TOKEN_"),
+                        rs.getObject("RAW_LEGACY_CLAIMED_AT_", OffsetDateTime.class),
+                        rs.getObject("RAW_LEGACY_ATTEMPTS_", Integer.class),
+                        rs.getObject("RAW_LEGACY_CREATED_AT_", OffsetDateTime.class),
+                        rs.getObject("RAW_LEGACY_UPDATED_AT_", OffsetDateTime.class),
+                        rs.getObject("MIGRATION_BASELINE_DECIDED_AT_", OffsetDateTime.class),
+                        rs.getObject("CURRENT_ACTION_SEQ_", Long.class)));
     }
 
     private static void validatePersistedTuple(
@@ -801,6 +841,13 @@ public class ProductionEngineCommandStore {
         if (dispatching != completeLease || (!dispatching && !emptyLease)) {
             throw new IllegalArgumentException(
                     "Persisted lease tuple does not match command status");
+        }
+        OffsetDateTime leaseExpiresAt = rs.getObject(
+                "LEASE_EXPIRES_AT_", OffsetDateTime.class);
+        if (!validTemporalDecision(decision.status(), decidedAt, decision.nextAttemptAt(),
+                leaseExpiresAt)) {
+            throw new IllegalArgumentException(
+                    "Persisted retry/lease time must be strictly after its decision time");
         }
         OffsetDateTime confirmedAt = rs.getObject("CONFIRMED_AT_", OffsetDateTime.class);
         OffsetDateTime failedAt = rs.getObject("FAILED_AT_", OffsetDateTime.class);
@@ -976,11 +1023,62 @@ public class ProductionEngineCommandStore {
                 throw new IllegalArgumentException(
                         "Untouched legacy command no longer matches its migration decision");
             }
-        } else if (rs.getLong("ROW_VERSION_") <= 0 || done
-                || decision.totalDispatchAttempts() < expectedAttempts) {
-            throw new IllegalArgumentException(
-                    "Evolved legacy command lacks a coherent repository transition");
+        } else {
+            boolean coherentEvolution = !done && isPolicyReachableLegacyEvolution(
+                    mapped, decision.status(), expectedAttempts,
+                    decision.totalDispatchAttempts(),
+                    decision.actionLedgerSummary().actionCount(),
+                    decision.terminalConfirmation() != null,
+                    decision.decisionEvidence() != null,
+                    rs.getLong("ROW_VERSION_"), baselineDecidedAt, decision.decidedAt());
+            if (!coherentEvolution) {
+                throw new IllegalArgumentException(
+                        "Evolved legacy command lacks a policy-reachable repository transition");
+            }
         }
+    }
+
+    static boolean validTemporalDecision(
+            EngineCommandStatus status, OffsetDateTime decidedAt,
+            OffsetDateTime nextAttemptAt, OffsetDateTime leaseExpiresAt) {
+        boolean retryTime = status == EngineCommandStatus.RETRYABLE
+                ? nextAttemptAt != null && nextAttemptAt.isAfter(decidedAt)
+                : nextAttemptAt == null;
+        boolean leaseTime = status != EngineCommandStatus.DISPATCHING
+                || leaseExpiresAt != null && leaseExpiresAt.isAfter(decidedAt);
+        return retryTime && leaseTime;
+    }
+
+    static boolean isPolicyReachableLegacyEvolution(
+            EngineCommandStatus baselineStatus, EngineCommandStatus currentStatus,
+            long baselineAttempts, long currentAttempts, long actionCount,
+            boolean hasConfirmation, boolean hasReviewEvidence, long rowVersion,
+            OffsetDateTime baselineDecidedAt, OffsetDateTime currentDecidedAt) {
+        boolean durableEvidence = currentAttempts > baselineAttempts || actionCount > 0
+                || hasConfirmation || hasReviewEvidence;
+        boolean sameRetryableHasCausalDelta = baselineStatus != EngineCommandStatus.RETRYABLE
+                || currentStatus != EngineCommandStatus.RETRYABLE
+                || currentAttempts > baselineAttempts || actionCount > 0;
+        boolean causalStateEvidence = switch (currentStatus) {
+            case PENDING -> false;
+            case DISPATCHING -> currentAttempts > baselineAttempts
+                    && (baselineStatus == EngineCommandStatus.PENDING
+                    || baselineStatus == EngineCommandStatus.RETRYABLE || actionCount > 0);
+            case RETRYABLE -> actionCount > 0 || currentAttempts > baselineAttempts
+                    && (baselineStatus == EngineCommandStatus.PENDING
+                    || baselineStatus == EngineCommandStatus.RETRYABLE);
+            case AWAITING_CONFIRMATION -> currentAttempts > baselineAttempts
+                    || actionCount > 0 || hasReviewEvidence;
+            case CONFIRMED -> hasConfirmation;
+            case FAILED -> currentAttempts > baselineAttempts
+                    && (baselineStatus != EngineCommandStatus.FAILED || actionCount > 0);
+            case CONFLICT, MANUAL_REVIEW -> actionCount > 0 || hasReviewEvidence;
+            case CANCELLED -> actionCount > 0;
+        };
+        return rowVersion > 0 && currentStatus != EngineCommandStatus.PENDING
+                && currentAttempts >= baselineAttempts
+                && currentDecidedAt.isAfter(baselineDecidedAt)
+                && durableEvidence && causalStateEvidence && sameRetryableHasCausalDelta;
     }
 
     private static int countPresent(Object... values) {
@@ -1223,7 +1321,71 @@ public class ProductionEngineCommandStore {
             String caseId, java.util.Map<String, Object> payload, String expectedTargetIdentity,
             String correlationJson, String canonicalPatchJson, Long expectedCaseVersion,
             EngineCommandPolicy.CommandState state, long version,
-            OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+            OffsetDateTime createdAt, OffsetDateTime updatedAt, MigrationCas migrationCas) {
+        public StoredCommand { Objects.requireNonNull(migrationCas, "migrationCas"); }
+    }
+
+    /** Immutable values that make repository writes compare the rehydrated migration tuple. */
+    public static final class MigrationCas {
+        private final Integer baselineActive;
+        private final String originalStatus;
+        private final String rawError;
+        private final String rawClaimToken;
+        private final OffsetDateTime rawClaimedAt;
+        private final Integer rawAttempts;
+        private final OffsetDateTime rawCreatedAt;
+        private final OffsetDateTime rawUpdatedAt;
+        private final OffsetDateTime baselineDecidedAt;
+        private final Long currentActionSequence;
+
+        private MigrationCas(
+                Integer baselineActive, String originalStatus, String rawError,
+                String rawClaimToken, OffsetDateTime rawClaimedAt, Integer rawAttempts,
+                OffsetDateTime rawCreatedAt, OffsetDateTime rawUpdatedAt,
+                OffsetDateTime baselineDecidedAt, Long currentActionSequence) {
+            this.baselineActive = baselineActive;
+            this.originalStatus = originalStatus;
+            this.rawError = rawError;
+            this.rawClaimToken = rawClaimToken;
+            this.rawClaimedAt = rawClaimedAt;
+            this.rawAttempts = rawAttempts;
+            this.rawCreatedAt = rawCreatedAt;
+            this.rawUpdatedAt = rawUpdatedAt;
+            this.baselineDecidedAt = baselineDecidedAt;
+            this.currentActionSequence = currentActionSequence;
+        }
+
+        private Integer baselineActive() { return baselineActive; }
+        private String originalStatus() { return originalStatus; }
+        private String rawError() { return rawError; }
+        private String rawClaimToken() { return rawClaimToken; }
+        private OffsetDateTime rawClaimedAt() { return rawClaimedAt; }
+        private Integer rawAttempts() { return rawAttempts; }
+        private OffsetDateTime rawCreatedAt() { return rawCreatedAt; }
+        private OffsetDateTime rawUpdatedAt() { return rawUpdatedAt; }
+        private OffsetDateTime baselineDecidedAt() { return baselineDecidedAt; }
+        private Long currentActionSequence() { return currentActionSequence; }
+
+        @Override public boolean equals(Object other) {
+            if (this == other) return true;
+            if (!(other instanceof MigrationCas that)) return false;
+            return Objects.equals(baselineActive, that.baselineActive)
+                    && Objects.equals(originalStatus, that.originalStatus)
+                    && Objects.equals(rawError, that.rawError)
+                    && Objects.equals(rawClaimToken, that.rawClaimToken)
+                    && Objects.equals(rawClaimedAt, that.rawClaimedAt)
+                    && Objects.equals(rawAttempts, that.rawAttempts)
+                    && Objects.equals(rawCreatedAt, that.rawCreatedAt)
+                    && Objects.equals(rawUpdatedAt, that.rawUpdatedAt)
+                    && Objects.equals(baselineDecidedAt, that.baselineDecidedAt)
+                    && Objects.equals(currentActionSequence, that.currentActionSequence);
+        }
+
+        @Override public int hashCode() {
+            return Objects.hash(baselineActive, originalStatus, rawError, rawClaimToken,
+                    rawClaimedAt, rawAttempts, rawCreatedAt, rawUpdatedAt,
+                    baselineDecidedAt, currentActionSequence);
+        }
     }
 
     public record LeasedCommand(

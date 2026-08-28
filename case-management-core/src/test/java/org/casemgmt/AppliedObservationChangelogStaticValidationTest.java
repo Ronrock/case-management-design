@@ -196,6 +196,9 @@ class AppliedObservationChangelogStaticValidationTest {
                         "cm-production-engine-command-counter-invariants",
                         "cm-production-engine-command-lease-invariants",
                         "cm-engine-command-action-invariants",
+                        "cm-production-engine-command-normalize-retry-time",
+                        "cm-production-engine-command-temporal-guard",
+                        "cm-production-engine-command-temporal-invariants",
                         "cm-production-engine-command-objects-guard");
         assertThat(production).extracting(change -> change.getId())
                 .endsWith("cm-production-engine-command-final-state-guard");
