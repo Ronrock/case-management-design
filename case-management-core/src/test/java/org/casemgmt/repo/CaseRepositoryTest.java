@@ -8,7 +8,6 @@ import org.casemgmt.service.CanonicalPatch;
 import org.casemgmt.service.CaseDataMappingService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -39,7 +38,7 @@ class CaseRepositoryTest extends OracleTestBase {
 
     @BeforeEach
     void setUp() {
-        repo = new CaseRepository(jdbc());
+        repo = new CaseRepository(dataSource());
         transactions = new TransactionTemplate(new DataSourceTransactionManager(dataSource()));
         // OracleTestBase's inherited @BeforeEach already wipes all CM_ tables before this
         // method runs (JUnit runs superclass @BeforeEach first), so no DELETEs are needed
@@ -192,14 +191,17 @@ class CaseRepositoryTest extends OracleTestBase {
                         CanonicalPatch.WriteMode.REPLACE, false, null, "approved", false)));
         CountDownLatch rowCompared = new CountDownLatch(1);
         CountDownLatch releaseMapper = new CountDownLatch(1);
-        CountDownLatch writerStarted = new CountDownLatch(1);
+        CountDownLatch writerExecutingUpdate = new CountDownLatch(1);
         DataSource pausingDataSource = new PausingCanonicalReadDataSource(
                 dataSource(), rowCompared, releaseMapper);
-        CaseRepository mappingRepository = new CaseRepository(JdbcClient.create(pausingDataSource));
+        DataSource signallingWriterDataSource = new SignallingCanonicalWriterDataSource(
+                dataSource(), writerExecutingUpdate);
+        CaseRepository mappingRepository = new CaseRepository(pausingDataSource);
+        CaseRepository writerRepository = new CaseRepository(signallingWriterDataSource);
         TransactionTemplate mappingTransaction = new TransactionTemplate(
                 new DataSourceTransactionManager(pausingDataSource));
         TransactionTemplate writerTransaction = new TransactionTemplate(
-                new DataSourceTransactionManager(dataSource()));
+                new DataSourceTransactionManager(signallingWriterDataSource));
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             Future<CaseDataMappingService.PatchResult> mapper = pool.submit(() ->
@@ -207,16 +209,15 @@ class CaseRepositoryTest extends OracleTestBase {
             await(rowCompared, "canonical row comparison");
 
             Future<Throwable> writer = pool.submit(() -> {
-                writerStarted.countDown();
                 try {
-                    writerTransaction.executeWithoutResult(status -> repo.update(
+                    writerTransaction.executeWithoutResult(status -> writerRepository.update(
                             writerPreImage.withState(CaseState.CLOSED), writerPreImage.version()));
                     return null;
                 } catch (Throwable failure) {
                     return failure;
                 }
             });
-            await(writerStarted, "concurrent writer start");
+            await(writerExecutingUpdate, "concurrent writer executeUpdate");
 
             assertThatThrownBy(() -> writer.get(250, TimeUnit.MILLISECONDS))
                     .isInstanceOf(TimeoutException.class);
@@ -305,6 +306,62 @@ class CaseRepositoryTest extends OracleTestBase {
                             await(releaseMapper, "canonical mapper release");
                         }
                         return result;
+                    });
+        }
+
+        private static Object invoke(Object target, java.lang.reflect.Method method, Object[] args)
+                throws Throwable {
+            try {
+                return method.invoke(target, args);
+            } catch (InvocationTargetException exception) {
+                throw exception.getCause();
+            }
+        }
+    }
+
+    /** Signals from the JDBC statement at the precise point the competing write is attempted. */
+    private static final class SignallingCanonicalWriterDataSource extends DelegatingDataSource {
+
+        private final CountDownLatch executingUpdate;
+
+        private SignallingCanonicalWriterDataSource(DataSource targetDataSource,
+                                                    CountDownLatch executingUpdate) {
+            super(targetDataSource);
+            this.executingUpdate = executingUpdate;
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            return signallingConnection(super.getConnection());
+        }
+
+        @Override
+        public Connection getConnection(String username, String password) throws SQLException {
+            return signallingConnection(super.getConnection(username, password));
+        }
+
+        private Connection signallingConnection(Connection connection) {
+            return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(),
+                    new Class<?>[]{Connection.class}, (proxy, method, args) -> {
+                        Object result = invoke(connection, method, args);
+                        if (result instanceof PreparedStatement statement
+                                && method.getName().equals("prepareStatement")
+                                && args != null && args.length > 0 && args[0] instanceof String sql
+                                && sql.contains("UPDATE CM_CASE SET")) {
+                            return signallingStatement(statement);
+                        }
+                        return result;
+                    });
+        }
+
+        private PreparedStatement signallingStatement(PreparedStatement statement) {
+            return (PreparedStatement) Proxy.newProxyInstance(
+                    PreparedStatement.class.getClassLoader(),
+                    new Class<?>[]{PreparedStatement.class}, (proxy, method, args) -> {
+                        if (method.getName().equals("executeUpdate")) {
+                            executingUpdate.countDown();
+                        }
+                        return invoke(statement, method, args);
                     });
         }
 

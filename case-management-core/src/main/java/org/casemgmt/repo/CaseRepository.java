@@ -6,8 +6,11 @@ import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.service.CanonicalPatch;
 import org.casemgmt.service.CaseDataMappingService;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.ConnectionHolder;
+import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import javax.sql.DataSource;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -27,9 +30,25 @@ public class CaseRepository {
             LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_""";
 
     private final JdbcClient jdbc;
+    private final DataSource transactionDataSource;
 
+    /**
+     * Compatibility constructor for ordinary repository operations. Canonical compare-and-apply
+     * is unavailable because this form cannot verify which {@link DataSource} owns the caller's
+     * transaction; use {@link #CaseRepository(DataSource)} for mapping support.
+     */
     public CaseRepository(JdbcClient jdbc) {
+        this(jdbc, null);
+    }
+
+    /** Creates the {@link JdbcClient} from, and retains, the exact transaction DataSource. */
+    public CaseRepository(DataSource transactionDataSource) {
+        this(JdbcClient.create(transactionDataSource), transactionDataSource);
+    }
+
+    private CaseRepository(JdbcClient jdbc, DataSource transactionDataSource) {
         this.jdbc = jdbc;
+        this.transactionDataSource = transactionDataSource;
     }
 
     public void insert(CaseInstance c) {
@@ -167,10 +186,7 @@ public class CaseRepository {
         if (patch == null) {
             throw new IllegalArgumentException("patch must not be null");
         }
-        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
-            throw new IllegalStateException(
-                    "Canonical compare-and-apply requires an active caller transaction");
-        }
+        requireCanonicalTransaction();
         CaseInstance current = requireForCanonicalUpdate(patch.caseId());
         if (patch.changes().isEmpty()) {
             return CaseDataMappingService.PatchResult.noChanges(current.version());
@@ -209,6 +225,21 @@ public class CaseRepository {
                 .query(CaseRepository::map)
                 .optional()
                 .orElseThrow(() -> new NotFoundException("Case", id));
+    }
+
+    private void requireCanonicalTransaction() {
+        if (transactionDataSource == null) {
+            throw new IllegalStateException("Canonical compare-and-apply requires an active caller "
+                    + "transaction and a transaction-verifiable repository DataSource");
+        }
+        Object resource = TransactionSynchronizationManager.getResource(transactionDataSource);
+        if (!TransactionSynchronizationManager.isActualTransactionActive()
+                || !(resource instanceof ConnectionHolder holder)
+                || !DataSourceUtils.isConnectionTransactional(
+                        holder.getConnection(), transactionDataSource)) {
+            throw new IllegalStateException("Canonical compare-and-apply requires an active caller "
+                    + "transaction bound to the repository DataSource");
+        }
     }
 
     private static List<CaseDataMappingService.FieldConflict> conflicts(

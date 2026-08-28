@@ -5,11 +5,13 @@ import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
 import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.release.BindingStatus;
+import org.casemgmt.release.CaseContractValidator;
 import org.casemgmt.release.CaseDefinitionRelease;
 import org.casemgmt.release.CaseDefinitionVersionBinding;
 import org.casemgmt.release.JsonSchemaCaseContractValidator;
 import org.casemgmt.release.ReleaseKind;
 import org.casemgmt.release.ReleaseStatus;
+import org.casemgmt.release.ValidatedCaseContract;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.CaseRepository;
@@ -20,8 +22,10 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -272,6 +276,38 @@ class ContractCaseDataMappingServiceTest {
                 "profile", "profileVar", "/mappings/0", CanonicalPatch.WriteMode.MERGE,
                 Map.of("name", "Alice", "language", "nl"),
                 Map.of("name", "Alice", "language", "en"), false));
+    }
+
+    @Test
+    void defensivelyRejectsDuplicateEngineOutputsFromACustomContractValidator() {
+        bind(contract("\"mappings\":[]"), Map.of("decision", "pending"), 4L);
+        ValidatedCaseContract.FieldDefinition decision =
+                new ValidatedCaseContract.FieldDefinition("decision", Map.of("type", "string"),
+                        List.of(), List.of());
+        ValidatedCaseContract.MappingDefinition first = mapping("firstDecision", "decision");
+        ValidatedCaseContract.MappingDefinition duplicate = mapping("finalDecision", "decision");
+        ValidatedCaseContract duplicateContract = new ValidatedCaseContract(
+                "sample-case", OrchestrationMode.BPMN, Map.of("decision", decision), Map.of(),
+                List.of(first, duplicate), List.of(), List.of(), Set.of(), Set.of(), Set.of());
+        CaseContractValidator customValidator = mock(CaseContractValidator.class);
+        when(customValidator.validate("sample-case", releases.require("contract-1", "tenant-a")
+                .content())).thenReturn(duplicateContract);
+        ContractCaseDataMappingService customService = new ContractCaseDataMappingService(
+                cases, bindings, releases, customValidator);
+
+        assertThatThrownBy(() -> customService.mapTaskOutput("case-1", "reviewTask",
+                Map.of("firstDecision", "approved", "finalDecision", "rejected")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("/mappings/1/target")
+                .hasMessageContaining("duplicate ENGINE_TO_CASE target")
+                .hasMessageContaining("/mappings/0/target");
+    }
+
+    private static ValidatedCaseContract.MappingDefinition mapping(String source, String target) {
+        return new ValidatedCaseContract.MappingDefinition(
+                ValidatedCaseContract.MappingDirection.ENGINE_TO_CASE, source, target,
+                ValidatedCaseContract.MappingType.STRING,
+                ValidatedCaseContract.MappingWriteMode.REPLACE, false, null, List.of(), Map.of());
     }
 
     private void bind(String contract, Map<String, Object> variables, long version) {

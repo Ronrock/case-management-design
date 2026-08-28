@@ -39,7 +39,10 @@ public class CaseManagementRepositoryConfiguration {
         return JdbcClient.create(dataSource);
     }
 
-    @Bean public CaseRepository caseRepository(JdbcClient c) { return new CaseRepository(c); }
+    @Bean
+    public CaseRepository caseRepository(DataSource dataSource) {
+        return new CaseRepository(dataSource);
+    }
 
     /**
      * Takes the DataSource directly so deployment and exploded plan-item-definition inserts share

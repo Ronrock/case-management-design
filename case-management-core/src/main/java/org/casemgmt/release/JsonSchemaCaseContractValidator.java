@@ -82,6 +82,7 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
             throw new InvalidCaseDefinitionException(definitionKey, report(violations, mode));
         }
         rejectUnsupportedTransforms(definitionKey, root, mode);
+        rejectDuplicateEngineOutputTargets(definitionKey, root, mode);
 
         ValidatedCaseContract contract = map(root, mode);
         checkIdentity(definitionKey, contract);
@@ -224,6 +225,31 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
             if (mappings.get(index).hasNonNull("transformRef")) {
                 throw invalid(definitionKey, "Contract release is invalid:\n  " + path + "/"
                         + index + "/transformRef: transforms are not supported");
+            }
+        }
+    }
+
+    private static void rejectDuplicateEngineOutputTargets(
+            String definitionKey, JsonNode root, OrchestrationMode mode) {
+        if (mode != OrchestrationMode.BPMN) {
+            return;
+        }
+        JsonNode mappings = root.get("mappings");
+        if (mappings == null || !mappings.isArray()) {
+            return;
+        }
+        Map<String, Integer> firstIndexByTarget = new LinkedHashMap<>();
+        for (int index = 0; index < mappings.size(); index++) {
+            JsonNode mapping = mappings.get(index);
+            if (!"ENGINE_TO_CASE".equals(text(mapping, "direction"))) {
+                continue;
+            }
+            String target = text(mapping, "target");
+            Integer firstIndex = firstIndexByTarget.putIfAbsent(target, index);
+            if (firstIndex != null) {
+                throw invalid(definitionKey, "Contract release is invalid:\n  /mappings/" + index
+                        + "/target: duplicate ENGINE_TO_CASE target; first declared at /mappings/"
+                        + firstIndex + "/target");
             }
         }
     }

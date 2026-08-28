@@ -330,7 +330,10 @@ class JsonSchemaCaseContractValidatorTest {
                 {
                   "key":"sample-case",
                   "forms":{},
-                  "mappings":[{"legacyDirection":"OUT","copyEverything":true}]
+                  "mappings":[
+                    {"direction":"ENGINE_TO_CASE","source":"first","target":"same"},
+                    {"direction":"ENGINE_TO_CASE","source":"second","target":"same"}
+                  ]
                 }
                 """);
 
@@ -381,6 +384,28 @@ class JsonSchemaCaseContractValidatorTest {
                 .hasMessageContaining("/mappings/0/transformRef")
                 .hasMessageContaining("not supported")
                 .hasMessageNotContaining("normalize-outcome");
+    }
+
+    @Test
+    void rejectsDuplicateBpmnEngineOutputsForTheSameCanonicalTarget() {
+        assertThatThrownBy(() -> validate("""
+                {
+                  "key":"sample-case",
+                  "orchestrationMode":"BPMN",
+                  "fields":{"decision":{"schema":{"type":"string"}}},
+                  "forms":{},
+                  "mappings":[
+                    {"direction":"ENGINE_TO_CASE","source":"firstDecision",
+                     "target":"decision"},
+                    {"direction":"ENGINE_TO_CASE","source":"finalDecision",
+                     "target":"decision"}
+                  ]
+                }
+                """))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/mappings/1/target")
+                .hasMessageContaining("duplicate ENGINE_TO_CASE target")
+                .hasMessageContaining("/mappings/0/target");
     }
 
     @ParameterizedTest(name = "[{index}] malformed content")

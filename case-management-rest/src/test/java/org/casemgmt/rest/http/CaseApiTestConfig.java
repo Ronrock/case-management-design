@@ -120,7 +120,10 @@ public class CaseApiTestConfig {
         return JdbcClient.create(dataSource);
     }
 
-    @Bean public CaseRepository caseRepository(JdbcClient j) { return new CaseRepository(j); }
+    @Bean
+    public CaseRepository caseRepository(DataSource dataSource) {
+        return new CaseRepository(dataSource);
+    }
     @Bean public PlanItemRepository planItemRepository(JdbcClient j) { return new PlanItemRepository(j); }
     @Bean public CaseTaskRepository caseTaskRepository(JdbcClient j) { return new CaseTaskRepository(j); }
     @Bean public MilestoneRepository milestoneRepository(JdbcClient j) { return new MilestoneRepository(j); }

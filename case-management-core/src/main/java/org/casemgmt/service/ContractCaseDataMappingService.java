@@ -50,12 +50,18 @@ public final class ContractCaseDataMappingService implements CaseDataMappingServ
         ValidatedCaseContract contract = boundContract(c);
 
         List<CanonicalPatch.FieldChange> changes = new ArrayList<>();
+        Map<String, Integer> firstOutputIndexByTarget = new LinkedHashMap<>();
         for (int index = 0; index < contract.mappings().size(); index++) {
             ValidatedCaseContract.MappingDefinition mapping = contract.mappings().get(index);
             if (mapping.direction() != ValidatedCaseContract.MappingDirection.ENGINE_TO_CASE) {
                 continue;
             }
             String path = "/mappings/" + index;
+            Integer firstIndex = firstOutputIndexByTarget.putIfAbsent(mapping.target(), index);
+            if (firstIndex != null) {
+                throw invalid(path + "/target", "is a duplicate ENGINE_TO_CASE target; first "
+                        + "declared at /mappings/" + firstIndex + "/target");
+            }
             ValidatedCaseContract.FieldDefinition field = contract.fields().get(mapping.target());
             if (field == null) {
                 throw invalid(path + "/target", "does not name a canonical field");
