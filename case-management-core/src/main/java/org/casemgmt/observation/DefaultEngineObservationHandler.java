@@ -2,13 +2,14 @@ package org.casemgmt.observation;
 
 import org.casemgmt.domain.CaseIds;
 import org.casemgmt.domain.CaseInstance;
-import org.casemgmt.domain.CaseState;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
 import org.casemgmt.projection.ActivityObservation;
 import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.projection.ProcessCompletionObservation;
+import org.casemgmt.projection.ProjectionEntityIdentity;
+import org.casemgmt.projection.ProcessProjectionResult;
 import org.casemgmt.projection.TaskObservation;
 import org.casemgmt.repo.AppliedObservationRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
@@ -43,6 +44,8 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
     private final CaseDataMappingService mappings;
     private final EventPublisher events;
     private final SlaLifecyclePort sla;
+    private final EngineObservationAuthorityValidator authority;
+    private final ObservationSecurityTelemetry securityTelemetry;
 
     public DefaultEngineObservationHandler(
             AppliedObservationRepository claims,
@@ -51,7 +54,9 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
             CaseProjectionPort projections,
             CaseDataMappingService mappings,
             EventPublisher events,
-            SlaLifecyclePort sla) {
+            SlaLifecyclePort sla,
+            EngineObservationAuthorityValidator authority,
+            ObservationSecurityTelemetry securityTelemetry) {
         this.claims = Objects.requireNonNull(claims, "claims");
         this.cases = Objects.requireNonNull(cases, "cases");
         this.processes = Objects.requireNonNull(processes, "processes");
@@ -59,6 +64,8 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
         this.mappings = Objects.requireNonNull(mappings, "mappings");
         this.events = Objects.requireNonNull(events, "events");
         this.sla = Objects.requireNonNull(sla, "sla");
+        this.authority = Objects.requireNonNull(authority, "authority");
+        this.securityTelemetry = Objects.requireNonNull(securityTelemetry, "securityTelemetry");
     }
 
     @Override
@@ -72,13 +79,31 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
         }
         AppliedObservationRepository.Claim ownership = claimed.claim().orElseThrow();
 
+        cases.lockForObservation(observation.caseId());
         CaseInstance caseInstance = cases.require(observation.caseId());
-        validateOwnership(observation, caseInstance);
-
-        var current = claims.latestAppliedPosition(observation);
+        java.util.Optional<AppliedObservationRepository.AppliedPosition> current;
+        try {
+            validateOwnership(observation, caseInstance);
+            authority.validate(observation, caseInstance);
+            ProjectionEntityIdentity entityIdentity = entityIdentity(observation);
+            if (entityIdentity != null) {
+                projections.assertEntityOwnership(entityIdentity);
+            }
+            current = claims.latestAppliedPosition(observation);
+        } catch (ObservationAuthorityException rejected) {
+            recordSecurityRejection(observation, rejected.reason());
+            throw rejected;
+        } catch (AppliedObservationRepository.ObservationOrderingModeException rejected) {
+            recordSecurityRejection(observation,
+                    ObservationRejectionReason.ORDERING_MODE_MISMATCH);
+            throw rejected;
+        } catch (SecurityException rejected) {
+            recordSecurityRejection(observation, ObservationRejectionReason.ENTITY_OWNERSHIP);
+            throw rejected;
+        }
         if (current.filter(position -> stale(observation, position)).isPresent()) {
             recordStale(observation, caseInstance, current.orElseThrow());
-            claims.markApplied(ownership);
+            claims.markIgnoredStale(ownership);
             return new ApplyResult(observation.observationId(), ApplyStatus.IGNORED_STALE,
                     caseInstance.version(), List.of());
         }
@@ -118,8 +143,8 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
 
     private void validateOwnership(EngineObservation observation, CaseInstance caseInstance) {
         if (!Objects.equals(observation.tenantId(), caseInstance.tenantId())) {
-            throw new SecurityException("Observation tenant does not own case "
-                    + observation.caseId());
+            throw new ObservationAuthorityException(
+                    ObservationRejectionReason.TENANT_MISMATCH, observation.caseId());
         }
         boolean root = Objects.equals(caseInstance.rootProcessInstanceId(),
                 observation.processInstanceId());
@@ -127,9 +152,16 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
                 .anyMatch(process -> Objects.equals(process.processInstanceId(),
                         observation.processInstanceId()));
         if (!root && !linked) {
-            throw new SecurityException("Observation process is not linked to case "
-                    + observation.caseId());
+            throw new ObservationAuthorityException(
+                    ObservationRejectionReason.PROCESS_NOT_LINKED, observation.caseId());
         }
+    }
+
+    private void recordSecurityRejection(EngineObservation observation,
+                                         ObservationRejectionReason reason) {
+        securityTelemetry.rejected(new ObservationSecurityTelemetry.Rejection(
+                observation.caseId(), observation.processInstanceId(),
+                observation.entityId(), reason));
     }
 
     private ProjectionOutcome project(EngineObservation observation, CaseInstance caseInstance) {
@@ -159,25 +191,26 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
             return new ProjectionOutcome(caseInstance.version(), null);
         }
         boolean cancelled = process.eventType() == ProcessObservation.EventType.TERMINATED;
-        projections.observe(new ProcessCompletionObservation(process.caseId(),
+        ProcessProjectionResult result = projections.observeFromHandler(new ProcessCompletionObservation(process.caseId(),
                 process.processInstanceId(), optionalString(process, "processDefinitionKey"),
                 cancelled ? "cancelled" : "completed", at(process.engineOccurredAt()),
                 at(process.receivedAt())));
         if (!Objects.equals(caseInstance.rootProcessInstanceId(), process.processInstanceId())) {
-            return new ProjectionOutcome(caseInstance.version(), null);
+            return new ProjectionOutcome(result.caseVersion(), null);
+        }
+        if (!result.rootTransitioned()) {
+            return new ProjectionOutcome(result.caseVersion(), null);
         }
         SlaLifecyclePort.TerminalState terminal = cancelled
                 ? SlaLifecyclePort.TerminalState.CANCELLED
                 : SlaLifecyclePort.TerminalState.COMPLETED;
-        long version = caseInstance.state() == CaseState.ACTIVE
-                ? caseInstance.version() + 1 : caseInstance.version();
-        return new ProjectionOutcome(version, terminal);
+        return new ProjectionOutcome(result.caseVersion(), terminal);
     }
 
     private static TaskObservation taskProjection(UserTaskObservation task) {
         String taskDefinitionKey = optionalString(task, "taskDefinitionKey");
         String activityInstanceId = optionalString(task, "activityInstanceId");
-        return new TaskObservation(task.caseId(), task.entityId(),
+        return new TaskObservation(task.caseId(), task.processInstanceId(), task.entityId(),
                 activityInstanceId == null ? task.entityId() : activityInstanceId,
                 taskDefinitionKey, optionalString(task, "name"), taskEvent(task.eventType()),
                 optionalString(task, "assignee"), stringList(task, "candidateGroups"),
@@ -187,14 +220,16 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
 
     private static ActivityObservation activityProjection(
             ActivityLifecycleObservation activity) {
-        return new ActivityObservation(activity.caseId(), activity.entityId(),
+        return new ActivityObservation(activity.caseId(), activity.processInstanceId(),
+                activity.entityId(),
                 optionalString(activity, "activityId"), optionalString(activity, "name"),
                 ActivityObservation.Kind.STAGE, null, activityEvent(activity.eventType()),
                 at(activity.engineOccurredAt()), at(activity.receivedAt()));
     }
 
     private static ActivityObservation milestoneProjection(MilestoneObservation milestone) {
-        return new ActivityObservation(milestone.caseId(), milestone.entityId(),
+        return new ActivityObservation(milestone.caseId(), milestone.processInstanceId(),
+                milestone.entityId(),
                 optionalString(milestone, "activityId"), optionalString(milestone, "name"),
                 ActivityObservation.Kind.MILESTONE, optionalString(milestone, "milestoneId"),
                 milestoneEvent(milestone.eventType()), at(milestone.engineOccurredAt()),
@@ -210,6 +245,24 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
             case COMPLETED -> "complete";
             case DELETED -> "delete";
         };
+    }
+
+    private static ProjectionEntityIdentity entityIdentity(EngineObservation observation) {
+        if (observation instanceof UserTaskObservation task) {
+            String activityInstanceId = optionalString(task, "activityInstanceId");
+            return new ProjectionEntityIdentity(task.caseId(), task.processInstanceId(),
+                    ProjectionEntityIdentity.Kind.USER_TASK, task.entityId(),
+                    activityInstanceId == null ? task.entityId() : activityInstanceId);
+        }
+        if (observation instanceof ActivityLifecycleObservation activity) {
+            return new ProjectionEntityIdentity(activity.caseId(), activity.processInstanceId(),
+                    ProjectionEntityIdentity.Kind.ACTIVITY, activity.entityId(), null);
+        }
+        if (observation instanceof MilestoneObservation milestone) {
+            return new ProjectionEntityIdentity(milestone.caseId(), milestone.processInstanceId(),
+                    ProjectionEntityIdentity.Kind.MILESTONE, milestone.entityId(), null);
+        }
+        return null;
     }
 
     private static String activityEvent(ActivityLifecycleObservation.EventType event) {
@@ -231,12 +284,9 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
     private static boolean stale(EngineObservation incoming,
                                  AppliedObservationRepository.AppliedPosition current) {
         if (incoming.entityRevision() != null && current.entityRevision() != null) {
-            int comparison = Long.compare(incoming.entityRevision(), current.entityRevision());
-            if (comparison != 0) {
-                return comparison < 0;
-            }
+            return incoming.entityRevision() <= current.entityRevision();
         }
-        return incoming.engineOccurredAt().isBefore(current.engineOccurredAt());
+        return !incoming.engineOccurredAt().isAfter(current.engineOccurredAt());
     }
 
     private void recordApplied(EngineObservation observation, CaseInstance caseInstance,

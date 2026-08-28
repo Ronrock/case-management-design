@@ -2,6 +2,7 @@ package org.casemgmt;
 
 import liquibase.Liquibase;
 import liquibase.change.core.CreateTableChange;
+import liquibase.change.core.AddColumnChange;
 import liquibase.change.core.RawSQLChange;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.OfflineConnection;
@@ -28,9 +29,9 @@ class AppliedObservationChangelogStaticValidationTest {
 
             var changes = liquibase.getDatabaseChangeLog().getChangeSets();
             assertThat(changes).extracting(change -> change.getId())
-                    .endsWith("cm-applied-engine-observation");
+                    .endsWith("cm-applied-engine-observation", "cm-engine-observation-hardening");
 
-            var appliedObservation = changes.getLast();
+            var appliedObservation = changes.get(changes.size() - 2);
             var table = appliedObservation.getChanges().stream()
                     .filter(CreateTableChange.class::isInstance)
                     .map(CreateTableChange.class::cast)
@@ -47,6 +48,24 @@ class AppliedObservationChangelogStaticValidationTest {
                     .contains("CREATE UNIQUE INDEX UQ_CM_AEO_AUTH_FINGERPRINT")
                     .contains("CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END")
                     .contains("FINGERPRINT_");
+
+            var hardening = changes.getLast();
+            assertThat(hardening.getChanges().stream()
+                    .filter(AddColumnChange.class::isInstance)
+                    .map(AddColumnChange.class::cast)
+                    .flatMap(change -> change.getColumns().stream())
+                    .map(column -> column.getName()))
+                    .contains("OBSERVATION_KIND_", "IGNORED_AT_", "PROC_INST_ID_");
+            String hardeningSql = hardening.getChanges().stream()
+                    .filter(RawSQLChange.class::isInstance)
+                    .map(RawSQLChange.class::cast)
+                    .map(RawSQLChange::getSql)
+                    .collect(Collectors.joining("\n"));
+            assertThat(hardeningSql)
+                    .contains("IGNORED_STALE")
+                    .contains("IGNORED_AT_")
+                    .doesNotContain("UPDATE CM_PLAN_ITEM")
+                    .doesNotContain("UPDATE CM_TASK");
         }
     }
 }

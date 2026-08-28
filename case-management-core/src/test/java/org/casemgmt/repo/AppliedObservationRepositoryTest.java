@@ -2,6 +2,7 @@ package org.casemgmt.repo;
 
 import org.casemgmt.OracleTestBase;
 import org.casemgmt.observation.ProcessObservation;
+import org.casemgmt.observation.UserTaskObservation;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -139,6 +140,71 @@ class AppliedObservationRepositoryTest extends OracleTestBase {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("no longer owns");
         observations.markApplied(reclaimed.claim().orElseThrow());
+    }
+
+    @Test
+    void staleFinalizationDeduplicatesReplayButIsNotABusinessWatermark() {
+        ProcessObservation stale = observation("stale-observation", "tenant-a");
+        AppliedObservationRepository.ClaimResult claimed = observations.claim(stale);
+
+        observations.markIgnoredStale(claimed.claim().orElseThrow());
+
+        assertThat(jdbc().sql("""
+                SELECT STATUS_, IGNORED_AT_ FROM CM_APPLIED_ENGINE_OBSERVATION
+                WHERE FINGERPRINT_ = :fingerprint""")
+                .param("fingerprint", stale.fingerprint())
+                .query((rs, row) -> Map.entry(rs.getString("STATUS_"),
+                        rs.getObject("IGNORED_AT_", OffsetDateTime.class)))
+                .single())
+                .satisfies(row -> {
+                    assertThat(row.getKey()).isEqualTo("IGNORED_STALE");
+                    assertThat(row.getValue()).isNotNull();
+                });
+        assertThat(observations.claim(observation("stale-replay", "tenant-a")).outcome())
+                .isEqualTo(AppliedObservationRepository.ClaimOutcome.DUPLICATE);
+        assertThat(observations.latestAppliedPosition(stale)).isEmpty();
+    }
+
+    @Test
+    void observationKindsHaveIndependentEntityNamespaces() {
+        ProcessObservation process = observation("process-observation", "tenant-a");
+        observations.markApplied(observations.claim(process).claim().orElseThrow());
+        UserTaskObservation task = new UserTaskObservation("task-observation", 1,
+                process.source(), process.tenantId(), process.caseId(), process.processInstanceId(),
+                process.entityId(), 1L, UserTaskObservation.EventType.CREATED,
+                process.engineOccurredAt(), process.receivedAt(), Map.of());
+
+        assertThat(observations.latestAppliedPosition(process)).isPresent();
+        assertThat(observations.latestAppliedPosition(task)).isEmpty();
+    }
+
+    @Test
+    void mixedRevisionAndOccurrenceTimeOrderingModesAreRejected() {
+        ProcessObservation revisioned = observation("revisioned", "tenant-a");
+        observations.markApplied(observations.claim(revisioned).claim().orElseThrow());
+        ProcessObservation unrevisioned = new ProcessObservation("unrevisioned", 1,
+                revisioned.source(), revisioned.tenantId(), revisioned.caseId(),
+                revisioned.processInstanceId(), revisioned.entityId(), null,
+                ProcessObservation.EventType.COMPLETED, revisioned.engineOccurredAt().plusSeconds(1),
+                revisioned.receivedAt().plusSeconds(1), Map.of());
+
+        assertThatThrownBy(() -> observations.latestAppliedPosition(unrevisioned))
+                .isInstanceOf(AppliedObservationRepository.ObservationOrderingModeException.class)
+                .hasMessageContaining("mixed ordering modes")
+                .hasMessageNotContaining("tenant-a");
+
+        ProcessObservation timed = new ProcessObservation("timed", 1, revisioned.source(),
+                revisioned.tenantId(), revisioned.caseId(), revisioned.processInstanceId(),
+                "second-entity", null, ProcessObservation.EventType.STARTED,
+                revisioned.engineOccurredAt(), revisioned.receivedAt(), Map.of());
+        observations.markApplied(observations.claim(timed).claim().orElseThrow());
+        ProcessObservation laterRevisioned = new ProcessObservation("later-revisioned", 1,
+                timed.source(), timed.tenantId(), timed.caseId(), timed.processInstanceId(),
+                timed.entityId(), 2L, ProcessObservation.EventType.COMPLETED,
+                timed.engineOccurredAt().plusSeconds(1), timed.receivedAt().plusSeconds(1), Map.of());
+        assertThatThrownBy(() -> observations.latestAppliedPosition(laterRevisioned))
+                .isInstanceOf(AppliedObservationRepository.ObservationOrderingModeException.class)
+                .hasMessageContaining("mixed ordering modes");
     }
 
     @Test

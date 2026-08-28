@@ -90,6 +90,39 @@ public class CaseRepository {
     }
 
     /**
+     * Serializes lifecycle observations for one case inside the caller's transaction.
+     *
+     * <p>The mandatory template is a participation guard only: it cannot start or independently
+     * commit a transaction. Holding this row lock through the handler's watermark read and
+     * effects prevents two distinct fingerprints for the same entity from both observing an
+     * obsolete watermark.
+     */
+    public void lockForObservation(String caseId) {
+        if (caseId == null || caseId.isBlank()) {
+            throw new IllegalArgumentException("caseId must not be blank");
+        }
+        if (mandatoryCanonicalTransaction == null) {
+            throw new IllegalStateException("Observation locking requires an active caller "
+                    + "transaction and a transaction-verifiable repository DataSource");
+        }
+        try {
+            mandatoryCanonicalTransaction.executeWithoutResult(status -> {
+                boolean exists = jdbc.sql("SELECT ID_ FROM CM_CASE WHERE ID_ = :id FOR UPDATE")
+                        .param("id", caseId)
+                        .query(String.class)
+                        .optional()
+                        .isPresent();
+                if (!exists) {
+                    throw new NotFoundException("Case", caseId);
+                }
+            });
+        } catch (IllegalTransactionStateException missingTransaction) {
+            throw new IllegalStateException("Observation locking requires an active caller "
+                    + "transaction bound to the repository DataSource", missingTransaction);
+        }
+    }
+
+    /**
      * Optimistic update. Zero rows affected means someone else wrote first —
      * never retried here, always surfaced as 412 by the REST layer.
      *

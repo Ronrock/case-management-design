@@ -1,6 +1,10 @@
 package org.casemgmt.repo;
 
 import org.casemgmt.observation.EngineObservation;
+import org.casemgmt.observation.ActivityLifecycleObservation;
+import org.casemgmt.observation.MilestoneObservation;
+import org.casemgmt.observation.ProcessObservation;
+import org.casemgmt.observation.UserTaskObservation;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
@@ -20,7 +24,13 @@ public final class AppliedObservationRepository {
 
     public enum ClaimOutcome { CLAIMED, RECLAIMED, DUPLICATE }
 
-    public enum Status { CLAIMED, APPLIED, FAILED }
+    public enum Status { CLAIMED, APPLIED, IGNORED_STALE, FAILED }
+
+    public static final class ObservationOrderingModeException extends RuntimeException {
+        public ObservationOrderingModeException(String message) {
+            super(message);
+        }
+    }
 
     /** Audit-safe ordering coordinates of the newest applied fact for one engine entity. */
     public record AppliedPosition(String observationId, Long entityRevision,
@@ -103,20 +113,47 @@ public final class AppliedObservationRepository {
 
     /**
      * Finds the position against which a newly-owned fact is ordered. When the incoming engine
-     * supplies a stable entity revision, revision is authoritative and occurrence time breaks a
-     * tie. Without a revision, the latest engine occurrence time is authoritative.
+     * supplies a stable entity revision, revision is authoritative and equal revisions are
+     * already consumed. Without a revision, the latest engine occurrence time is authoritative.
+     * Mixing those modes for one identity is rejected rather than guessed.
      */
     public Optional<AppliedPosition> latestAppliedPosition(EngineObservation observation) {
         ObservationValues values = valuesOf(observation);
+        int revisioned = observation.entityRevision() == null ? 0 : 1;
+        int mixed = jdbc.sql("""
+                SELECT COUNT(*) FROM CM_APPLIED_ENGINE_OBSERVATION
+                WHERE SOURCE_ = :source AND CASE_ID_ = :caseId
+                  AND PROCESS_INSTANCE_ID_ = :processInstanceId AND ENTITY_ID_ = :entityId
+                  AND OBSERVATION_KIND_ = :observationKind
+                  AND (TENANT_ID_ = :tenantId
+                    OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
+                  AND STATUS_ = 'APPLIED'
+                  AND ((:revisioned = 1 AND ENTITY_REVISION_ IS NULL)
+                    OR (:revisioned = 0 AND ENTITY_REVISION_ IS NOT NULL))""")
+                .param("source", values.source())
+                .param("caseId", values.caseId())
+                .param("processInstanceId", values.processInstanceId())
+                .param("entityId", values.entityId())
+                .param("observationKind", values.observationKind())
+                .param("tenantId", values.tenantId())
+                .param("revisioned", revisioned)
+                .query(Integer.class)
+                .single();
+        if (mixed > 0) {
+            throw new ObservationOrderingModeException("Engine observation uses mixed ordering modes "
+                    + "for case " + values.caseId() + ", process "
+                    + values.processInstanceId() + ", kind " + values.observationKind()
+                    + ", entity " + values.entityId());
+        }
         String ordering = observation.entityRevision() == null
                 ? "ENGINE_OCCURRED_AT_ DESC, APPLIED_AT_ DESC"
-                : "CASE WHEN ENTITY_REVISION_ IS NULL THEN 1 ELSE 0 END, "
-                    + "ENTITY_REVISION_ DESC, ENGINE_OCCURRED_AT_ DESC, APPLIED_AT_ DESC";
+                : "ENTITY_REVISION_ DESC, ENGINE_OCCURRED_AT_ DESC, APPLIED_AT_ DESC";
         return jdbc.sql("""
                 SELECT OBSERVATION_ID_, ENTITY_REVISION_, ENGINE_OCCURRED_AT_, EVENT_TYPE_
                 FROM CM_APPLIED_ENGINE_OBSERVATION
                 WHERE SOURCE_ = :source AND CASE_ID_ = :caseId
                   AND PROCESS_INSTANCE_ID_ = :processInstanceId AND ENTITY_ID_ = :entityId
+                  AND OBSERVATION_KIND_ = :observationKind
                   AND (TENANT_ID_ = :tenantId
                     OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
                   AND STATUS_ = 'APPLIED'
@@ -125,6 +162,7 @@ public final class AppliedObservationRepository {
                 .param("caseId", values.caseId())
                 .param("processInstanceId", values.processInstanceId())
                 .param("entityId", values.entityId())
+                .param("observationKind", values.observationKind())
                 .param("tenantId", values.tenantId())
                 .query((rs, rowNum) -> {
                     Number revision = (Number) rs.getObject("ENTITY_REVISION_");
@@ -156,6 +194,25 @@ public final class AppliedObservationRepository {
         requireOwnedTransition(updated, coordinates, Status.APPLIED);
     }
 
+    /** Finalizes a stale fact without making it eligible as a business ordering watermark. */
+    public void markIgnoredStale(Claim claim) {
+        Claim coordinates = validateClaim(claim);
+        int updated = jdbc.sql("""
+                UPDATE CM_APPLIED_ENGINE_OBSERVATION
+                SET STATUS_ = 'IGNORED_STALE', IGNORED_AT_ = SYSTIMESTAMP
+                WHERE OBSERVATION_ID_ = :observationId AND FINGERPRINT_ = :fingerprint
+                  AND CLAIM_TOKEN_ = :claimToken
+                  AND (TENANT_ID_ = :tenantId
+                    OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
+                  AND STATUS_ = 'CLAIMED'""")
+                .param("observationId", coordinates.observationId())
+                .param("fingerprint", coordinates.fingerprint())
+                .param("claimToken", coordinates.ownershipToken)
+                .param("tenantId", coordinates.tenantId())
+                .update();
+        requireOwnedTransition(updated, coordinates, Status.IGNORED_STALE);
+    }
+
     /** Marks this caller's still-claimed observation as failed, retaining a bounded diagnostic. */
     public void markFailed(Claim claim, String failureDetail) {
         Claim coordinates = validateClaim(claim);
@@ -181,10 +238,12 @@ public final class AppliedObservationRepository {
         jdbc.sql("""
                 INSERT INTO CM_APPLIED_ENGINE_OBSERVATION
                   (OBSERVATION_ID_, TENANT_ID_, FINGERPRINT_, STATUS_, SOURCE_, CASE_ID_,
+                   OBSERVATION_KIND_,
                    CLAIM_TOKEN_, PROCESS_INSTANCE_ID_, ENTITY_ID_, ENTITY_REVISION_, EVENT_TYPE_,
                    ENGINE_OCCURRED_AT_, CLAIMED_AT_)
                 VALUES
-                  (:observationId, :tenantId, :fingerprint, 'CLAIMED', :source, :caseId, :claimToken,
+                  (:observationId, :tenantId, :fingerprint, 'CLAIMED', :source, :caseId,
+                   :observationKind, :claimToken,
                    :processInstanceId, :entityId, :entityRevision, :eventType,
                    :engineOccurredAt, SYSTIMESTAMP)""")
                 .param("observationId", values.observationId())
@@ -192,6 +251,7 @@ public final class AppliedObservationRepository {
                 .param("fingerprint", values.fingerprint())
                 .param("source", values.source())
                 .param("caseId", values.caseId())
+                .param("observationKind", values.observationKind())
                 .param("claimToken", values.ownershipToken())
                 .param("processInstanceId", values.processInstanceId())
                 .param("entityId", values.entityId())
@@ -209,6 +269,7 @@ public final class AppliedObservationRepository {
                     CLAIM_TOKEN_ = :claimToken,
                     SOURCE_ = :source,
                     CASE_ID_ = :caseId,
+                    OBSERVATION_KIND_ = :observationKind,
                     PROCESS_INSTANCE_ID_ = :processInstanceId,
                     ENTITY_ID_ = :entityId,
                     ENTITY_REVISION_ = :entityRevision,
@@ -224,6 +285,7 @@ public final class AppliedObservationRepository {
                 .param("claimToken", values.ownershipToken())
                 .param("source", values.source())
                 .param("caseId", values.caseId())
+                .param("observationKind", values.observationKind())
                 .param("processInstanceId", values.processInstanceId())
                 .param("entityId", values.entityId())
                 .param("entityRevision", values.entityRevision())
@@ -246,10 +308,20 @@ public final class AppliedObservationRepository {
                 requiredBounded(observation.source(), "source", SOURCE_MAX),
                 requiredBounded(observation.caseId(), "caseId", CASE_ID_MAX),
                 requiredBounded(observation.processInstanceId(), "processInstanceId", PROCESS_INSTANCE_ID_MAX),
+                observationKind(observation),
                 requiredBounded(observation.entityId(), "entityId", ENTITY_ID_MAX),
                 observation.entityRevision(),
                 requiredBounded(observation.eventType().name(), "eventType", EVENT_TYPE_MAX),
                 observation.engineOccurredAt(), newOwnershipToken());
+    }
+
+    private static String observationKind(EngineObservation observation) {
+        if (observation instanceof ProcessObservation) return "PROCESS";
+        if (observation instanceof UserTaskObservation) return "USER_TASK";
+        if (observation instanceof ActivityLifecycleObservation) return "ACTIVITY";
+        if (observation instanceof MilestoneObservation) return "MILESTONE";
+        throw new IllegalArgumentException("Unsupported observation type "
+                + observation.getClass().getName());
     }
 
     private static Claim validateClaim(Claim claim) {
@@ -310,7 +382,8 @@ public final class AppliedObservationRepository {
 
     private record ObservationValues(String observationId, String tenantId, String fingerprint,
                                      String source, String caseId, String processInstanceId,
-                                     String entityId, Long entityRevision, String eventType,
+                                     String observationKind, String entityId, Long entityRevision,
+                                     String eventType,
                                      java.time.Instant engineOccurredAt, String ownershipToken) {
     }
 }

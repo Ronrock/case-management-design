@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class JdbcCaseProjectionPortTest extends OracleTestBase {
 
@@ -86,6 +87,20 @@ class JdbcCaseProjectionPortTest extends OracleTestBase {
     }
 
     @Test
+    void handlerSafeRootProjectionReturnsAuthoritativeTransitionWithoutLegacyCallback() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+
+        ProcessProjectionResult first = projections.observeFromHandler(completed("root-process", now));
+        ProcessProjectionResult replay = projections.observeFromHandler(
+                completed("root-process", now.plusSeconds(1)));
+
+        assertThat(first.rootTransitioned()).isTrue();
+        assertThat(first.caseVersion()).isEqualTo(cases.require("case-1").version());
+        assertThat(replay).isEqualTo(new ProcessProjectionResult(false, first.caseVersion()));
+        assertThat(completions).isEmpty();
+    }
+
+    @Test
     void ignoresEngineTaskAndActivityEventsForLegacyPlanModelCases() {
         jdbc().sql("INSERT INTO CM_CASE_DEF (ID_, KEY_, VERSION_NO_, NAME_, ORCHESTRATION_MODE_) "
                 + "VALUES ('legacy:1','legacy',1,'Legacy','PLAN_MODEL')").update();
@@ -102,6 +117,92 @@ class JdbcCaseProjectionPortTest extends OracleTestBase {
 
         assertThat(tasks.findByCase("legacy-case")).isEmpty();
         assertThat(planItems.findByCase("legacy-case")).isEmpty();
+    }
+
+    @Test
+    void globallyCollidingTaskAndActivityIdsCannotCrossCaseTenantOrProcessOwnership() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        jdbc().sql("INSERT INTO CM_CASE_DEF (ID_, KEY_, VERSION_NO_, NAME_, TENANT_ID_, ORCHESTRATION_MODE_) "
+                + "VALUES ('other:1','other',1,'Other','t2','BPMN')").update();
+        cases.insert(new CaseInstance("case-2", "eng-a", "t2", "other:1", "other", 1,
+                "C-2", "Other case", CaseState.ACTIVE, CasePriority.MEDIUM, null, null,
+                "bob", null, null, null, Map.of(), 0, now, now, null));
+        processes.insertRoot("other-root-link", "case-2", "other-process", "other",
+                CaseTask.EngineSync.SYNCED);
+        projections.observe(new TaskObservation("case-2", "other-process", "shared-task",
+                "shared-activity", "review", "Review", "create", null,
+                List.of("reviewers"), null, 50, null, now, now));
+
+        assertThatThrownBy(() -> projections.observe(new TaskObservation(
+                "case-1", "root-process", "shared-task", "shared-activity", "review",
+                "Hijack", "complete", "mallory", List.of(), null, 50, null, now, now)))
+                .isInstanceOf(SecurityException.class);
+        assertThatThrownBy(() -> projections.observe(new ActivityObservation(
+                "case-1", "root-process", "shared-activity", "stage", "Hijack stage",
+                ActivityObservation.Kind.STAGE, null, "end", now, now)))
+                .isInstanceOf(SecurityException.class);
+
+        assertThat(tasks.findByCase("case-2")).singleElement()
+                .satisfies(task -> {
+                    assertThat(task.name()).isEqualTo("Review");
+                    assertThat(task.state()).isEqualTo(TaskState.OPEN);
+                });
+        assertThat(planItems.findByCase("case-2")).singleElement()
+                .satisfies(item -> assertThat(item.name()).isEqualTo("Review"));
+        assertThat(tasks.findByCase("case-1")).extracting(CaseTask::engineTaskId)
+                .doesNotContain("shared-task");
+    }
+
+    @Test
+    void sameCaseLegacyProjectionCanAcquireProcessProvenanceWithoutMigrationGuessing() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        projections.observe(new TaskObservation("case-1", "legacy-task", "legacy-activity",
+                "review", "Legacy", "create", null, List.of(), null, 50, null, now, now));
+
+        projections.observe(new TaskObservation("case-1", "root-process", "legacy-task",
+                "legacy-activity", "review", "Claimed", "claim", "alice", List.of(), null,
+                50, null, now.plusSeconds(1), now.plusSeconds(1)));
+
+        assertThat(jdbc().sql("SELECT PROC_INST_ID_ FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = 'legacy-task'")
+                .query(String.class).single()).isEqualTo("root-process");
+        assertThat(jdbc().sql("""
+                SELECT PROC_INST_ID_ FROM CM_PLAN_ITEM
+                WHERE ENGINE_ACTIVITY_ID_ = 'legacy-activity'""")
+                .query(String.class).single()).isEqualTo("root-process");
+    }
+
+    @Test
+    void milestoneReachedReopenedAndCancelledHaveDistinctPersistentSemantics() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        projections.observe(milestone("end", now));
+        assertMilestone("COMPLETED", 1, true);
+
+        projections.observe(milestone("start", now.plusSeconds(1)));
+        assertMilestone("ACTIVE", 0, false);
+
+        projections.observe(milestone("delete", now.plusSeconds(2)));
+        assertMilestone("TERMINATED", 0, false);
+    }
+
+    private void assertMilestone(String planState, int achieved, boolean hasAchievedAt) {
+        assertThat(jdbc().sql("""
+                SELECT STATE_ FROM CM_PLAN_ITEM
+                WHERE CASE_ID_ = 'case-1' AND ENGINE_ACTIVITY_ID_ = 'milestone-instance'""")
+                .query(String.class).single()).isEqualTo(planState);
+        assertThat(jdbc().sql("""
+                SELECT ACHIEVED_, ACHIEVED_AT_ FROM CM_MILESTONE milestone
+                JOIN CM_PLAN_ITEM item ON item.ID_ = milestone.PLAN_ITEM_ID_
+                WHERE item.CASE_ID_ = 'case-1'
+                  AND item.ENGINE_ACTIVITY_ID_ = 'milestone-instance'""")
+                .query((rs, row) -> Map.entry(rs.getInt("ACHIEVED_"),
+                        rs.getObject("ACHIEVED_AT_", OffsetDateTime.class) != null))
+                .single()).isEqualTo(Map.entry(achieved, hasAchievedAt));
+    }
+
+    private static ActivityObservation milestone(String event, OffsetDateTime at) {
+        return new ActivityObservation("case-1", "root-process", "milestone-instance",
+                "accepted", "Accepted", ActivityObservation.Kind.MILESTONE, "accepted",
+                event, at, at);
     }
 
     private static ProcessCompletionObservation completed(String processId,

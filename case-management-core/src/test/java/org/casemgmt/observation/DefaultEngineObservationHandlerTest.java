@@ -9,7 +9,9 @@ import org.casemgmt.event.EventPublisher;
 import org.casemgmt.projection.ActivityObservation;
 import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.projection.ProcessCompletionObservation;
+import org.casemgmt.projection.ProcessProjectionResult;
 import org.casemgmt.projection.ProjectionStatus;
+import org.casemgmt.projection.ProjectionEntityIdentity;
 import org.casemgmt.projection.TaskObservation;
 import org.casemgmt.repo.AppliedObservationRepository;
 import org.casemgmt.repo.CaseRepository;
@@ -18,6 +20,8 @@ import org.casemgmt.service.CanonicalPatch;
 import org.casemgmt.service.CaseDataMappingService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.springframework.aop.framework.ProxyFactory;
@@ -58,6 +62,8 @@ class DefaultEngineObservationHandlerTest {
     private CaseDataMappingService mappings;
     private EventPublisher events;
     private SlaLifecyclePort sla;
+    private EngineObservationAuthorityValidator authority;
+    private ObservationSecurityTelemetry securityTelemetry;
     private AppliedObservationRepository.Claim claim;
     private DefaultEngineObservationHandler handler;
 
@@ -70,9 +76,12 @@ class DefaultEngineObservationHandlerTest {
         mappings = mock(CaseDataMappingService.class);
         events = mock(EventPublisher.class);
         sla = mock(SlaLifecyclePort.class);
+        authority = mock(EngineObservationAuthorityValidator.class);
+        securityTelemetry = mock(ObservationSecurityTelemetry.class);
         claim = mock(AppliedObservationRepository.Claim.class);
         handler = new DefaultEngineObservationHandler(
-                claims, cases, processes, projections, mappings, events, sla);
+                claims, cases, processes, projections, mappings, events, sla,
+                authority, securityTelemetry);
     }
 
     @Test
@@ -80,19 +89,24 @@ class DefaultEngineObservationHandlerTest {
         ProcessObservation observation = new ProcessObservation("obs-process", 1,
                 "operaton:embedded", "tenant-a", "case-1", "process-1", "process-1", 11L,
                 ProcessObservation.EventType.COMPLETED, OCCURRED, RECEIVED,
-                Map.of("processDefinitionKey", "claim-process"));
+                authorityAttributes());
         owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        ProcessCompletionObservation completion = new ProcessCompletionObservation(
+                "case-1", "process-1", "claim-process", "completed", at(OCCURRED), at(RECEIVED));
+        when(projections.observeFromHandler(completion))
+                .thenReturn(new ProcessProjectionResult(true, 8));
 
         ApplyResult result = handler.apply(observation);
 
         ArgumentCaptor<CaseEvent> event = ArgumentCaptor.forClass(CaseEvent.class);
-        InOrder order = inOrder(claims, cases, processes, projections, sla, events);
+        InOrder order = inOrder(claims, cases, processes, authority, projections, sla, events);
         order.verify(claims).claim(observation);
+        order.verify(cases).lockForObservation("case-1");
         order.verify(cases).require("case-1");
         order.verify(processes).findByCase("case-1");
+        order.verify(authority).validate(observation, activeCase("tenant-a", "process-1", 7));
         order.verify(claims).latestAppliedPosition(observation);
-        order.verify(projections).observe(new ProcessCompletionObservation(
-                "case-1", "process-1", "claim-process", "completed", at(OCCURRED), at(RECEIVED)));
+        order.verify(projections).observeFromHandler(completion);
         order.verify(sla).observeAnchor(new SlaLifecyclePort.Anchor(
                 "case-1", "process", "COMPLETED", "process-1", OCCURRED));
         order.verify(sla).terminalizeRoot("case-1", SlaLifecyclePort.TerminalState.COMPLETED, OCCURRED);
@@ -113,7 +127,7 @@ class DefaultEngineObservationHandlerTest {
     void completedUserTaskProjectsThenMapsOnlyApprovedOutputBeforeLifecycleEffects() {
         UserTaskObservation observation = new UserTaskObservation("obs-task", 1,
                 "operaton:embedded", "tenant-a", "case-1", "process-1", "task-1", 5L,
-                UserTaskObservation.EventType.COMPLETED, OCCURRED, RECEIVED, Map.of(
+                UserTaskObservation.EventType.COMPLETED, OCCURRED, RECEIVED, authorityAttributes(
                 "activityInstanceId", "activity-1",
                 "taskDefinitionKey", "review",
                 "name", "Review claim",
@@ -134,12 +148,18 @@ class DefaultEngineObservationHandlerTest {
         ApplyResult result = handler.apply(observation);
 
         ArgumentCaptor<CaseEvent> event = ArgumentCaptor.forClass(CaseEvent.class);
-        InOrder order = inOrder(claims, cases, processes, projections, mappings, sla, events);
+        InOrder order = inOrder(claims, cases, processes, authority, projections, mappings, sla, events);
         order.verify(claims).claim(observation);
+        order.verify(cases).lockForObservation("case-1");
         order.verify(cases).require("case-1");
         order.verify(processes).findByCase("case-1");
+        order.verify(authority).validate(observation, activeCase("tenant-a", "process-1", 7));
+        order.verify(projections).assertEntityOwnership(new ProjectionEntityIdentity(
+                "case-1", "process-1", ProjectionEntityIdentity.Kind.USER_TASK,
+                "task-1", "activity-1"));
         order.verify(claims).latestAppliedPosition(observation);
-        order.verify(projections).observe(new TaskObservation("case-1", "task-1", "activity-1",
+        order.verify(projections).observe(new TaskObservation("case-1", "process-1",
+                "task-1", "activity-1",
                 "review", "Review claim", "complete", "alice", List.of("reviewers"),
                 "review-form", 70, OffsetDateTime.parse("2026-08-29T10:00:00Z"),
                 at(OCCURRED), at(RECEIVED)));
@@ -162,11 +182,27 @@ class DefaultEngineObservationHandlerTest {
     }
 
     @Test
+    void rootCompletionWithoutAuthoritativeTransitionDoesNotEmitTerminalEffects() {
+        ProcessObservation observation = processObservation("obs-already-terminal", 12L, OCCURRED);
+        owningClaim(observation, activeCase("tenant-a", "process-1", 8));
+        when(projections.observeFromHandler(any(ProcessCompletionObservation.class)))
+                .thenReturn(new ProcessProjectionResult(false, 8));
+
+        ApplyResult result = handler.apply(observation);
+
+        ArgumentCaptor<CaseEvent> event = ArgumentCaptor.forClass(CaseEvent.class);
+        verify(sla, never()).terminalizeRoot(any(), any(), any());
+        verify(events).publish(event.capture());
+        assertThat(event.getValue().type()).isEqualTo("case.process.transitioned");
+        assertThat(result.caseVersion()).isEqualTo(8);
+    }
+
+    @Test
     void nonCompletedUserTaskNeverMapsOutput() {
         UserTaskObservation observation = new UserTaskObservation("obs-claim", 1,
                 "operaton:embedded", null, "case-1", "process-1", "task-1", 4L,
                 UserTaskObservation.EventType.CLAIMED, OCCURRED, RECEIVED,
-                Map.of("taskDefinitionKey", "review", "assignee", "alice",
+                authorityAttributes("taskDefinitionKey", "review", "assignee", "alice",
                         "variables", Map.of("decision", "must-not-map")));
         owningClaim(observation, activeCase(null, "process-1", 3));
 
@@ -184,13 +220,14 @@ class DefaultEngineObservationHandlerTest {
         ActivityLifecycleObservation observation = new ActivityLifecycleObservation("obs-stage", 1,
                 "operaton:embedded", "tenant-a", "case-1", "process-1", "stage-instance", null,
                 ActivityLifecycleObservation.EventType.COMPLETED, OCCURRED, RECEIVED,
-                Map.of("activityId", "assessment", "name", "Assessment"));
+                authorityAttributes("activityId", "assessment", "name", "Assessment"));
         owningClaim(observation, activeCase("tenant-a", "process-1", 7));
 
         ApplyResult result = handler.apply(observation);
 
         InOrder order = normalOrder(observation);
-        order.verify(projections).observe(new ActivityObservation("case-1", "stage-instance",
+        order.verify(projections).observe(new ActivityObservation("case-1", "process-1",
+                "stage-instance",
                 "assessment", "Assessment", ActivityObservation.Kind.STAGE, null, "end",
                 at(OCCURRED), at(RECEIVED)));
         order.verify(sla).observeAnchor(new SlaLifecyclePort.Anchor(
@@ -207,14 +244,15 @@ class DefaultEngineObservationHandlerTest {
         MilestoneObservation observation = new MilestoneObservation("obs-milestone", 1,
                 "operaton:embedded", "tenant-a", "case-1", "process-1", "milestone-instance", 2L,
                 MilestoneObservation.EventType.REACHED, OCCURRED, RECEIVED,
-                Map.of("activityId", "accepted", "milestoneId", "accepted",
+                authorityAttributes("activityId", "accepted", "milestoneId", "accepted",
                         "name", "Claim accepted"));
         owningClaim(observation, activeCase("tenant-a", "process-1", 7));
 
         ApplyResult result = handler.apply(observation);
 
         InOrder order = normalOrder(observation);
-        order.verify(projections).observe(new ActivityObservation("case-1", "milestone-instance",
+        order.verify(projections).observe(new ActivityObservation("case-1", "process-1",
+                "milestone-instance",
                 "accepted", "Claim accepted", ActivityObservation.Kind.MILESTONE, "accepted", "end",
                 at(OCCURRED), at(RECEIVED)));
         order.verify(sla).observeAnchor(new SlaLifecyclePort.Anchor(
@@ -223,6 +261,28 @@ class DefaultEngineObservationHandlerTest {
                 order, "engine.milestone.reached", "Milestone", "milestone-instance");
         assertThat(result).isEqualTo(new ApplyResult("obs-milestone", ApplyStatus.APPLIED, 7,
                 List.of(event.id())));
+        verifyNoInteractions(mappings);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = MilestoneObservation.EventType.class,
+            names = {"REOPENED", "CANCELLED"})
+    void milestoneNonReachedVariantsProjectTheirExactLifecycle(MilestoneObservation.EventType type) {
+        MilestoneObservation observation = new MilestoneObservation("obs-" + type, 1,
+                "operaton:embedded", "tenant-a", "case-1", "process-1",
+                "milestone-instance", 3L, type, OCCURRED, RECEIVED,
+                authorityAttributes("activityId", "accepted", "milestoneId", "accepted", "name", "Accepted"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.APPLIED);
+
+        verify(projections).observe(new ActivityObservation("case-1", "process-1",
+                "milestone-instance", "accepted", "Accepted",
+                ActivityObservation.Kind.MILESTONE, "accepted",
+                type == MilestoneObservation.EventType.REOPENED ? "start" : "delete",
+                at(OCCURRED), at(RECEIVED)));
+        verify(sla).observeAnchor(new SlaLifecyclePort.Anchor("case-1", "milestone",
+                type.name(), "milestone-instance", OCCURRED));
         verifyNoInteractions(mappings);
     }
 
@@ -235,7 +295,8 @@ class DefaultEngineObservationHandlerTest {
 
         assertThat(result).isEqualTo(new ApplyResult("obs-duplicate", ApplyStatus.DUPLICATE,
                 ApplyResult.UNCHANGED_CASE_VERSION, List.of()));
-        verifyNoInteractions(cases, processes, projections, mappings, events, sla);
+        verifyNoInteractions(cases, processes, projections, mappings, events, sla,
+                authority, securityTelemetry);
         verify(claims, never()).latestAppliedPosition(any());
         verify(claims, never()).markApplied(any());
         verify(claims, never()).markFailed(any(), any());
@@ -251,11 +312,14 @@ class DefaultEngineObservationHandlerTest {
                 .isInstanceOf(SecurityException.class)
                 .hasMessageContaining("tenant");
         verifyNoInteractions(processes, projections, mappings, events, sla);
+        verify(securityTelemetry).rejected(new ObservationSecurityTelemetry.Rejection(
+                "case-1", "process-1", "process-1",
+                ObservationRejectionReason.TENANT_MISMATCH));
         verify(claims, never()).markApplied(any());
 
         ProcessObservation tenantlessWrongProcess = new ProcessObservation("obs-wrong-process", 1,
                 "operaton:embedded", null, "case-1", "other-process", "other-process", 1L,
-                ProcessObservation.EventType.STARTED, OCCURRED, RECEIVED, Map.of());
+                ProcessObservation.EventType.STARTED, OCCURRED, RECEIVED, authorityAttributes());
         when(claims.claim(tenantlessWrongProcess)).thenReturn(owned());
         when(cases.require("case-1")).thenReturn(activeCase(null, "process-1", 7));
         when(processes.findByCase("case-1")).thenReturn(List.of(rootLink("process-1")));
@@ -267,11 +331,38 @@ class DefaultEngineObservationHandlerTest {
     }
 
     @Test
+    void foreignTaskEntityOwnershipIsRejectedBeforeWatermarkOrBusinessEffects() {
+        UserTaskObservation observation = new UserTaskObservation("obs-foreign-task", 1,
+                "operaton:embedded", "tenant-a", "case-1", "process-1", "task-owned-by-b", 3L,
+                UserTaskObservation.EventType.CREATED, OCCURRED, RECEIVED,
+                authorityAttributes("taskDefinitionKey", "review",
+                        "activityInstanceId", "activity-owned-by-b"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        ProjectionEntityIdentity identity = new ProjectionEntityIdentity("case-1", "process-1",
+                ProjectionEntityIdentity.Kind.USER_TASK, "task-owned-by-b", "activity-owned-by-b");
+        org.mockito.Mockito.doThrow(new SecurityException("entity belongs to another case"))
+                .when(projections).assertEntityOwnership(identity);
+
+        assertThatThrownBy(() -> handler.apply(observation))
+                .isInstanceOf(SecurityException.class)
+                .hasMessageContaining("another case");
+
+        verify(projections).assertEntityOwnership(identity);
+        verify(securityTelemetry).rejected(new ObservationSecurityTelemetry.Rejection(
+                "case-1", "process-1", "task-owned-by-b",
+                ObservationRejectionReason.ENTITY_OWNERSHIP));
+        verify(claims, never()).latestAppliedPosition(observation);
+        verify(projections, never()).observe(any(TaskObservation.class));
+        verifyNoInteractions(mappings, events, sla);
+        verify(claims, never()).markApplied(any());
+    }
+
+    @Test
     void lowerRevisionIsIgnoredEvenWhenItsTimestampIsNewerAndItsAuditIsSafe() {
         UserTaskObservation observation = new UserTaskObservation("obs-stale", 1,
                 "operaton:remote", "tenant-a", "case-1", "process-1", "task-1", 6L,
                 UserTaskObservation.EventType.CLAIMED, OCCURRED.plusSeconds(30), RECEIVED,
-                Map.of("assignee", "mallory", "secret", "must-not-leak"));
+                authorityAttributes("assignee", "mallory", "secret", "must-not-leak"));
         owningClaim(observation, activeCase("tenant-a", "process-1", 7));
         var current = new AppliedObservationRepository.AppliedPosition(
                 "obs-newer", 7L, OCCURRED, "COMPLETED");
@@ -286,11 +377,15 @@ class DefaultEngineObservationHandlerTest {
                         && value.toString().contains("obs-newer")
                         && !value.toString().contains("mallory")
                         && !value.toString().contains("must-not-leak")));
-        order.verify(claims).markApplied(claim);
+        order.verify(claims).markIgnoredStale(claim);
 
         assertThat(result).isEqualTo(new ApplyResult("obs-stale", ApplyStatus.IGNORED_STALE,
                 7, List.of()));
-        verifyNoInteractions(projections, mappings, sla);
+        verify(projections).assertEntityOwnership(new ProjectionEntityIdentity(
+                "case-1", "process-1", ProjectionEntityIdentity.Kind.USER_TASK,
+                "task-1", "task-1"));
+        verify(projections, never()).observe(any(TaskObservation.class));
+        verifyNoInteractions(mappings, sla);
         verify(events, never()).publish(any());
     }
 
@@ -306,7 +401,57 @@ class DefaultEngineObservationHandlerTest {
 
         verifyNoInteractions(projections, mappings, sla);
         verify(events, never()).publish(any());
-        verify(claims).markApplied(claim);
+        verify(claims).markIgnoredStale(claim);
+        verify(claims, never()).markApplied(claim);
+    }
+
+    @Test
+    void equalRevisionIsIgnoredEvenWhenOccurrenceTimeIsNewer() {
+        ProcessObservation observation = processObservation("obs-equal-revision", 7L,
+                OCCURRED.plusSeconds(30));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-current", 7L, OCCURRED, "STARTED")));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.IGNORED_STALE);
+
+        verify(claims).markIgnoredStale(claim);
+        verify(projections, never()).observe(any(ProcessCompletionObservation.class));
+        verify(events, never()).publish(any());
+    }
+
+    @Test
+    void equalOccurrenceTimeIsIgnoredForUnrevisionedFacts() {
+        ProcessObservation observation = processObservation("obs-equal-time", null, OCCURRED);
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-current", null, OCCURRED, "STARTED")));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.IGNORED_STALE);
+
+        verify(claims).markIgnoredStale(claim);
+        verify(events, never()).publish(any());
+    }
+
+    @Test
+    void mixedOrderingModeRejectionEmitsOnlySafeTelemetryBeforeRollback() {
+        ProcessObservation observation = processObservation("obs-mixed-mode", null, OCCURRED);
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenThrow(
+                new AppliedObservationRepository.ObservationOrderingModeException(
+                        "mixed ordering modes for safe identity"));
+
+        assertThatThrownBy(() -> handler.apply(observation))
+                .isInstanceOf(AppliedObservationRepository.ObservationOrderingModeException.class);
+
+        verify(securityTelemetry).rejected(new ObservationSecurityTelemetry.Rejection(
+                "case-1", "process-1", "process-1",
+                ObservationRejectionReason.ORDERING_MODE_MISMATCH));
+        verifyNoInteractions(mappings, sla, events);
+        verify(claims, never()).markApplied(any());
+        verify(claims, never()).markIgnoredStale(any());
     }
 
     @Test
@@ -327,7 +472,8 @@ class DefaultEngineObservationHandlerTest {
         UserTaskObservation observation = new UserTaskObservation("obs-conflict", 1,
                 "operaton:embedded", "tenant-a", "case-1", "process-1", "task-1", 5L,
                 UserTaskObservation.EventType.COMPLETED, OCCURRED, RECEIVED,
-                Map.of("taskDefinitionKey", "review", "variables", Map.of("decision", "yes")));
+                authorityAttributes("taskDefinitionKey", "review",
+                        "variables", Map.of("decision", "yes")));
         owningClaim(observation, activeCase("tenant-a", "process-1", 7));
         CanonicalPatch patch = new CanonicalPatch("case-1", "review", 7, List.of());
         when(mappings.mapTaskOutput("case-1", "review", Map.of("decision", "yes")))
@@ -368,12 +514,36 @@ class DefaultEngineObservationHandlerTest {
     }
 
     private InOrder normalOrder(EngineObservation observation) {
-        InOrder order = inOrder(claims, cases, processes, projections, mappings, sla, events);
+        InOrder order = inOrder(claims, cases, processes, authority, projections, mappings, sla, events);
         order.verify(claims).claim(observation);
+        order.verify(cases).lockForObservation("case-1");
         order.verify(cases).require("case-1");
         order.verify(processes).findByCase("case-1");
+        order.verify(authority).validate(observation, activeCase("tenant-a", "process-1", 7));
+        ProjectionEntityIdentity identity = expectedEntityIdentity(observation);
+        if (identity != null) {
+            order.verify(projections).assertEntityOwnership(identity);
+        }
         order.verify(claims).latestAppliedPosition(observation);
         return order;
+    }
+
+    private static ProjectionEntityIdentity expectedEntityIdentity(EngineObservation observation) {
+        if (observation instanceof UserTaskObservation task) {
+            String activityId = (String) task.attributes().get("activityInstanceId");
+            return new ProjectionEntityIdentity(task.caseId(), task.processInstanceId(),
+                    ProjectionEntityIdentity.Kind.USER_TASK, task.entityId(),
+                    activityId == null ? task.entityId() : activityId);
+        }
+        if (observation instanceof ActivityLifecycleObservation activity) {
+            return new ProjectionEntityIdentity(activity.caseId(), activity.processInstanceId(),
+                    ProjectionEntityIdentity.Kind.ACTIVITY, activity.entityId(), null);
+        }
+        if (observation instanceof MilestoneObservation milestone) {
+            return new ProjectionEntityIdentity(milestone.caseId(), milestone.processInstanceId(),
+                    ProjectionEntityIdentity.Kind.MILESTONE, milestone.entityId(), null);
+        }
+        return null;
     }
 
     private CaseEvent verifyAuditEventMarker(InOrder order, String action, String resourceType,
@@ -392,6 +562,15 @@ class DefaultEngineObservationHandlerTest {
         when(processes.findByCase(observation.caseId())).thenReturn(
                 List.of(rootLink(caseInstance.rootProcessInstanceId())));
         when(claims.latestAppliedPosition(observation)).thenReturn(Optional.empty());
+        if (observation instanceof ProcessObservation process
+                && (process.eventType() == ProcessObservation.EventType.COMPLETED
+                    || process.eventType() == ProcessObservation.EventType.TERMINATED)) {
+            boolean rootTransition = caseInstance.state() == CaseState.ACTIVE
+                    && caseInstance.rootProcessInstanceId().equals(process.processInstanceId());
+            when(projections.observeFromHandler(any(ProcessCompletionObservation.class)))
+                    .thenReturn(new ProcessProjectionResult(rootTransition,
+                            caseInstance.version() + (rootTransition ? 1 : 0)));
+        }
     }
 
     private AppliedObservationRepository.ClaimResult owned() {
@@ -404,7 +583,7 @@ class DefaultEngineObservationHandlerTest {
         return new ProcessObservation(observationId, 1, "operaton:embedded", "tenant-a",
                 "case-1", "process-1", "process-1", revision,
                 ProcessObservation.EventType.COMPLETED, occurred, RECEIVED,
-                Map.of("processDefinitionKey", "claim-process"));
+                authorityAttributes());
     }
 
     private static LinkedProcessRepository.LinkedProcessRow rootLink(String processInstanceId) {
@@ -422,5 +601,16 @@ class DefaultEngineObservationHandlerTest {
 
     private static OffsetDateTime at(Instant instant) {
         return instant.atOffset(ZoneOffset.UTC);
+    }
+
+    private static Map<String, Object> authorityAttributes(Object... entries) {
+        Map<String, Object> attributes = new java.util.LinkedHashMap<>();
+        attributes.put("engineId", "engine-a");
+        attributes.put("processDefinitionId", "claim-process:7");
+        attributes.put("processDefinitionKey", "claim-process");
+        for (int index = 0; index < entries.length; index += 2) {
+            attributes.put((String) entries[index], entries[index + 1]);
+        }
+        return Map.copyOf(attributes);
     }
 }

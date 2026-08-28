@@ -50,4 +50,39 @@
       <column name="CLAIMED_AT_"/>
     </createIndex>
   </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening" author="casemgmt">
+    <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
+      <column name="OBSERVATION_KIND_" type="VARCHAR2(32)" defaultValue="LEGACY">
+        <constraints nullable="false"/>
+      </column>
+      <column name="IGNORED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+    <sql>ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS</sql>
+    <sql>ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS_TS</sql>
+    <sql>
+      ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS
+        CHECK (STATUS_ IN ('CLAIMED','APPLIED','IGNORED_STALE','FAILED'))
+    </sql>
+    <sql>
+      ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS_TS
+        CHECK ((STATUS_ != 'APPLIED' OR APPLIED_AT_ IS NOT NULL)
+           AND (STATUS_ != 'IGNORED_STALE' OR IGNORED_AT_ IS NOT NULL)
+           AND (STATUS_ != 'FAILED' OR FAILED_AT_ IS NOT NULL))
+    </sql>
+    <addColumn tableName="CM_PLAN_ITEM">
+      <column name="PROC_INST_ID_" type="VARCHAR2(128)"/>
+    </addColumn>
+    <addColumn tableName="CM_TASK">
+      <column name="PROC_INST_ID_" type="VARCHAR2(128)"/>
+    </addColumn>
+    <!-- Existing projections predate process ownership. Keep them unknown: assigning the
+         current root process would invent provenance and may misattribute child-process rows. -->
+    <createIndex tableName="CM_PLAN_ITEM" indexName="IX_CM_PI_PROC_INST">
+      <column name="CASE_ID_"/><column name="PROC_INST_ID_"/>
+    </createIndex>
+    <createIndex tableName="CM_TASK" indexName="IX_CM_TASK_PROC_INST">
+      <column name="CASE_ID_"/><column name="PROC_INST_ID_"/>
+    </createIndex>
+  </changeSet>
 </databaseChangeLog>
