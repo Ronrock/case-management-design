@@ -17,7 +17,7 @@ class EngineCommandDispatcherTest extends OracleTestBase {
     @BeforeEach
     void setUp() {
         jdbc().sql("DELETE FROM CM_ENGINE_COMMAND").update();
-        commands = new EngineCommandRepository(jdbc());
+        commands = new EngineCommandRepository(dataSource());
     }
 
     @Test
@@ -92,7 +92,7 @@ class EngineCommandDispatcherTest extends OracleTestBase {
 
         String status = jdbc().sql("SELECT STATUS_ FROM CM_ENGINE_COMMAND")
                 .query(String.class).single();
-        assertThat(status).isEqualTo("DEAD");
+        assertThat(status).isEqualTo("FAILED");
     }
 
     @Test

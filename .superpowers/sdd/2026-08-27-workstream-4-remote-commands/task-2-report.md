@@ -65,8 +65,8 @@ The mapping is deterministic and rerunnable:
 | `DONE` | `CONFIRMED` | `failureCount + 1` with typed `LEGACY_MIGRATION` evidence |
 | `DEAD` | `FAILED` | existing failure count is retained |
 
-Old `DONE` rows are reconstructed only through the persistence mapper and the package-private
-`LegacyDoneCommandMigration`. Rehydration verifies the retained old row ID/status, fixed migration
+Old `DONE` rows are reconstructed only inside `ProductionEngineCommandStore` through the
+package-private `LegacyDoneCommandMigration`. Rehydration verifies the retained old row ID/status, fixed migration
 reference, migration/decision/confirmation timestamps, counters, absence of forged live evidence,
 and empty action history. Live dispatch results cannot claim legacy provenance.
 
@@ -109,13 +109,13 @@ malformed-width, nonunique, wrong-column, and wrong-function-expression fixtures
   owned by that token.
 - expired `DISPATCHING` leases become `AWAITING_CONFIRMATION`; attempt history is preserved and
   the command is not made due for a blind resend.
-- `commitLeaseDecision` requires tenant, operation, exact lease token, exact row version, and the
-  unchanged action summary. It clears ownership and persists the complete typed policy decision
-  atomically.
+- `commitLeaseOutcome` requires tenant, operation, exact lease token, exact row version, and a typed
+  outcome. It derives the policy decision internally, clears ownership, and persists that exact
+  decision atomically.
 - loading validates identifiers, digest, timestamps, version, normalized history aggregates,
   diagnostic whitelist, evidence bindings, action high-water/prior summary, reset epoch/history,
   and legacy provenance before returning a `CommandState`.
-- `appendActionAndTransition` catches Oracle duplicate keys inside PL/SQL so a race does not mark a
+- `applyOperatorOutcome` derives the transition internally and catches Oracle duplicate keys inside PL/SQL so a race does not mark a
   caller-owned REQUIRED transaction rollback-only. It reloads the authoritative row, distinguishes
   exact replay from identity/sequence conflict, and CAS-updates the command summary/version in the
   same transaction. A failed CAS rolls the inserted action back.
@@ -175,7 +175,7 @@ Production:
 
 - `case-management-core/src/main/java/org/casemgmt/engine/EngineCommandPolicy.java`
 - `case-management-core/src/main/java/org/casemgmt/engine/LegacyDoneCommandMigration.java`
-- `case-management-core/src/main/java/org/casemgmt/engine/EngineCommandPersistenceMapper.java`
+- `case-management-core/src/main/java/org/casemgmt/engine/ProductionEngineCommandStore.java`
 - `case-management-core/src/main/java/org/casemgmt/repo/EngineCommandRepository.java`
 - `case-management-core/src/main/resources/db/changelog/cm-engine-observation-effects.xml`
 - `case-management-core/src/main/resources/db/changelog/cm-production-engine-command.xml`
@@ -201,3 +201,75 @@ When Docker Desktop is healthy, rerun the focused Oracle command above. It is th
 verification not executed at runtime in this environment. The tests are compiled and Liquibase's
 Oracle offline parser validates the complete master changelog, but those are not substitutes for
 the live Oracle restart/malformed-object/concurrency proof.
+
+## Review hardening follow-up
+
+Commit: `fix: harden command persistence invariants`
+
+The final hash is recorded in the task handoff because a commit cannot contain its own hash. This
+follow-up closes the persistence review without changing dispatcher or REST behavior.
+
+### Policy-owned durable transitions
+
+- `CURRENT_ACTION_SEQ_` is now a nullable pointer to the operator action that produced the current
+  decision. It is deliberately separate from the append-only ledger high-water. A later dispatch
+  clears the current pointer/review evidence while retaining the complete normalized history.
+- claim and expired-lease recovery now execute in a REQUIRED local transaction. They load and
+  validate `StoredCommand`, invoke `EngineCommandPolicy`, and CAS-persist the exact returned
+  decision. If any selected row fails rehydration, all earlier claims in that batch roll back.
+- public lease, general outcome, and operator APIs accept typed facts, not caller-constructed
+  `Decision`/`OperatorTransition` objects. The repository validates lease/version/parent binding,
+  invokes policy, and persists the exact result.
+- persistence writes every mutable decision field, including nullable confirmation/review/current
+  action fields, retry time, diagnostics, attempts/budget, terminal timestamps, lease tuple, and
+  row version. Historical action aggregates remain intact.
+
+### Idempotency and canonical intent
+
+- command payloads, correlation JSON, and patch JSON are canonicalized internally. Object keys are
+  sorted, equivalent numeric spellings such as `1` and `1.0` are normalized, null and Unicode are
+  preserved, and array order remains significant.
+- SHA-256 is computed from the canonical payload inside the repository. The transitional
+  caller-digest constructor rejects any mismatch.
+- duplicate insert races are swallowed inside Oracle PL/SQL and then classified by a read-back.
+  This avoids a translated unique-key exception poisoning an outer transaction. Executable Oracle
+  tests cover writes before/after exact replay and conflict, plus concurrent same/different intent.
+
+### Rehydration and legacy boundary
+
+- every normalized action row is loaded and checked for contiguous sequence, complete review
+  tuple, and exact tenant/operation/command/type/target parent binding. The stored aggregate is
+  recomputed from all rows; the current-action pointer must resolve to the high-water row.
+- payload digest, canonical intent JSON, lease/status tuple, confirmation/review tuple, terminal
+  timestamps, action summary, budget epoch/history, and legacy provenance fail closed before a
+  command is returned or mutated.
+- the public `EngineCommandPersistenceMapper` and public database-row forge were removed.
+  Historical DONE reconstruction now lives in the engine-internal production store and calls only
+  package-private `LegacyDoneCommandMigration`. A reflection test proves the public repository API
+  exposes neither legacy evidence nor the removed trusted transition methods.
+
+### Structural guards
+
+- production command/action guards now reject non-zero NUMBER scales, unexpected defaults, and
+  function/ordinary indexes with extra or reordered columns. Malformed scale/default/trailing-index
+  Oracle fixtures were added.
+- a rerun-safe Workstream 3 hardening guard validates observation kind/default, ignored timestamp,
+  process/engine/definition ID widths/null/defaults, exact status/status-timestamp expressions, and
+  the exact seven-column engine/entity index. Malformed later-column, constraint, and trailing-index
+  fixtures were added.
+
+### Follow-up verification
+
+- strict RED: the strengthened repository test initially failed test compilation with 12 missing
+  constructor/request/typed-transition API errors.
+- `./mvnw -pl case-management-core -DskipTests test-compile` — all 95 core test sources compile.
+- policy/durable/legacy/static/canonical/boundary focused suite — 1,429 tests passed, zero
+  failures/errors/skips.
+- `./mvnw -pl case-management-spring-boot-starter -am -DskipTests compile` — six reactor modules
+  compiled successfully.
+- `git diff --check` — clean.
+- focused Oracle repository test was attempted both sandboxed and with escalated Docker access.
+  Sandboxed access was denied; escalated Docker reached Docker Desktop but returned
+  `Status 503: Docker Desktop is unable to start` before Oracle/Testcontainers startup. Therefore
+  the new Oracle transaction, concurrency, migration-restart, and malformed-structure methods are
+  compile-verified but not runtime-executed in this environment.

@@ -45,6 +45,7 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
             "cm-applied-engine-observation-authority-index",
             "cm-applied-engine-observation-status-index-structure-guard",
             "cm-applied-engine-observation-status-index",
+            "cm-engine-observation-hardening-structure-guard",
             "cm-engine-observation-hardening-kind",
             "cm-engine-observation-hardening-ignored-at",
             "cm-engine-observation-hardening-drop-status",
@@ -179,11 +180,36 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                       CASE WHEN TENANT_ID_ IS NULL THEN 0 ELSE 1 END,
                       TENANT_ID_, FINGERPRINT_)""";
             case STATUS_INDEX_WRONG_COLUMN -> null;
+            case OBSERVATION_KIND_WRONG_DEFAULT -> {
+                execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
+                        + "ADD OBSERVATION_KIND_ VARCHAR2(32) DEFAULT 'FORGED' NOT NULL");
+                yield null;
+            }
+            case ENGINE_ID_WRONG_WIDTH -> {
+                execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
+                        + "ADD ENGINE_ID_ VARCHAR2(64)");
+                yield null;
+            }
+            case FINAL_STATUS_CONSTRAINT_WRONG -> {
+                execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
+                        + "ADD CONSTRAINT CK_CM_AEO_STATUS CHECK (STATUS_ IN ('CLAIMED'))");
+                yield null;
+            }
+            case ENGINE_ENTITY_INDEX_TRAILING -> {
+                execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
+                        + "ADD OBSERVATION_KIND_ VARCHAR2(32) DEFAULT 'LEGACY' NOT NULL");
+                execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
+                        + "ADD ENGINE_ID_ VARCHAR2(128)");
+                execute(scenarioDataSource, "CREATE INDEX IX_CM_AEO_ENGINE_ENTITY ON "
+                        + "CM_APPLIED_ENGINE_OBSERVATION(TENANT_ID_,ENGINE_ID_,CASE_ID_,"
+                        + "PROCESS_INSTANCE_ID_,OBSERVATION_KIND_,ENTITY_ID_,STATUS_,CLAIMED_AT_)");
+                yield null;
+            }
             case TABLE_WRONG_COLUMN_SIGNATURE -> throw new IllegalStateException();
         };
         if (authorityDefinition != null) {
             execute(scenarioDataSource, authorityDefinition);
-        } else {
+        } else if (malformedState == MalformedState.STATUS_INDEX_WRONG_COLUMN) {
             execute(scenarioDataSource, """
                     CREATE INDEX IX_CM_AEO_STATUS
                     ON CM_APPLIED_ENGINE_OBSERVATION (STATUS_, APPLIED_AT_)""");
@@ -333,7 +359,19 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                 "UQ_CM_AEO_AUTH_FINGERPRINT has an incompatible structure"),
         STATUS_INDEX_WRONG_COLUMN(
                 "cm-applied-engine-observation-status-index-structure-guard",
-                "IX_CM_AEO_STATUS has an incompatible structure");
+                "IX_CM_AEO_STATUS has an incompatible structure"),
+        OBSERVATION_KIND_WRONG_DEFAULT(
+                "cm-engine-observation-hardening-structure-guard",
+                "Engine observation hardening structure is incompatible"),
+        ENGINE_ID_WRONG_WIDTH(
+                "cm-engine-observation-hardening-structure-guard",
+                "Engine observation hardening structure is incompatible"),
+        FINAL_STATUS_CONSTRAINT_WRONG(
+                "cm-engine-observation-hardening-structure-guard",
+                "Engine observation hardening structure is incompatible"),
+        ENGINE_ENTITY_INDEX_TRAILING(
+                "cm-engine-observation-hardening-structure-guard",
+                "Engine observation hardening structure is incompatible");
 
         private final String guardedChangeSet;
         private final String expectedFailureMessage;

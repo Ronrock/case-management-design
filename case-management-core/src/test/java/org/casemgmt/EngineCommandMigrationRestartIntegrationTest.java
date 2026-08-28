@@ -148,6 +148,8 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
             }
             case ACTION_TABLE -> jdbc.sql("CREATE TABLE CM_ENGINE_COMMAND_ACTION "
                     + "(COMMAND_ID_ VARCHAR2(64) NOT NULL)").update();
+            case ACTION_DEFAULT -> jdbc.sql("ALTER TABLE CM_ENGINE_COMMAND_ACTION "
+                    + "MODIFY REVIEW_FINDING_ DEFAULT 'FORGED'").update();
             default -> jdbc.sql(malformed.ddl).update();
         }
     }
@@ -155,8 +157,12 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
     private enum MalformedObject {
         PRODUCTION_COLUMNS(0, "ALTER TABLE CM_ENGINE_COMMAND ADD OPERATION_ID_ VARCHAR2(10)",
                 "cm-production-engine-command-columns-guard"),
+        PRODUCTION_NUMBER_SCALE(0,
+                "ALTER TABLE CM_ENGINE_COMMAND ADD EXPECTED_CASE_VERSION_ NUMBER(19,2)",
+                "cm-production-engine-command-columns-guard"),
         STATUS_CONSTRAINT(0, null, "cm-production-engine-command-status-guard"),
         ACTION_TABLE(0, null, "cm-engine-command-action-table-guard"),
+        ACTION_DEFAULT(10, null, "cm-production-engine-command-invariants-guard"),
         COUNTER_CONSTRAINT(10, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
                 + "CK_CM_ENGCMD_COUNTERS CHECK (TOTAL_DISPATCH_ATTEMPTS_ >= 0)",
                 "cm-production-engine-command-invariants-guard"),
@@ -177,6 +183,10 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                 "cm-production-engine-command-objects-guard"),
         OPERATION_INDEX(10, "CREATE INDEX UQ_CM_ENGCMD_OPERATION "
                 + "ON CM_ENGINE_COMMAND(TENANT_ID_, OPERATION_ID_)",
+                "cm-production-engine-command-objects-guard"),
+        OPERATION_INDEX_TRAILING(10, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_OPERATION "
+                + "ON CM_ENGINE_COMMAND(CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END, "
+                + "TENANT_ID_, OPERATION_ID_, ID_)",
                 "cm-production-engine-command-objects-guard"),
         IDEMPOTENCY_INDEX(10, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_IDEMPOTENCY "
                 + "ON CM_ENGINE_COMMAND(TENANT_ID_, OPERATION_ID_)",
