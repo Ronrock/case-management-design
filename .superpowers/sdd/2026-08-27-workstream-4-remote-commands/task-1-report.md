@@ -125,3 +125,87 @@ The parameterized test was written before production code.
 - `case-management-core/src/main/java/org/casemgmt/engine/EngineCommandPolicy.java`
 - `case-management-core/src/test/java/org/casemgmt/engine/EngineCommandPolicyTest.java`
 - this report
+
+## Review-hardening addendum
+
+The follow-up commit named `fix: bind command outcomes to evidence` supersedes the original
+generic-evidence, cancel-404, and attempt-counter statements above. No dispatcher, persistence,
+gateway, API, migration, or ledger code is changed by this follow-up.
+
+### Bound evidence
+
+The old `Evidence.CONFIRMED` token is removed. `ConfirmationEvidence` now carries and the policy
+matches all of:
+
+- tenant ID, operation ID, command ID, and current `EngineCommand.Type`;
+- expected target identity;
+- observed remote identity and a command-specific terminal `RemoteState`;
+- one exact source (`HTTP_RESPONSE`, `DUPLICATE_RESPONSE`, `OBSERVATION`, or `RECONCILIATION`);
+- a bounded safe opaque evidence reference.
+
+Claim, completion, and cancellation evidence additionally require the observed remote identity to
+equal the target resource. The allowed terminal states are explicit for every current command
+type. Cancellation confirms only with exact `PROCESS_CANCELLED` or `PROCESS_TERMINATED` evidence.
+A 404 without that evidence becomes `CONFLICT` when non-acceptance is proven, or
+`AWAITING_CONFIRMATION` when acceptance is uncertain; definitive absence authorises
+reconciliation/retry, never confirmation.
+
+`ReviewEvidence` is independently bound to the same tenant/operation/command/type/target identity.
+Operator actions also carry those bindings plus a safe action ID, audit reference, stable action
+time, and an explicit automatic-attempt-cap override flag. This prevents a valid confirmation,
+absence review, or operator approval from being replayed against a different command.
+
+Every matching confirmation source is idempotent after `CONFIRMED`, regardless of which source
+confirmed first. Evidence validation runs before the terminal-state no-op, so mismatched tenant,
+operation, command, type, target, remote identity, remote state, or source is rejected even after
+the command is already terminal.
+
+### Transport and HTTP classification
+
+Transport failures now expose their request phase:
+
+- proven pre-connect and zero-byte pre-send failures are the only transport outcomes eligible for
+  automatic retry;
+- mid-write failures, timeouts, read failures, and unknown failures are `POSSIBLY_SENT` and enter
+  `AWAITING_CONFIRMATION`.
+
+HTTP status is separate from acceptance: `PROVEN_NOT_ACCEPTED`, `POSSIBLY_ACCEPTED`, or
+`ACCEPTED`. Only proven non-acceptance can schedule a retry. Accepted or possibly accepted
+responses without exact confirmation evidence await confirmation. Definitive validation and
+authorization rejections fail; 409 conflicts; and 408/425/429 or 5xx retry only when the caller
+has proven non-acceptance. A safe `Retry-After` is honoured as a lower bound, capped at 30 days;
+otherwise the deterministic bounded jitter ladder applies.
+
+### Attempts, manual actions, and scheduling
+
+`totalDispatchAttempts` now has one definition: the number of dispatches that have started,
+including the request currently being classified. Entering `DISPATCHING` increments it. Five
+automatic retries follow the initial attempt, so `MAX_AUTOMATIC_ATTEMPTS` is six; this is separate
+from an audited operator override. An override is accepted only when the automatic budget is
+exhausted, resets the automatic counter explicitly, and is replay-idempotent from the resulting
+`RETRYABLE` state. Ordinary retry/review/reconcile/cancel operator actions are also replay-
+idempotent and retain their action/audit identities in the policy decision.
+
+Retry calculation is overflow-safe. Both calculated delay and bounded `Retry-After` saturate at
+the Oracle-persistable UTC timestamp `9999-12-31T23:59:59.999999Z` rather than overflowing or
+wrapping.
+
+### Follow-up TDD and verification
+
+The review suite was written before changing the production policy and first failed compilation
+against the generic evidence API. Additional red-green cycles proved command binding for operator
+actions and replay-idempotence after an attempt-cap reset.
+
+`./mvnw -pl case-management-core -Dtest=EngineCommandPolicyTest test`
+
+Result: 1,303 tests passed, 0 failures, 0 errors, 0 skipped. The suite uses literal expected
+decisions rather than policy-derived allowed sets. It covers every status × every current command
+type × every outcome kind, exact status/diagnostic/retry timestamps, all 4 × 4 confirmation-source
+order permutations, every command-specific terminal state, binding mismatches before and after
+confirmation, HTTP acceptance/status combinations, transport phases, operator replays, attempt
+limits, Retry-After, and timestamp saturation.
+
+`./mvnw -pl case-management-core,case-management-engine-remote,case-management-spring-boot-starter -am -DskipTests package`
+
+Result: all six selected/reactor-required projects succeeded: root, core, embedded, remote, REST,
+and starter.
