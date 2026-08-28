@@ -138,8 +138,10 @@ public class LinkedProcessRepository {
                 WHERE CASE_ID_ = :caseId
                   AND CORRELATION_ID_ = :correlationId
                   AND PROC_INST_ID_ IS NULL
-                  AND (PROC_DEF_ID_ IS NULL OR PROC_DEF_ID_ = :processDefinitionId)
-                  AND (PROC_DEF_KEY_ IS NULL OR PROC_DEF_KEY_ = :processDefinitionKey)
+                  AND (:processDefinitionId IS NULL OR PROC_DEF_ID_ IS NULL
+                    OR PROC_DEF_ID_ = :processDefinitionId)
+                  AND (:processDefinitionKey IS NULL OR PROC_DEF_KEY_ IS NULL
+                    OR PROC_DEF_KEY_ = :processDefinitionKey)
                   AND ENGINE_SYNC_ = 'PENDING'""")
                 .param("processInstanceId", engineProcessInstanceId)
                 .param("processDefinitionId", processDefinitionId)
