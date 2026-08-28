@@ -19,6 +19,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.casemgmt.engine.CommandDispatchOutcome.Acceptance.ACCEPTED;
 import static org.casemgmt.engine.CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED;
 import static org.casemgmt.engine.CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED;
+import static org.casemgmt.engine.CommandDispatchOutcome.ActionType.CANCEL;
+import static org.casemgmt.engine.CommandDispatchOutcome.ActionType.MANUAL_REVIEW;
+import static org.casemgmt.engine.CommandDispatchOutcome.ActionType.RECONCILE;
+import static org.casemgmt.engine.CommandDispatchOutcome.ActionType.RETRY_OVERRIDE;
 import static org.casemgmt.engine.CommandDispatchOutcome.ConfirmationSource.DUPLICATE_RESPONSE;
 import static org.casemgmt.engine.CommandDispatchOutcome.ConfirmationSource.HTTP_RESPONSE;
 import static org.casemgmt.engine.CommandDispatchOutcome.ConfirmationSource.OBSERVATION;
@@ -36,33 +40,34 @@ import static org.casemgmt.engine.CommandDispatchOutcome.TransportFailure.UNKNOW
 class EngineCommandPolicyTest {
 
     private static final Instant NOW = Instant.parse("2026-08-28T12:00:00Z");
-    private static final Clock CLOCK = Clock.fixed(NOW, ZoneOffset.UTC);
-    private static final EngineCommandPolicy POLICY = new EngineCommandPolicy(CLOCK);
-    private static final OffsetDateTime FIRST_RETRY = OffsetDateTime.parse(
-            "2026-08-28T12:00:53.424Z");
+    private static final OffsetDateTime NOW_OFFSET = OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC);
+    private static final OffsetDateTime PRIOR = OffsetDateTime.parse("2026-08-28T11:00:00Z");
+    private static final OffsetDateTime SECOND_RETRY = OffsetDateTime.parse(
+            "2026-08-28T12:04:27.150Z");
+    private static final EngineCommandPolicy POLICY = new EngineCommandPolicy(
+            Clock.fixed(NOW, ZoneOffset.UTC));
 
-    @ParameterizedTest(name = "{0} {1} after {2} -> {3}")
-    @MethodSource("independentDecisionTable")
-    void exactTransitionTableIsIndependentOfPolicyImplementation(
-            EngineCommand.Type type, EngineCommandStatus current,
-            Scenario scenario, Expected expected) {
-        EngineCommandPolicy.CommandContext command = command(type);
+    private static final long TOTAL = 2;
+    private static final int BUDGET_ATTEMPTS = 2;
+    private static final long BUDGET_EPOCH = 1;
+
+    @ParameterizedTest(name = "{0} {1} after {2}")
+    @MethodSource("completeDecisionMatrix")
+    void completeMatrixAssertsEveryPersistedDecisionField(
+            EngineCommand.Type type, EngineCommandStatus status,
+            Scenario scenario, EngineCommandPolicy.Decision expected) {
+        EngineCommandPolicy.CommandState state = state(type, status);
 
         if (expected == null) {
-            assertThatThrownBy(() -> POLICY.transition(
-                    command, current, scenario.totalDispatchAttempts(), scenario.outcome()))
-                    .isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(() -> POLICY.transition(state, scenario.outcome()))
+                    .isInstanceOfAny(IllegalStateException.class, IllegalArgumentException.class);
             return;
         }
 
-        EngineCommandPolicy.Decision decision = POLICY.transition(
-                command, current, scenario.totalDispatchAttempts(), scenario.outcome());
-        assertThat(decision.status()).isEqualTo(expected.status());
-        assertThat(decision.errorCode()).isEqualTo(expected.errorCode());
-        assertThat(decision.nextAttemptAt()).isEqualTo(expected.nextAttemptAt());
+        assertThat(POLICY.transition(state, scenario.outcome())).isEqualTo(expected);
     }
 
-    static Stream<Arguments> independentDecisionTable() {
+    static Stream<Arguments> completeDecisionMatrix() {
         return Stream.of(EngineCommand.Type.values()).flatMap(type ->
                 Stream.of(scenarios(type)).flatMap(scenario ->
                         Stream.of(EngineCommandStatus.values()).map(status -> Arguments.of(
@@ -71,529 +76,511 @@ class EngineCommandPolicyTest {
     }
 
     private static Scenario[] scenarios(EngineCommand.Type type) {
-        Expected dispatching = expected(EngineCommandStatus.DISPATCHING, null, null);
-        Expected retry = expected(EngineCommandStatus.RETRYABLE,
-                "transport.not_sent", FIRST_RETRY);
-        Expected awaitingTransport = expected(EngineCommandStatus.AWAITING_CONFIRMATION,
-                "transport.possibly_sent", null);
-        Expected awaitingHttp = expected(EngineCommandStatus.AWAITING_CONFIRMATION,
-                "response.unconfirmed", null);
-        Expected malformed = expected(EngineCommandStatus.AWAITING_CONFIRMATION,
-                "response.malformed", null);
-        Expected duplicate = expected(EngineCommandStatus.CONFLICT,
-                "response.duplicate", null);
-        Expected expiredLease = expected(EngineCommandStatus.AWAITING_CONFIRMATION,
-                "dispatch.lease_expired", null);
-        Expected confirmed = expected(EngineCommandStatus.CONFIRMED, null, null);
-        Expected inconclusive = expected(EngineCommandStatus.MANUAL_REVIEW,
-                "reconcile.inconclusive", null);
-        Expected manual = expected(EngineCommandStatus.MANUAL_REVIEW,
-                "review.requested", null);
-        Expected awaitingReview = expected(EngineCommandStatus.AWAITING_CONFIRMATION,
-                "reconcile.requested", null);
-        Expected reviewedRetry = expected(EngineCommandStatus.RETRYABLE,
-                "review.retry", OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC));
-        Expected cancelled = expected(EngineCommandStatus.CANCELLED, null, null);
+        var dispatch = decision(EngineCommandStatus.DISPATCHING, NOW_OFFSET, null,
+                null, null, 3, 3, 1, false, null, null, null);
+        var retry = decision(EngineCommandStatus.RETRYABLE, NOW_OFFSET, SECOND_RETRY,
+                "transport.not_sent", "Remote request sent zero bytes",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, null);
+        var possiblySent = decision(EngineCommandStatus.AWAITING_CONFIRMATION, NOW_OFFSET, null,
+                "transport.possibly_sent", "Remote request may have been sent",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, null);
+        var accepted = decision(EngineCommandStatus.AWAITING_CONFIRMATION, NOW_OFFSET, null,
+                "response.unconfirmed", "Accepted response lacked matching confirmation evidence",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, null);
+        var malformed = decision(EngineCommandStatus.AWAITING_CONFIRMATION, NOW_OFFSET, null,
+                "response.malformed", "Remote response was not valid confirmation evidence",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, null);
+        var duplicate = decision(EngineCommandStatus.CONFLICT, NOW_OFFSET, null,
+                "response.duplicate", "Duplicate response lacked matching confirmation evidence",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, null);
+        var lease = decision(EngineCommandStatus.AWAITING_CONFIRMATION, NOW_OFFSET, null,
+                "dispatch.lease_expired", "Dispatch lease expired with an unknown remote outcome",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, null);
+        var httpEvidence = confirmation(type, HTTP_RESPONSE);
+        var duplicateEvidence = confirmation(type, DUPLICATE_RESPONSE);
+        var observationEvidence = confirmation(type, OBSERVATION);
+        var reconciliationEvidence = confirmation(type, RECONCILIATION);
+        var confirmedHttp = confirmed(httpEvidence);
+        var confirmedDuplicate = confirmed(duplicateEvidence);
+        var confirmedObservation = confirmed(observationEvidence);
+        var confirmedReconciliation = confirmed(reconciliationEvidence);
+        var committedConfirmation = state(type, EngineCommandStatus.CONFIRMED).committedDecision();
+        var absence = review(type, DEFINITIVE_ABSENCE,
+                CommandDispatchOutcome.ReviewSource.RECONCILIATION);
+        var absentRetry = decision(EngineCommandStatus.RETRYABLE, NOW_OFFSET, SECOND_RETRY,
+                "reconcile.absent", "Reconciliation proved the remote effect is absent",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, absence, null);
+        var inconclusiveEvidence = review(type, INCONCLUSIVE,
+                CommandDispatchOutcome.ReviewSource.RECONCILIATION);
+        var inconclusive = decision(EngineCommandStatus.MANUAL_REVIEW, NOW_OFFSET, null,
+                "reconcile.inconclusive", "Reconciliation could not determine the remote outcome",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                null, inconclusiveEvidence, null);
+        var manualAction = operator(type, MANUAL_REVIEW, "action:manual", false, NOW_OFFSET);
+        var manual = decision(EngineCommandStatus.MANUAL_REVIEW, NOW_OFFSET, null,
+                "review.requested", "Operator requested manual review",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, manualAction);
+        var reconcileAction = operator(type, RECONCILE, "action:reconcile", false, NOW_OFFSET);
+        var reconciling = decision(EngineCommandStatus.AWAITING_CONFIRMATION, NOW_OFFSET, null,
+                "reconcile.requested", "Operator requested reconciliation",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, reconcileAction);
+        var operatorAbsence = review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW);
+        var retryAction = operator(type, RETRY_OVERRIDE, "action:retry", false, NOW_OFFSET);
+        var reviewedRetry = decision(EngineCommandStatus.RETRYABLE, NOW_OFFSET, NOW_OFFSET,
+                "review.retry", "Reviewed evidence permits another dispatch attempt",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                null, operatorAbsence, retryAction);
+        var cancelAction = operator(type, CANCEL, "action:cancel", false, NOW_OFFSET);
+        var cancelled = decision(EngineCommandStatus.CANCELLED, NOW_OFFSET, null,
+                null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                null, null, cancelAction);
+        var reviewedCancelled = decision(EngineCommandStatus.CANCELLED, NOW_OFFSET, null,
+                null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                null, operatorAbsence, cancelAction);
+
         return new Scenario[] {
-                new Scenario("dispatch", 0, CommandDispatchOutcome.dispatchRequested(), Map.of(
-                        EngineCommandStatus.PENDING, dispatching,
-                        EngineCommandStatus.RETRYABLE, dispatching)),
-                new Scenario("zero-byte failure", 1,
+                scenario("dispatch", CommandDispatchOutcome.dispatchRequested(), Map.of(
+                        EngineCommandStatus.PENDING, dispatch,
+                        EngineCommandStatus.RETRYABLE, dispatch)),
+                scenario("zero-byte failure",
                         CommandDispatchOutcome.transportFailure(PRE_CONNECT_FAILURE), Map.of(
                         EngineCommandStatus.DISPATCHING, retry)),
-                new Scenario("possibly-sent failure", 1,
+                scenario("possibly-sent failure",
                         CommandDispatchOutcome.transportFailure(MID_WRITE_FAILURE), Map.of(
-                        EngineCommandStatus.DISPATCHING, awaitingTransport)),
-                new Scenario("accepted without proof", 1,
+                        EngineCommandStatus.DISPATCHING, possiblySent)),
+                scenario("accepted without proof",
                         CommandDispatchOutcome.http(202, ACCEPTED, null, null), Map.of(
-                        EngineCommandStatus.DISPATCHING, awaitingHttp)),
-                new Scenario("malformed response", 1,
-                        CommandDispatchOutcome.malformedResponse(), Map.of(
+                        EngineCommandStatus.DISPATCHING, accepted)),
+                scenario("malformed response", CommandDispatchOutcome.malformedResponse(), Map.of(
                         EngineCommandStatus.DISPATCHING, malformed)),
-                new Scenario("unproven duplicate", 1,
-                        CommandDispatchOutcome.duplicateResponse(null), Map.of(
+                scenario("unproven duplicate", CommandDispatchOutcome.duplicateResponse(null), Map.of(
                         EngineCommandStatus.DISPATCHING, duplicate)),
-                new Scenario("expired lease", 1,
-                        CommandDispatchOutcome.leaseExpired(), Map.of(
-                        EngineCommandStatus.DISPATCHING, expiredLease)),
-                new Scenario("observation confirmation", 1,
-                        CommandDispatchOutcome.observation(confirmation(type, OBSERVATION)), Map.of(
-                        EngineCommandStatus.PENDING, confirmed,
-                        EngineCommandStatus.DISPATCHING, confirmed,
-                        EngineCommandStatus.RETRYABLE, confirmed,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, confirmed,
-                        EngineCommandStatus.CONFLICT, confirmed,
-                        EngineCommandStatus.MANUAL_REVIEW, confirmed,
-                        EngineCommandStatus.CONFIRMED, confirmed)),
-                new Scenario("HTTP confirmation", 1,
-                        CommandDispatchOutcome.http(200, ACCEPTED, null,
-                                confirmation(type, HTTP_RESPONSE)), Map.of(
-                        EngineCommandStatus.DISPATCHING, confirmed,
-                        EngineCommandStatus.CONFIRMED, confirmed)),
-                new Scenario("duplicate confirmation", 1,
-                        CommandDispatchOutcome.duplicateResponse(
-                                confirmation(type, DUPLICATE_RESPONSE)), Map.of(
-                        EngineCommandStatus.DISPATCHING, confirmed,
-                        EngineCommandStatus.CONFIRMED, confirmed)),
-                new Scenario("reconciliation confirmation", 1,
-                        CommandDispatchOutcome.reconciliationConfirmed(
-                                confirmation(type, RECONCILIATION)), Map.of(
-                        EngineCommandStatus.AWAITING_CONFIRMATION, confirmed,
-                        EngineCommandStatus.CONFLICT, confirmed,
-                        EngineCommandStatus.MANUAL_REVIEW, confirmed,
-                        EngineCommandStatus.CONFIRMED, confirmed)),
-                new Scenario("reconciliation absence", 1,
-                        CommandDispatchOutcome.reconciliation(review(
-                                type, DEFINITIVE_ABSENCE,
-                                CommandDispatchOutcome.ReviewSource.RECONCILIATION)), Map.of(
-                        EngineCommandStatus.AWAITING_CONFIRMATION,
-                        expected(EngineCommandStatus.RETRYABLE,
-                                "reconcile.absent", FIRST_RETRY),
-                        EngineCommandStatus.CONFLICT,
-                        expected(EngineCommandStatus.RETRYABLE,
-                                "reconcile.absent", FIRST_RETRY),
-                        EngineCommandStatus.MANUAL_REVIEW,
-                        expected(EngineCommandStatus.RETRYABLE,
-                                "reconcile.absent", FIRST_RETRY))),
-                new Scenario("inconclusive reconciliation", 1,
-                        CommandDispatchOutcome.reconciliation(review(
-                                type, INCONCLUSIVE,
-                                CommandDispatchOutcome.ReviewSource.RECONCILIATION)), Map.of(
+                scenario("expired lease", CommandDispatchOutcome.leaseExpired(), Map.of(
+                        EngineCommandStatus.DISPATCHING, lease)),
+                scenario("HTTP confirmation", CommandDispatchOutcome.http(
+                        200, ACCEPTED, null, httpEvidence), Map.of(
+                        EngineCommandStatus.DISPATCHING, confirmedHttp,
+                        EngineCommandStatus.CONFIRMED, committedConfirmation)),
+                scenario("duplicate confirmation",
+                        CommandDispatchOutcome.duplicateResponse(duplicateEvidence), Map.of(
+                        EngineCommandStatus.DISPATCHING, confirmedDuplicate,
+                        EngineCommandStatus.CONFIRMED, committedConfirmation)),
+                scenario("observation confirmation",
+                        CommandDispatchOutcome.observation(observationEvidence), Map.of(
+                        EngineCommandStatus.PENDING, confirmedObservation,
+                        EngineCommandStatus.DISPATCHING, confirmedObservation,
+                        EngineCommandStatus.RETRYABLE, confirmedObservation,
+                        EngineCommandStatus.AWAITING_CONFIRMATION, confirmedObservation,
+                        EngineCommandStatus.CONFLICT, confirmedObservation,
+                        EngineCommandStatus.MANUAL_REVIEW, confirmedObservation,
+                        EngineCommandStatus.CONFIRMED, committedConfirmation)),
+                scenario("reconciliation confirmation",
+                        CommandDispatchOutcome.reconciliationConfirmed(reconciliationEvidence), Map.of(
+                        EngineCommandStatus.AWAITING_CONFIRMATION, confirmedReconciliation,
+                        EngineCommandStatus.CONFLICT, confirmedReconciliation,
+                        EngineCommandStatus.MANUAL_REVIEW, confirmedReconciliation,
+                        EngineCommandStatus.CONFIRMED, committedConfirmation)),
+                scenario("reconciliation absence",
+                        CommandDispatchOutcome.reconciliation(absence), Map.of(
+                        EngineCommandStatus.AWAITING_CONFIRMATION, absentRetry,
+                        EngineCommandStatus.CONFLICT, absentRetry,
+                        EngineCommandStatus.MANUAL_REVIEW, absentRetry)),
+                scenario("inconclusive reconciliation",
+                        CommandDispatchOutcome.reconciliation(inconclusiveEvidence), Map.of(
                         EngineCommandStatus.AWAITING_CONFIRMATION, inconclusive,
                         EngineCommandStatus.CONFLICT, inconclusive,
                         EngineCommandStatus.MANUAL_REVIEW, inconclusive)),
-                new Scenario("manual review", 1,
-                        CommandDispatchOutcome.manualReviewRequested(
-                                operator(type, false)), Map.of(
+                scenario("manual review",
+                        CommandDispatchOutcome.manualReviewRequested(manualAction), Map.of(
                         EngineCommandStatus.AWAITING_CONFIRMATION, manual,
                         EngineCommandStatus.CONFLICT, manual,
                         EngineCommandStatus.MANUAL_REVIEW, manual)),
-                new Scenario("reconciliation request", 1,
-                        CommandDispatchOutcome.reconciliationRequested(
-                                operator(type, false)), Map.of(
-                        EngineCommandStatus.AWAITING_CONFIRMATION, awaitingReview,
-                        EngineCommandStatus.CONFLICT, awaitingReview,
-                        EngineCommandStatus.MANUAL_REVIEW, awaitingReview)),
-                new Scenario("reviewed retry", 1,
+                scenario("reconciliation request",
+                        CommandDispatchOutcome.reconciliationRequested(reconcileAction), Map.of(
+                        EngineCommandStatus.AWAITING_CONFIRMATION, reconciling,
+                        EngineCommandStatus.CONFLICT, reconciling,
+                        EngineCommandStatus.MANUAL_REVIEW, reconciling)),
+                scenario("reviewed retry",
                         CommandDispatchOutcome.retryAfterReviewedAbsence(
-                                review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW),
-                                operator(type, false)), Map.of(
+                                operatorAbsence, retryAction), Map.of(
                         EngineCommandStatus.AWAITING_CONFIRMATION, reviewedRetry,
                         EngineCommandStatus.CONFLICT, reviewedRetry,
                         EngineCommandStatus.MANUAL_REVIEW, reviewedRetry,
                         EngineCommandStatus.RETRYABLE, reviewedRetry)),
-                new Scenario("cancel unsent", 0,
-                        CommandDispatchOutcome.cancelUnsent(
-                                operator(type, false)), Map.of(
+                scenario("cancel unsent",
+                        CommandDispatchOutcome.cancelUnsent(cancelAction), Map.of(
                         EngineCommandStatus.PENDING, cancelled,
                         EngineCommandStatus.RETRYABLE, cancelled,
-                        EngineCommandStatus.CANCELLED, cancelled)),
-                new Scenario("cancel after review", 1,
+                        EngineCommandStatus.CANCELLED,
+                                state(type, EngineCommandStatus.CANCELLED).committedDecision())),
+                scenario("cancel after review",
                         CommandDispatchOutcome.cancelAfterReviewedAbsence(
-                                review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW),
-                                operator(type, false)), Map.of(
-                        EngineCommandStatus.PENDING, cancelled,
-                        EngineCommandStatus.RETRYABLE, cancelled,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, cancelled,
-                        EngineCommandStatus.CONFLICT, cancelled,
-                        EngineCommandStatus.MANUAL_REVIEW, cancelled,
-                        EngineCommandStatus.CANCELLED, cancelled))
+                                operatorAbsence, cancelAction), Map.of(
+                        EngineCommandStatus.PENDING, reviewedCancelled,
+                        EngineCommandStatus.RETRYABLE, reviewedCancelled,
+                        EngineCommandStatus.AWAITING_CONFIRMATION, reviewedCancelled,
+                        EngineCommandStatus.CONFLICT, reviewedCancelled,
+                        EngineCommandStatus.MANUAL_REVIEW, reviewedCancelled))
         };
     }
 
-    @ParameterizedTest(name = "{0} is classified for every current command type")
-    @EnumSource(EngineCommand.Type.class)
-    void everyCurrentCommandTypeHasAnExplicitTerminalStateAndTargetClassification(
-            EngineCommand.Type type) {
-        assertThat(POLICY.expectedTerminalStates(type)).containsExactlyInAnyOrderElementsOf(switch (type) {
-            case CREATE_TASK -> java.util.Set.of(CommandDispatchOutcome.RemoteState.TASK_CREATED);
-            case CLAIM_TASK -> java.util.Set.of(CommandDispatchOutcome.RemoteState.TASK_CLAIMED);
-            case COMPLETE_TASK -> java.util.Set.of(CommandDispatchOutcome.RemoteState.TASK_COMPLETED);
-            case START_PROCESS -> java.util.Set.of(CommandDispatchOutcome.RemoteState.PROCESS_STARTED);
-            case CANCEL_PROCESS -> java.util.Set.of(
-                    CommandDispatchOutcome.RemoteState.PROCESS_CANCELLED,
-                    CommandDispatchOutcome.RemoteState.PROCESS_TERMINATED);
-            case DEPLOY_ORCHESTRATION -> java.util.Set.of(
-                    CommandDispatchOutcome.RemoteState.ORCHESTRATION_DEPLOYED);
-            case CORRELATE_MESSAGE -> java.util.Set.of(
-                    CommandDispatchOutcome.RemoteState.MESSAGE_CORRELATED);
-        });
-        assertThat(POLICY.isResourceTargeted(type)).isEqualTo(switch (type) {
-            case CREATE_TASK, CLAIM_TASK, COMPLETE_TASK, CANCEL_PROCESS -> true;
-            case START_PROCESS, DEPLOY_ORCHESTRATION, CORRELATE_MESSAGE -> false;
-        });
-    }
-
-    @ParameterizedTest(name = "{0} × {1} confirmation order")
-    @MethodSource("confirmationOrderPermutations")
-    void everyMatchingConfirmationSourceIsIdempotentInEveryOrder(
+    @ParameterizedTest(name = "{0}: {1} then {2}")
+    @MethodSource("confirmationSourcePermutations")
+    void laterConfirmationSourcesPreserveTheFirstCommittedDecisionExactly(
             EngineCommand.Type type,
-            CommandDispatchOutcome.ConfirmationSource first,
-            CommandDispatchOutcome.ConfirmationSource replay) {
-        EngineCommandPolicy.CommandContext command = command(type);
-        EngineCommandStatus start = first == RECONCILIATION
+            CommandDispatchOutcome.ConfirmationSource firstSource,
+            CommandDispatchOutcome.ConfirmationSource laterSource) {
+        EngineCommandStatus initialStatus = firstSource == RECONCILIATION
                 ? EngineCommandStatus.AWAITING_CONFIRMATION : EngineCommandStatus.DISPATCHING;
-        EngineCommandPolicy.Decision initial = POLICY.transition(
-                command, start, 1, confirmationOutcome(type, first));
+        var firstEvidence = confirmation(type, firstSource);
+        var expectedFirst = confirmed(firstEvidence);
+        var first = POLICY.transition(state(type, initialStatus),
+                confirmationOutcome(type, firstSource));
+        assertThat(first).isEqualTo(expectedFirst);
 
-        assertThat(initial.status()).isEqualTo(EngineCommandStatus.CONFIRMED);
-        assertThat(POLICY.transition(command, EngineCommandStatus.CONFIRMED, 1,
-                confirmationOutcome(type, replay)).status())
-                .isEqualTo(EngineCommandStatus.CONFIRMED);
+        EngineCommandPolicy laterPolicy = new EngineCommandPolicy(Clock.fixed(
+                NOW.plus(Duration.ofDays(4)), ZoneOffset.UTC));
+        var replay = laterPolicy.transition(new EngineCommandPolicy.CommandState(
+                command(type), first), confirmationOutcome(type, laterSource));
+
+        assertThat(replay).isEqualTo(expectedFirst);
+        assertThat(replay.terminalConfirmation().source()).isEqualTo(firstSource);
+        assertThat(replay.terminalConfirmation().evidenceReference())
+                .isEqualTo("evidence:" + sourceName(firstSource));
+        assertThat(replay.decidedAt()).isEqualTo(NOW_OFFSET);
     }
 
-    static Stream<Arguments> confirmationOrderPermutations() {
+    static Stream<Arguments> confirmationSourcePermutations() {
         return Stream.of(EngineCommand.Type.values()).flatMap(type ->
                 Stream.of(CommandDispatchOutcome.ConfirmationSource.values()).flatMap(first ->
-                        Stream.of(CommandDispatchOutcome.ConfirmationSource.values()).map(replay ->
-                                Arguments.of(type, first, replay))));
-    }
-
-    @ParameterizedTest(name = "reject {0} mismatch even after terminal confirmation")
-    @MethodSource("mismatchedConfirmationEvidence")
-    void confirmationEvidenceMustMatchTheWholeCommandIdentityEvenAfterConfirmed(
-            String mismatch, CommandDispatchOutcome.ConfirmationEvidence evidence) {
-        EngineCommandPolicy.CommandContext command = command(EngineCommand.Type.COMPLETE_TASK);
-        CommandDispatchOutcome outcome = CommandDispatchOutcome.observation(evidence);
-
-        assertThatThrownBy(() -> POLICY.transition(
-                command, EngineCommandStatus.DISPATCHING, 1, outcome))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(mismatch);
-        assertThatThrownBy(() -> POLICY.transition(
-                command, EngineCommandStatus.CONFIRMED, 1, outcome))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(mismatch);
-    }
-
-    static Stream<Arguments> mismatchedConfirmationEvidence() {
-        EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
-        CommandDispatchOutcome.ConfirmationEvidence matching = confirmation(type, OBSERVATION);
-        return Stream.of(
-                Arguments.of("tenant", copy(matching, "other-tenant", matching.operationId(),
-                        matching.commandId(), type, matching.expectedTargetIdentity(),
-                        matching.remoteIdentity(), matching.remoteState(), OBSERVATION)),
-                Arguments.of("operation", copy(matching, matching.tenantId(), "other-operation",
-                        matching.commandId(), type, matching.expectedTargetIdentity(),
-                        matching.remoteIdentity(), matching.remoteState(), OBSERVATION)),
-                Arguments.of("command", copy(matching, matching.tenantId(), matching.operationId(),
-                        "other-command", type, matching.expectedTargetIdentity(),
-                        matching.remoteIdentity(), matching.remoteState(), OBSERVATION)),
-                Arguments.of("type", copy(matching, matching.tenantId(), matching.operationId(),
-                        matching.commandId(), EngineCommand.Type.CLAIM_TASK,
-                        matching.expectedTargetIdentity(), matching.remoteIdentity(),
-                        CommandDispatchOutcome.RemoteState.TASK_CLAIMED, OBSERVATION)),
-                Arguments.of("target", copy(matching, matching.tenantId(), matching.operationId(),
-                        matching.commandId(), type, "other-target", matching.remoteIdentity(),
-                        matching.remoteState(), OBSERVATION)),
-                Arguments.of("remote identity", copy(matching, matching.tenantId(),
-                        matching.operationId(), matching.commandId(), type,
-                        matching.expectedTargetIdentity(), "other-task",
-                        matching.remoteState(), OBSERVATION)),
-                Arguments.of("state", copy(matching, matching.tenantId(), matching.operationId(),
-                        matching.commandId(), type, matching.expectedTargetIdentity(),
-                        matching.remoteIdentity(), CommandDispatchOutcome.RemoteState.TASK_CLAIMED,
-                        OBSERVATION)),
-                Arguments.of("source", copy(matching, matching.tenantId(), matching.operationId(),
-                        matching.commandId(), type, matching.expectedTargetIdentity(),
-                        matching.remoteIdentity(), matching.remoteState(), HTTP_RESPONSE)));
+                        Stream.of(CommandDispatchOutcome.ConfirmationSource.values()).map(later ->
+                                Arguments.of(type, first, later))));
     }
 
     @ParameterizedTest
     @EnumSource(EngineCommand.Type.class)
-    void wrongTerminalStateIsRejectedForEveryCommandType(EngineCommand.Type type) {
-        CommandDispatchOutcome.ConfirmationEvidence matching = confirmation(type, OBSERVATION);
-        CommandDispatchOutcome.RemoteState wrongState = switch (type) {
-            case CREATE_TASK -> CommandDispatchOutcome.RemoteState.TASK_COMPLETED;
-            case CLAIM_TASK -> CommandDispatchOutcome.RemoteState.TASK_CREATED;
-            case COMPLETE_TASK -> CommandDispatchOutcome.RemoteState.TASK_CLAIMED;
-            case START_PROCESS -> CommandDispatchOutcome.RemoteState.PROCESS_TERMINATED;
-            case CANCEL_PROCESS -> CommandDispatchOutcome.RemoteState.PROCESS_STARTED;
-            case DEPLOY_ORCHESTRATION -> CommandDispatchOutcome.RemoteState.PROCESS_STARTED;
-            case CORRELATE_MESSAGE -> CommandDispatchOutcome.RemoteState.PROCESS_STARTED;
-        };
-        CommandDispatchOutcome.ConfirmationEvidence wrong = copy(
-                matching, matching.tenantId(), matching.operationId(), matching.commandId(),
-                type, matching.expectedTargetIdentity(), matching.remoteIdentity(),
-                wrongState, OBSERVATION);
+    void terminalReplayRejectsAChangedRemoteResultIdentityOrState(EngineCommand.Type type) {
+        var original = confirmation(type, HTTP_RESPONSE);
+        var committed = confirmed(original);
+        var state = new EngineCommandPolicy.CommandState(command(type), committed);
+        var wrongIdentity = new CommandDispatchOutcome.ConfirmationEvidence(
+                original.tenantId(), original.operationId(), original.commandId(), type,
+                original.expectedTargetIdentity(), "different-remote-result",
+                original.remoteState(), OBSERVATION, "evidence:changed-identity");
+        var wrongState = new CommandDispatchOutcome.ConfirmationEvidence(
+                original.tenantId(), original.operationId(), original.commandId(), type,
+                original.expectedTargetIdentity(), original.remoteIdentity(),
+                wrongState(type), OBSERVATION, "evidence:changed-state");
 
-        assertThatThrownBy(() -> POLICY.transition(command(type),
-                EngineCommandStatus.DISPATCHING, 1,
-                CommandDispatchOutcome.observation(wrong)))
+        assertThatThrownBy(() -> POLICY.transition(
+                state, CommandDispatchOutcome.observation(wrongIdentity)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("remote identity");
+        assertThatThrownBy(() -> POLICY.transition(
+                state, CommandDispatchOutcome.observation(wrongState)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("state");
     }
 
-    @ParameterizedTest(name = "HTTP {0}/{1} for {2} -> {3}")
-    @MethodSource("httpDecisionTable")
-    void httpStatusAndAcceptanceAreClassifiedIndependently(
-            int status, CommandDispatchOutcome.Acceptance acceptance,
-            EngineCommand.Type type, EngineCommandStatus expectedStatus,
-            String expectedCode, Duration retryAfter, OffsetDateTime expectedRetryAt) {
-        EngineCommandPolicy.Decision decision = POLICY.transition(command(type),
-                EngineCommandStatus.DISPATCHING, 1,
-                CommandDispatchOutcome.http(status, acceptance, retryAfter, null));
+    @ParameterizedTest
+    @MethodSource("operatorReplayCases")
+    void onlyTheExactCommittedOperatorActionAndEvidenceCanReplay(
+            EngineCommandPolicy.CommandState initial,
+            CommandDispatchOutcome outcome,
+            EngineCommandPolicy.Decision expected) {
+        var first = POLICY.transition(initial, outcome);
+        assertThat(first).isEqualTo(expected);
 
-        assertThat(decision.status()).isEqualTo(expectedStatus);
-        assertThat(decision.errorCode()).isEqualTo(expectedCode);
-        assertThat(decision.nextAttemptAt()).isEqualTo(expectedRetryAt);
+        EngineCommandPolicy laterPolicy = new EngineCommandPolicy(Clock.fixed(
+                NOW.plus(Duration.ofDays(2)), ZoneOffset.UTC));
+        assertThat(laterPolicy.transition(new EngineCommandPolicy.CommandState(
+                initial.command(), first), outcome)).isEqualTo(expected);
+    }
+
+    static Stream<Arguments> operatorReplayCases() {
+        EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
+        var manual = operator(type, MANUAL_REVIEW, "action:manual-replay", false, NOW_OFFSET);
+        var reconcile = operator(type, RECONCILE, "action:reconcile-replay", false, NOW_OFFSET);
+        var cancel = operator(type, CANCEL, "action:cancel-replay", false, NOW_OFFSET);
+        var retry = operator(type, RETRY_OVERRIDE, "action:retry-replay", false, NOW_OFFSET);
+        var operatorAbsence = review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW);
+        return Stream.of(
+                Arguments.of(state(type, EngineCommandStatus.AWAITING_CONFIRMATION),
+                        CommandDispatchOutcome.manualReviewRequested(manual),
+                        decision(EngineCommandStatus.MANUAL_REVIEW, NOW_OFFSET, null,
+                                "review.requested", "Operator requested manual review",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, manual)),
+                Arguments.of(state(type, EngineCommandStatus.MANUAL_REVIEW),
+                        CommandDispatchOutcome.reconciliationRequested(reconcile),
+                        decision(EngineCommandStatus.AWAITING_CONFIRMATION, NOW_OFFSET, null,
+                                "reconcile.requested", "Operator requested reconciliation",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, reconcile)),
+                Arguments.of(state(type, EngineCommandStatus.AWAITING_CONFIRMATION),
+                        CommandDispatchOutcome.retryAfterReviewedAbsence(operatorAbsence, retry),
+                        decision(EngineCommandStatus.RETRYABLE, NOW_OFFSET, NOW_OFFSET,
+                                "review.retry", "Reviewed evidence permits another dispatch attempt",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, operatorAbsence, retry)),
+                Arguments.of(state(type, EngineCommandStatus.PENDING),
+                        CommandDispatchOutcome.cancelUnsent(cancel),
+                        decision(EngineCommandStatus.CANCELLED, NOW_OFFSET, null,
+                                null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, cancel)),
+                Arguments.of(state(type, EngineCommandStatus.AWAITING_CONFIRMATION),
+                        CommandDispatchOutcome.cancelAfterReviewedAbsence(operatorAbsence, cancel),
+                        decision(EngineCommandStatus.CANCELLED, NOW_OFFSET, null,
+                                null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, operatorAbsence, cancel)));
+    }
+
+    @Test
+    void repackagingAnAppliedActionIdOrUsingTheWrongActionTypeFailsClosed() {
+        EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
+        var action = operator(type, MANUAL_REVIEW, "action:stable", false, NOW_OFFSET);
+        var first = POLICY.transition(state(type, EngineCommandStatus.AWAITING_CONFIRMATION),
+                CommandDispatchOutcome.manualReviewRequested(action));
+        var committed = new EngineCommandPolicy.CommandState(command(type), first);
+        var repackaged = new CommandDispatchOutcome.OperatorAction(
+                "tenant-a", "operation-a", "command-a", type, expectedTarget(type),
+                MANUAL_REVIEW, "action:stable", "audit:different", NOW_OFFSET, false);
+
+        assertThatThrownBy(() -> POLICY.transition(committed,
+                CommandDispatchOutcome.manualReviewRequested(repackaged)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("repackaged");
+        assertThatThrownBy(() -> CommandDispatchOutcome.reconciliationRequested(action))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("action type");
+    }
+
+    @Test
+    void lifetimeAttemptsRemainMonotonicAcrossAnAuditedBudgetReset() {
+        EngineCommand.Type type = EngineCommand.Type.START_PROCESS;
+        var initial = decision(EngineCommandStatus.PENDING, PRIOR, null,
+                null, null, 0, 0, 0, false, null, null, null);
+        var firstDispatch = POLICY.transition(new EngineCommandPolicy.CommandState(
+                command(type), initial), CommandDispatchOutcome.dispatchRequested());
+        assertThat(firstDispatch).isEqualTo(decision(
+                EngineCommandStatus.DISPATCHING, NOW_OFFSET, null, null, null,
+                1, 1, 0, false, null, null, null));
+
+        var firstFailure = POLICY.transition(new EngineCommandPolicy.CommandState(
+                command(type), firstDispatch),
+                CommandDispatchOutcome.transportFailure(PRE_SEND_ZERO_BYTES));
+        assertThat(firstFailure).isEqualTo(decision(
+                EngineCommandStatus.RETRYABLE, NOW_OFFSET,
+                OffsetDateTime.parse("2026-08-28T12:00:53.424Z"),
+                "transport.not_sent", "Remote request sent zero bytes",
+                1, 1, 0, false, null, null, null));
+
+        var exhaustedReview = decision(EngineCommandStatus.MANUAL_REVIEW, PRIOR, null,
+                "prior.review", "Prior review", 10,
+                EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS, 3,
+                false, null, null, null);
+        var absence = review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW);
+        var override = operator(type, RETRY_OVERRIDE,
+                "action:override", true, NOW_OFFSET);
+        var overridden = POLICY.transition(new EngineCommandPolicy.CommandState(
+                command(type), exhaustedReview),
+                CommandDispatchOutcome.retryAfterReviewedAbsence(absence, override));
+        var expectedOverride = decision(EngineCommandStatus.RETRYABLE, NOW_OFFSET, NOW_OFFSET,
+                "review.retry", "Reviewed evidence permits another dispatch attempt",
+                10, 0, 4, true, null, absence, override);
+        assertThat(overridden).isEqualTo(expectedOverride);
+        assertThat(POLICY.transition(new EngineCommandPolicy.CommandState(
+                command(type), overridden),
+                CommandDispatchOutcome.retryAfterReviewedAbsence(absence, override)))
+                .isEqualTo(expectedOverride);
+
+        var nextDispatch = POLICY.transition(new EngineCommandPolicy.CommandState(
+                command(type), overridden), CommandDispatchOutcome.dispatchRequested());
+        assertThat(nextDispatch).isEqualTo(decision(
+                EngineCommandStatus.DISPATCHING, NOW_OFFSET, null, null, null,
+                11, 1, 4, false, null, null, null));
+    }
+
+    @Test
+    void lifetimeAndEpochCountersNeverOverflow() {
+        EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
+        var lifetimeMax = decision(EngineCommandStatus.RETRYABLE, PRIOR, PRIOR.plusMinutes(1),
+                "prior.retry", "Prior retry", Long.MAX_VALUE, 0, 1,
+                false, null, null, null);
+        assertThatThrownBy(() -> POLICY.transition(new EngineCommandPolicy.CommandState(
+                command(type), lifetimeMax), CommandDispatchOutcome.dispatchRequested()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lifetime");
+
+        var epochMax = decision(EngineCommandStatus.MANUAL_REVIEW, PRIOR, null,
+                "prior.review", "Prior review", 20,
+                EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS, Long.MAX_VALUE,
+                false, null, null, null);
+        var absence = review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW);
+        var override = operator(type, RETRY_OVERRIDE,
+                "action:epoch-overflow", true, NOW_OFFSET);
+        assertThatThrownBy(() -> POLICY.transition(new EngineCommandPolicy.CommandState(
+                command(type), epochMax),
+                CommandDispatchOutcome.retryAfterReviewedAbsence(absence, override)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("epoch");
+    }
+
+    @ParameterizedTest
+    @MethodSource("httpDecisionTable")
+    void httpAcceptanceAndRetryAfterProduceTheCompleteExpectedDecision(
+            int status, CommandDispatchOutcome.Acceptance acceptance,
+            EngineCommand.Type type, Duration retryAfter,
+            EngineCommandPolicy.Decision expected) {
+        assertThat(POLICY.transition(state(type, EngineCommandStatus.DISPATCHING),
+                CommandDispatchOutcome.http(status, acceptance, retryAfter, null)))
+                .isEqualTo(expected);
     }
 
     static Stream<Arguments> httpDecisionTable() {
         return Stream.of(
-                http(200, ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, "response.unconfirmed", null, null),
-                http(202, ACCEPTED, EngineCommand.Type.START_PROCESS,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, "response.unconfirmed", null, null),
-                http(400, PROVEN_NOT_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.FAILED, "http.400.rejected", null, null),
-                http(401, PROVEN_NOT_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.FAILED, "http.401.rejected", null, null),
-                http(403, PROVEN_NOT_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.FAILED, "http.403.rejected", null, null),
-                http(404, PROVEN_NOT_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.FAILED, "http.404.rejected", null, null),
-                http(404, PROVEN_NOT_ACCEPTED, EngineCommand.Type.CANCEL_PROCESS,
-                        EngineCommandStatus.CONFLICT, "target.not_found", null, null),
-                http(404, POSSIBLY_ACCEPTED, EngineCommand.Type.CANCEL_PROCESS,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, "response.ambiguous", null, null),
+                http(400, PROVEN_NOT_ACCEPTED, EngineCommand.Type.COMPLETE_TASK, null,
+                        decision(EngineCommandStatus.FAILED, NOW_OFFSET, null,
+                                "http.400.rejected", "Remote endpoint definitively rejected the request",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, null)),
+                http(404, PROVEN_NOT_ACCEPTED, EngineCommand.Type.CANCEL_PROCESS, null,
+                        decision(EngineCommandStatus.CONFLICT, NOW_OFFSET, null,
+                                "target.not_found",
+                                "Cancellation target was not found without terminal proof",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, null)),
                 http(408, PROVEN_NOT_ACCEPTED, EngineCommand.Type.START_PROCESS,
-                        EngineCommandStatus.RETRYABLE, "http.408.not_accepted",
-                        Duration.ofMinutes(10), OffsetDateTime.parse("2026-08-28T12:10:00Z")),
-                http(408, POSSIBLY_ACCEPTED, EngineCommand.Type.START_PROCESS,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, "response.ambiguous", null, null),
-                http(425, PROVEN_NOT_ACCEPTED, EngineCommand.Type.CORRELATE_MESSAGE,
-                        EngineCommandStatus.RETRYABLE, "http.425.not_accepted", null, FIRST_RETRY),
-                http(425, POSSIBLY_ACCEPTED, EngineCommand.Type.CORRELATE_MESSAGE,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, "response.ambiguous", null, null),
+                        Duration.ofMinutes(10), decision(EngineCommandStatus.RETRYABLE,
+                                NOW_OFFSET, OffsetDateTime.parse("2026-08-28T12:10:00Z"),
+                                "http.408.not_accepted",
+                                "Remote endpoint proved the request was not accepted",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, null)),
+                http(425, POSSIBLY_ACCEPTED, EngineCommand.Type.CORRELATE_MESSAGE, null,
+                        decision(EngineCommandStatus.AWAITING_CONFIRMATION, NOW_OFFSET, null,
+                                "response.ambiguous", "Remote request may have been accepted",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, null)),
                 http(429, PROVEN_NOT_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.RETRYABLE, "http.429.not_accepted",
-                        Duration.ofMinutes(30), OffsetDateTime.parse("2026-08-28T12:30:00Z")),
-                http(429, POSSIBLY_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, "response.ambiguous", null, null),
-                http(409, PROVEN_NOT_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.CONFLICT, "http.409.conflict", null, null),
-                http(422, PROVEN_NOT_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.FAILED, "http.422.rejected", null, null),
-                http(500, PROVEN_NOT_ACCEPTED, EngineCommand.Type.START_PROCESS,
-                        EngineCommandStatus.RETRYABLE, "http.500.not_accepted", null, FIRST_RETRY),
-                http(500, POSSIBLY_ACCEPTED, EngineCommand.Type.START_PROCESS,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, "response.ambiguous", null, null),
+                        Duration.ofMinutes(30), decision(EngineCommandStatus.RETRYABLE,
+                                NOW_OFFSET, OffsetDateTime.parse("2026-08-28T12:30:00Z"),
+                                "http.429.not_accepted",
+                                "Remote endpoint proved the request was not accepted",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, null)),
+                http(500, POSSIBLY_ACCEPTED, EngineCommand.Type.START_PROCESS, null,
+                        decision(EngineCommandStatus.AWAITING_CONFIRMATION, NOW_OFFSET, null,
+                                "response.ambiguous", "Remote request may have been accepted",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, null)),
                 http(503, PROVEN_NOT_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.RETRYABLE, "http.503.not_accepted",
-                        Duration.ofHours(2), OffsetDateTime.parse("2026-08-28T14:00:00Z")),
-                http(503, POSSIBLY_ACCEPTED, EngineCommand.Type.COMPLETE_TASK,
-                        EngineCommandStatus.AWAITING_CONFIRMATION, "response.ambiguous", null, null));
+                        Duration.ofHours(2), decision(EngineCommandStatus.RETRYABLE,
+                                NOW_OFFSET, OffsetDateTime.parse("2026-08-28T14:00:00Z"),
+                                "http.503.not_accepted",
+                                "Remote endpoint proved the request was not accepted",
+                                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                                null, null, null)));
     }
 
-    @ParameterizedTest(name = "{0} transport phase -> {1}")
+    @ParameterizedTest
     @MethodSource("transportDecisionTable")
-    void onlyProvenZeroByteTransportFailuresCanRetry(
+    void everyTransportPhaseProducesTheCompleteExpectedDecision(
             CommandDispatchOutcome.TransportFailure failure,
-            EngineCommandStatus expected, String code, OffsetDateTime retryAt) {
-        EngineCommandPolicy.Decision decision = POLICY.transition(
-                command(EngineCommand.Type.START_PROCESS), EngineCommandStatus.DISPATCHING, 1,
-                CommandDispatchOutcome.transportFailure(failure));
-
-        assertThat(decision.status()).isEqualTo(expected);
-        assertThat(decision.errorCode()).isEqualTo(code);
-        assertThat(decision.nextAttemptAt()).isEqualTo(retryAt);
+            EngineCommandPolicy.Decision expected) {
+        assertThat(POLICY.transition(state(
+                EngineCommand.Type.START_PROCESS, EngineCommandStatus.DISPATCHING),
+                CommandDispatchOutcome.transportFailure(failure))).isEqualTo(expected);
     }
 
     static Stream<Arguments> transportDecisionTable() {
+        var retry = decision(EngineCommandStatus.RETRYABLE, NOW_OFFSET, SECOND_RETRY,
+                "transport.not_sent", "Remote request sent zero bytes",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, null);
+        var awaiting = decision(EngineCommandStatus.AWAITING_CONFIRMATION, NOW_OFFSET, null,
+                "transport.possibly_sent", "Remote request may have been sent",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false, null, null, null);
         return Stream.of(
-                Arguments.of(PRE_CONNECT_FAILURE, EngineCommandStatus.RETRYABLE,
-                        "transport.not_sent", FIRST_RETRY),
-                Arguments.of(PRE_SEND_ZERO_BYTES, EngineCommandStatus.RETRYABLE,
-                        "transport.not_sent", FIRST_RETRY),
-                Arguments.of(MID_WRITE_FAILURE, EngineCommandStatus.AWAITING_CONFIRMATION,
-                        "transport.possibly_sent", null),
-                Arguments.of(TIMEOUT, EngineCommandStatus.AWAITING_CONFIRMATION,
-                        "transport.possibly_sent", null),
-                Arguments.of(READ_FAILURE, EngineCommandStatus.AWAITING_CONFIRMATION,
-                        "transport.possibly_sent", null),
-                Arguments.of(UNKNOWN, EngineCommandStatus.AWAITING_CONFIRMATION,
-                        "transport.possibly_sent", null));
+                Arguments.of(PRE_CONNECT_FAILURE, retry),
+                Arguments.of(PRE_SEND_ZERO_BYTES, retry),
+                Arguments.of(MID_WRITE_FAILURE, awaiting),
+                Arguments.of(TIMEOUT, awaiting),
+                Arguments.of(READ_FAILURE, awaiting),
+                Arguments.of(UNKNOWN, awaiting));
     }
 
     @Test
-    void cancellationRequiresExactCancelledOrTerminatedEvidenceRatherThan404OrAbsence() {
-        EngineCommandPolicy.CommandContext command = command(EngineCommand.Type.CANCEL_PROCESS);
-
-        assertThat(POLICY.transition(command, EngineCommandStatus.DISPATCHING, 1,
-                CommandDispatchOutcome.http(404, PROVEN_NOT_ACCEPTED, null, null)).status())
-                .isEqualTo(EngineCommandStatus.CONFLICT);
-        assertThat(POLICY.transition(command, EngineCommandStatus.AWAITING_CONFIRMATION, 1,
-                CommandDispatchOutcome.reconciliation(review(EngineCommand.Type.CANCEL_PROCESS,
-                        DEFINITIVE_ABSENCE,
-                        CommandDispatchOutcome.ReviewSource.RECONCILIATION))).status())
-                .isEqualTo(EngineCommandStatus.RETRYABLE);
-        assertThat(POLICY.transition(command, EngineCommandStatus.AWAITING_CONFIRMATION, 1,
-                CommandDispatchOutcome.observation(confirmation(
-                        EngineCommand.Type.CANCEL_PROCESS, OBSERVATION))).status())
-                .isEqualTo(EngineCommandStatus.CONFIRMED);
-        assertThatThrownBy(() -> CommandDispatchOutcome.http(
-                404, PROVEN_NOT_ACCEPTED, null,
-                confirmation(EngineCommand.Type.CANCEL_PROCESS, HTTP_RESPONSE)))
+    void commandAndEvidenceBindingsRemainFailClosed() {
+        EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
+        var matching = confirmation(type, OBSERVATION);
+        var wrongTenant = new CommandDispatchOutcome.ConfirmationEvidence(
+                "other-tenant", matching.operationId(), matching.commandId(), type,
+                matching.expectedTargetIdentity(), matching.remoteIdentity(),
+                matching.remoteState(), OBSERVATION, "evidence:wrong-tenant");
+        assertThatThrownBy(() -> POLICY.transition(
+                state(type, EngineCommandStatus.DISPATCHING),
+                CommandDispatchOutcome.observation(wrongTenant)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("2xx");
+                .hasMessageContaining("tenant");
     }
 
-    @Test
-    void reviewEvidenceIsBoundAndCannotAuthorizeAnotherCommand() {
-        CommandDispatchOutcome.ReviewEvidence wrong = new CommandDispatchOutcome.ReviewEvidence(
-                "tenant-a", "operation-a", "another-command", EngineCommand.Type.COMPLETE_TASK,
-                "task-a", DEFINITIVE_ABSENCE,
-                CommandDispatchOutcome.ReviewSource.RECONCILIATION, "review:44");
+    @ParameterizedTest(name = "reject {0} mismatch before and after confirmation")
+    @MethodSource("mismatchedConfirmationBindings")
+    void everyConfirmationBindingRemainsFailClosedAfterTerminalCommit(
+            String mismatch, CommandDispatchOutcome.ConfirmationEvidence evidence) {
+        EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
+        CommandDispatchOutcome outcome = CommandDispatchOutcome.observation(evidence);
 
-        assertThatThrownBy(() -> POLICY.transition(command(EngineCommand.Type.COMPLETE_TASK),
-                EngineCommandStatus.AWAITING_CONFIRMATION, 1,
-                CommandDispatchOutcome.reconciliation(wrong)))
+        assertThatThrownBy(() -> POLICY.transition(
+                state(type, EngineCommandStatus.DISPATCHING), outcome))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("command");
+                .hasMessageContaining(mismatch);
+        assertThatThrownBy(() -> POLICY.transition(
+                state(type, EngineCommandStatus.CONFIRMED), outcome))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(mismatch);
+    }
+
+    static Stream<Arguments> mismatchedConfirmationBindings() {
+        EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
+        return Stream.of(
+                mismatch("tenant", "other-tenant", "operation-a", "command-a", type,
+                        "task-a", "task-a", CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                        OBSERVATION),
+                mismatch("operation", "tenant-a", "other-operation", "command-a", type,
+                        "task-a", "task-a", CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                        OBSERVATION),
+                mismatch("command", "tenant-a", "operation-a", "other-command", type,
+                        "task-a", "task-a", CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                        OBSERVATION),
+                mismatch("type", "tenant-a", "operation-a", "command-a",
+                        EngineCommand.Type.CLAIM_TASK, "task-a", "task-a",
+                        CommandDispatchOutcome.RemoteState.TASK_CLAIMED, OBSERVATION),
+                mismatch("target", "tenant-a", "operation-a", "command-a", type,
+                        "other-task", "task-a",
+                        CommandDispatchOutcome.RemoteState.TASK_COMPLETED, OBSERVATION),
+                mismatch("remote identity", "tenant-a", "operation-a", "command-a", type,
+                        "task-a", "other-task",
+                        CommandDispatchOutcome.RemoteState.TASK_COMPLETED, OBSERVATION),
+                mismatch("state", "tenant-a", "operation-a", "command-a", type,
+                        "task-a", "task-a",
+                        CommandDispatchOutcome.RemoteState.TASK_CLAIMED, OBSERVATION),
+                mismatch("source", "tenant-a", "operation-a", "command-a", type,
+                        "task-a", "task-a",
+                        CommandDispatchOutcome.RemoteState.TASK_COMPLETED, HTTP_RESPONSE));
     }
 
     @Test
-    void manualActionsAreAuditedReplayIdempotentAndExplicitAboutBudgetOverride() {
-        EngineCommandPolicy.CommandContext command = command(EngineCommand.Type.COMPLETE_TASK);
-        CommandDispatchOutcome.ReviewEvidence absence = review(
-                EngineCommand.Type.COMPLETE_TASK, DEFINITIVE_ABSENCE, OPERATOR_REVIEW);
-        CommandDispatchOutcome.OperatorAction ordinary = operator(
-                EngineCommand.Type.COMPLETE_TASK, false);
-        CommandDispatchOutcome retry = CommandDispatchOutcome.retryAfterReviewedAbsence(
-                absence, ordinary);
-
-        EngineCommandPolicy.Decision first = POLICY.transition(command,
-                EngineCommandStatus.MANUAL_REVIEW, 2, retry);
-        EngineCommandPolicy.Decision replay = POLICY.transition(command,
-                EngineCommandStatus.RETRYABLE, 2, retry);
-
-        assertThat(first).isEqualTo(replay);
-        assertThat(first.operatorActionId()).isEqualTo("operator-action-7");
-        assertThat(first.auditReference()).isEqualTo("audit:operator-action-7");
-        assertThat(first.resetAutomaticAttempts()).isFalse();
-        assertThat(first.totalDispatchAttempts()).isEqualTo(2);
-
-        CommandDispatchOutcome override = CommandDispatchOutcome.retryAfterReviewedAbsence(
-                absence, operator(EngineCommand.Type.COMPLETE_TASK, true));
-        EngineCommandPolicy.Decision overridden = POLICY.transition(command,
-                EngineCommandStatus.MANUAL_REVIEW,
-                EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS, override);
-        assertThat(overridden.status()).isEqualTo(EngineCommandStatus.RETRYABLE);
-        assertThat(overridden.resetAutomaticAttempts()).isTrue();
-        assertThat(overridden.totalDispatchAttempts()).isZero();
-        assertThat(POLICY.transition(command, EngineCommandStatus.RETRYABLE,
-                overridden.totalDispatchAttempts(), override)).isEqualTo(overridden);
-
-        assertThatThrownBy(() -> POLICY.transition(command,
-                EngineCommandStatus.MANUAL_REVIEW,
-                EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS, retry))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("override");
-        assertThatThrownBy(() -> POLICY.transition(command,
-                EngineCommandStatus.MANUAL_REVIEW, 2, override))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("override");
-    }
-
-    @Test
-    void allManualActionKindsAreReplayIdempotentAndCarryAuditIdentity() {
-        EngineCommandPolicy.CommandContext command = command(EngineCommand.Type.COMPLETE_TASK);
-        CommandDispatchOutcome.OperatorAction action = operator(
-                EngineCommand.Type.COMPLETE_TASK, false);
-
-        assertManualReplay(command, EngineCommandStatus.AWAITING_CONFIRMATION,
-                EngineCommandStatus.MANUAL_REVIEW,
-                CommandDispatchOutcome.manualReviewRequested(action));
-        assertManualReplay(command, EngineCommandStatus.MANUAL_REVIEW,
-                EngineCommandStatus.AWAITING_CONFIRMATION,
-                CommandDispatchOutcome.reconciliationRequested(action));
-        assertManualReplay(command, EngineCommandStatus.PENDING,
-                EngineCommandStatus.CANCELLED,
-                CommandDispatchOutcome.cancelUnsent(action));
-        assertManualReplay(command, EngineCommandStatus.AWAITING_CONFIRMATION,
-                EngineCommandStatus.CANCELLED,
-                CommandDispatchOutcome.cancelAfterReviewedAbsence(
-                        review(EngineCommand.Type.COMPLETE_TASK, DEFINITIVE_ABSENCE,
-                                OPERATOR_REVIEW), action));
-    }
-
-    @Test
-    void dispatchCounterMeansTotalStartedAttemptsAndAutomaticBudgetIsSeparate() {
-        EngineCommandPolicy.CommandContext command = command(EngineCommand.Type.START_PROCESS);
-
-        EngineCommandPolicy.Decision firstDispatch = POLICY.transition(
-                command, EngineCommandStatus.PENDING, 0,
-                CommandDispatchOutcome.dispatchRequested());
-        assertThat(firstDispatch.totalDispatchAttempts()).isEqualTo(1);
-
-        EngineCommandPolicy.Decision finalAutomaticRetry = POLICY.transition(command,
-                EngineCommandStatus.DISPATCHING,
-                EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS - 1,
-                CommandDispatchOutcome.transportFailure(PRE_SEND_ZERO_BYTES));
-        assertThat(finalAutomaticRetry.status()).isEqualTo(EngineCommandStatus.RETRYABLE);
-        assertThat(finalAutomaticRetry.nextAttemptAt())
-                .isBetween(OffsetDateTime.parse("2026-08-28T20:00:00Z"),
-                        OffsetDateTime.parse("2026-08-29T00:00:00Z"));
-
-        EngineCommandPolicy.Decision exhausted = POLICY.transition(command,
-                EngineCommandStatus.DISPATCHING,
-                EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS,
-                CommandDispatchOutcome.transportFailure(PRE_SEND_ZERO_BYTES));
-        assertThat(exhausted.status()).isEqualTo(EngineCommandStatus.FAILED);
-        assertThat(exhausted.errorCode()).isEqualTo("attempts.exhausted");
-    }
-
-    @Test
-    void retrySchedulingSaturatesAtPersistableTimestampAndBoundsRetryAfter() {
-        EngineCommandPolicy farFuturePolicy = new EngineCommandPolicy(Clock.fixed(
-                Instant.parse("9999-12-31T23:59:59.999998Z"), ZoneOffset.UTC));
-        EngineCommandPolicy.Decision saturated = farFuturePolicy.transition(
-                command(EngineCommand.Type.COMPLETE_TASK), EngineCommandStatus.DISPATCHING, 1,
-                CommandDispatchOutcome.transportFailure(PRE_SEND_ZERO_BYTES));
-        assertThat(saturated.nextAttemptAt()).isEqualTo(
-                EngineCommandPolicy.MAX_PERSISTABLE_TIMESTAMP);
-
-        EngineCommandPolicy.Decision bounded = POLICY.transition(
-                command(EngineCommand.Type.COMPLETE_TASK), EngineCommandStatus.DISPATCHING, 1,
-                CommandDispatchOutcome.http(429, PROVEN_NOT_ACCEPTED,
-                        Duration.ofDays(365_000), null));
-        assertThat(bounded.nextAttemptAt()).isEqualTo(
-                OffsetDateTime.parse("2026-09-27T12:00:00Z"));
-    }
-
-    @Test
-    void evidenceAndAuditReferencesRejectUnsafeOrSecretBearingValues() {
+    void referencesAndImpossibleOutcomeShapesRemainFailClosed() {
         assertThatThrownBy(() -> new CommandDispatchOutcome.ConfirmationEvidence(
                 "tenant-a", "operation-a", "command-a", EngineCommand.Type.COMPLETE_TASK,
                 "task-a", "task-a", CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
                 OBSERVATION, "Bearer secret"))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new CommandDispatchOutcome.OperatorAction(
-                "tenant-a", "operation-a", "command-a",
-                EngineCommand.Type.COMPLETE_TASK, "task-a",
-                "action-a", "password=hunter2",
-                OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC), false))
+                "tenant-a", "operation-a", "command-a", EngineCommand.Type.COMPLETE_TASK,
+                "task-a", CANCEL, "action-a", "password=hunter2", NOW_OFFSET, false))
                 .isInstanceOf(IllegalArgumentException.class);
-    }
-
-    @Test
-    void operatorActionsAreBoundToOneCommandEvenWithoutReviewEvidence() {
-        CommandDispatchOutcome.OperatorAction wrong = new CommandDispatchOutcome.OperatorAction(
-                "tenant-a", "operation-a", "another-command",
-                EngineCommand.Type.COMPLETE_TASK, "task-a",
-                "operator-action-7", "audit:operator-action-7",
-                OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC), false);
-
-        assertThatThrownBy(() -> POLICY.transition(command(EngineCommand.Type.COMPLETE_TASK),
-                EngineCommandStatus.PENDING, 0,
-                CommandDispatchOutcome.cancelUnsent(wrong)))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("command");
-    }
-
-    @Test
-    void impossibleOutcomeShapesFailClosed() {
         assertThatThrownBy(() -> CommandDispatchOutcome.http(99, ACCEPTED, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> CommandDispatchOutcome.http(
@@ -602,26 +589,107 @@ class EngineCommandPolicyTest {
         assertThatThrownBy(() -> CommandDispatchOutcome.http(
                 400, ACCEPTED, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> POLICY.transition(command(EngineCommand.Type.COMPLETE_TASK),
-                EngineCommandStatus.DISPATCHING, 0,
-                CommandDispatchOutcome.transportFailure(PRE_SEND_ZERO_BYTES)))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("totalDispatchAttempts");
     }
 
-    private static void assertManualReplay(
-            EngineCommandPolicy.CommandContext command, EngineCommandStatus start,
-            EngineCommandStatus result, CommandDispatchOutcome outcome) {
-        EngineCommandPolicy.Decision first = POLICY.transition(command, start, 1, outcome);
-        EngineCommandPolicy.Decision replay = POLICY.transition(command, result, 1, outcome);
-        assertThat(first).isEqualTo(replay);
-        assertThat(first.operatorActionId()).isEqualTo("operator-action-7");
-        assertThat(first.auditReference()).isEqualTo("audit:operator-action-7");
+    @Test
+    void retrySchedulingStillSaturatesAtThePersistableTimestamp() {
+        EngineCommandPolicy farFuture = new EngineCommandPolicy(Clock.fixed(
+                Instant.parse("9999-12-31T23:59:59.999998Z"), ZoneOffset.UTC));
+        var retry = farFuture.transition(
+                state(EngineCommand.Type.COMPLETE_TASK, EngineCommandStatus.DISPATCHING),
+                CommandDispatchOutcome.transportFailure(PRE_SEND_ZERO_BYTES));
+        assertThat(retry.nextAttemptAt()).isEqualTo(
+                EngineCommandPolicy.MAX_PERSISTABLE_TIMESTAMP);
+
+        var bounded = POLICY.transition(
+                state(EngineCommand.Type.COMPLETE_TASK, EngineCommandStatus.DISPATCHING),
+                CommandDispatchOutcome.http(429, PROVEN_NOT_ACCEPTED,
+                        Duration.ofDays(365_000), null));
+        assertThat(bounded).isEqualTo(decision(
+                EngineCommandStatus.RETRYABLE, NOW_OFFSET,
+                OffsetDateTime.parse("2026-09-27T12:00:00Z"),
+                "http.429.not_accepted",
+                "Remote endpoint proved the request was not accepted",
+                TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH, false,
+                null, null, null));
+    }
+
+    private static Arguments mismatch(
+            String label, String tenant, String operation, String commandId,
+            EngineCommand.Type type, String target, String remoteIdentity,
+            CommandDispatchOutcome.RemoteState state,
+            CommandDispatchOutcome.ConfirmationSource source) {
+        return Arguments.of(label, new CommandDispatchOutcome.ConfirmationEvidence(
+                tenant, operation, commandId, type, target, remoteIdentity, state, source,
+                "evidence:mismatch"));
+    }
+
+    private static EngineCommandPolicy.CommandState state(
+            EngineCommand.Type type, EngineCommandStatus status) {
+        EngineCommandPolicy.Decision committed = switch (status) {
+            case PENDING, DISPATCHING -> decision(status, PRIOR, null,
+                    null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    false, null, null, null);
+            case RETRYABLE -> decision(status, PRIOR, PRIOR.plusMinutes(20),
+                    "prior.retry", "Prior retry", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    false, null, null, null);
+            case AWAITING_CONFIRMATION -> decision(status, PRIOR, null,
+                    "prior.ambiguous", "Prior ambiguity", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    false, null, null, null);
+            case CONFIRMED -> decision(status, PRIOR, null,
+                    null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    false, confirmation(type, HTTP_RESPONSE), null, null);
+            case FAILED -> decision(status, PRIOR, null,
+                    "prior.failed", "Prior failure", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    false, null, null, null);
+            case CONFLICT -> decision(status, PRIOR, null,
+                    "prior.conflict", "Prior conflict", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    false, null, null, null);
+            case MANUAL_REVIEW -> decision(status, PRIOR, null,
+                    "prior.review", "Prior review", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    false, null, null, null);
+            case CANCELLED -> decision(status, PRIOR, null,
+                    null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                    false, null, null,
+                    operator(type, CANCEL, "action:cancel", false, NOW_OFFSET));
+        };
+        return new EngineCommandPolicy.CommandState(command(type), committed);
+    }
+
+    private static EngineCommandPolicy.CommandContext command(EngineCommand.Type type) {
+        return new EngineCommandPolicy.CommandContext(
+                "tenant-a", "operation-a", "command-a", type, expectedTarget(type));
+    }
+
+    private static EngineCommandPolicy.Decision confirmed(
+            CommandDispatchOutcome.ConfirmationEvidence evidence) {
+        return decision(EngineCommandStatus.CONFIRMED, NOW_OFFSET, null,
+                null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
+                false, evidence, null, null);
+    }
+
+    private static EngineCommandPolicy.Decision decision(
+            EngineCommandStatus status,
+            OffsetDateTime decidedAt,
+            OffsetDateTime nextAttemptAt,
+            String errorCode,
+            String safeSummary,
+            long totalDispatchAttempts,
+            int automaticAttemptsInBudget,
+            long budgetEpoch,
+            boolean automaticBudgetReset,
+            CommandDispatchOutcome.ConfirmationEvidence terminalConfirmation,
+            CommandDispatchOutcome.ReviewEvidence decisionEvidence,
+            CommandDispatchOutcome.OperatorAction appliedOperatorAction) {
+        return new EngineCommandPolicy.Decision(status, decidedAt, nextAttemptAt,
+                errorCode, safeSummary, totalDispatchAttempts, automaticAttemptsInBudget,
+                budgetEpoch, automaticBudgetReset, terminalConfirmation,
+                decisionEvidence, appliedOperatorAction);
     }
 
     private static CommandDispatchOutcome confirmationOutcome(
             EngineCommand.Type type, CommandDispatchOutcome.ConfirmationSource source) {
-        CommandDispatchOutcome.ConfirmationEvidence evidence = confirmation(type, source);
+        var evidence = confirmation(type, source);
         return switch (source) {
             case HTTP_RESPONSE -> CommandDispatchOutcome.http(200, ACCEPTED, null, evidence);
             case DUPLICATE_RESPONSE -> CommandDispatchOutcome.duplicateResponse(evidence);
@@ -630,16 +698,21 @@ class EngineCommandPolicyTest {
         };
     }
 
-    private static EngineCommandPolicy.CommandContext command(EngineCommand.Type type) {
-        return new EngineCommandPolicy.CommandContext(
-                "tenant-a", "operation-a", "command-a", type, expectedTarget(type));
-    }
-
     private static CommandDispatchOutcome.ConfirmationEvidence confirmation(
             EngineCommand.Type type, CommandDispatchOutcome.ConfirmationSource source) {
         return new CommandDispatchOutcome.ConfirmationEvidence(
                 "tenant-a", "operation-a", "command-a", type, expectedTarget(type),
-                remoteIdentity(type), expectedState(type), source, "evidence:44");
+                remoteIdentity(type), expectedState(type), source,
+                "evidence:" + sourceName(source));
+    }
+
+    private static String sourceName(CommandDispatchOutcome.ConfirmationSource source) {
+        return switch (source) {
+            case HTTP_RESPONSE -> "http";
+            case DUPLICATE_RESPONSE -> "duplicate";
+            case OBSERVATION -> "observation";
+            case RECONCILIATION -> "reconciliation";
+        };
     }
 
     private static CommandDispatchOutcome.ReviewEvidence review(
@@ -651,22 +724,12 @@ class EngineCommandPolicyTest {
     }
 
     private static CommandDispatchOutcome.OperatorAction operator(
-            EngineCommand.Type type, boolean override) {
+            EngineCommand.Type type, CommandDispatchOutcome.ActionType actionType,
+            String actionId, boolean override, OffsetDateTime performedAt) {
         return new CommandDispatchOutcome.OperatorAction(
                 "tenant-a", "operation-a", "command-a", type, expectedTarget(type),
-                "operator-action-7", "audit:operator-action-7",
-                OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC), override);
-    }
-
-    private static CommandDispatchOutcome.ConfirmationEvidence copy(
-            CommandDispatchOutcome.ConfirmationEvidence original, String tenantId,
-            String operationId, String commandId, EngineCommand.Type type,
-            String expectedTarget, String remoteIdentity,
-            CommandDispatchOutcome.RemoteState state,
-            CommandDispatchOutcome.ConfirmationSource source) {
-        return new CommandDispatchOutcome.ConfirmationEvidence(
-                tenantId, operationId, commandId, type, expectedTarget,
-                remoteIdentity, state, source, original.evidenceReference());
+                actionType, actionId, "audit:" + actionId.substring("action:".length()),
+                performedAt, override);
     }
 
     private static String expectedTarget(EngineCommand.Type type) {
@@ -704,25 +767,34 @@ class EngineCommandPolicyTest {
         };
     }
 
-    private static Arguments http(
-            int status, CommandDispatchOutcome.Acceptance acceptance, EngineCommand.Type type,
-            EngineCommandStatus expectedStatus, String code, Duration retryAfter,
-            OffsetDateTime expectedRetryAt) {
-        return Arguments.of(status, acceptance, type, expectedStatus,
-                code, retryAfter, expectedRetryAt);
+    private static CommandDispatchOutcome.RemoteState wrongState(EngineCommand.Type type) {
+        return switch (type) {
+            case CREATE_TASK -> CommandDispatchOutcome.RemoteState.TASK_COMPLETED;
+            case CLAIM_TASK -> CommandDispatchOutcome.RemoteState.TASK_CREATED;
+            case COMPLETE_TASK -> CommandDispatchOutcome.RemoteState.TASK_CLAIMED;
+            case START_PROCESS, DEPLOY_ORCHESTRATION, CORRELATE_MESSAGE ->
+                    CommandDispatchOutcome.RemoteState.PROCESS_TERMINATED;
+            case CANCEL_PROCESS -> CommandDispatchOutcome.RemoteState.PROCESS_STARTED;
+        };
     }
 
-    private static Expected expected(
-            EngineCommandStatus status, String code, OffsetDateTime retryAt) {
-        return new Expected(status, code, retryAt);
+    private static Scenario scenario(
+            String name, CommandDispatchOutcome outcome,
+            Map<EngineCommandStatus, EngineCommandPolicy.Decision> expected) {
+        return new Scenario(name, outcome, expected);
+    }
+
+    private static Arguments http(
+            int status, CommandDispatchOutcome.Acceptance acceptance,
+            EngineCommand.Type type, Duration retryAfter,
+            EngineCommandPolicy.Decision expected) {
+        return Arguments.of(status, acceptance, type, retryAfter, expected);
     }
 
     private record Scenario(
-            String name, int totalDispatchAttempts, CommandDispatchOutcome outcome,
-            Map<EngineCommandStatus, Expected> expectedByStatus) {
+            String name,
+            CommandDispatchOutcome outcome,
+            Map<EngineCommandStatus, EngineCommandPolicy.Decision> expectedByStatus) {
         @Override public String toString() { return name; }
     }
-
-    private record Expected(
-            EngineCommandStatus status, String errorCode, OffsetDateTime nextAttemptAt) { }
 }

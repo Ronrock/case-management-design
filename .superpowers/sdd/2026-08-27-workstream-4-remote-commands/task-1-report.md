@@ -209,3 +209,59 @@ limits, Retry-After, and timestamp saturation.
 
 Result: all six selected/reactor-required projects succeeded: root, core, embedded, remote, REST,
 and starter.
+
+## Durable decision-provenance addendum
+
+The follow-up commit named `fix: preserve command decision provenance` replaces the transient
+status/counter input with a `CommandState` containing the complete last committed `Decision`.
+This remains a pure policy-model change: no dispatcher, persistence, gateway, API, migration, or
+ledger code is changed.
+
+### Durable terminal and operator replay
+
+- A confirmed decision retains the complete first `ConfirmationEvidence`, including its source,
+  safe evidence reference, remote identity/result correlation, and exact terminal remote state.
+- A later matching HTTP, duplicate, observation, or reconciliation confirmation returns the
+  committed decision unchanged. It cannot replace the first decision time, diagnostic fields,
+  evidence source/reference, remote result identity, or either attempt counter.
+- Confirmation equivalence always includes tenant, operation, command, command type, expected
+  target, remote identity, and terminal state. This preserves result identities for create-task,
+  start-process, deployment, and message-correlation commands as well as targeted resources.
+- `OperatorAction` now carries an explicit `ActionType`: `MANUAL_REVIEW`, `RECONCILE`,
+  `RETRY_OVERRIDE`, or `CANCEL`. Outcome construction rejects the wrong action kind.
+- Decisions retain the complete applied action and its audit reference plus any reviewed-absence
+  evidence. Only an exact replay is a no-op; reuse of the same action ID with changed kind,
+  binding, audit reference, timestamp, override flag, or review evidence fails closed.
+
+### Lifetime and automatic-budget accounting
+
+`totalDispatchAttempts` is now a `long` lifetime counter and is never reset. Each transition into
+`DISPATCHING` increments both that lifetime count and `automaticAttemptsInBudget`. The automatic
+limit applies only to the latter. An audited `RETRY_OVERRIDE` at exhaustion resets the budget
+counter to zero and increments `budgetEpoch`; neither ordinary review nor replay changes the
+epoch. Lifetime and epoch overflow are rejected instead of wrapping. Every decision persists the
+two counters, epoch, reset marker, decision time, terminal evidence, review evidence, and applied
+operator action.
+
+### Round-two TDD evidence
+
+The replacement equality suite was written first. Its RED compile reported the missing
+`CommandState`, `ActionType`, and expanded `Decision` model. After implementation:
+
+`./mvnw -pl case-management-core -Dtest=EngineCommandPolicyTest test`
+
+Result: 1,285 tests passed, 0 failures, 0 errors, 0 skipped. The independently authored matrix
+covers all 7 current command types × all 9 statuses × 18 outcome scenarios and compares complete
+`Decision` values. It additionally covers all 4 × 4 confirmation-source permutations, exact
+first-decision preservation, result-identity/state mismatches, every operator action kind and
+repackaging failure, lifetime/budget/epoch reset and overflow behavior, all transport phases,
+HTTP acceptance and Retry-After, binding mismatches, safe references, and timestamp saturation.
+
+A full core test run compiled all sources and executed 1,683 tests: 1,646 passed, and 37 Oracle
+integration test classes errored because no Docker socket was available. No non-Oracle test failed;
+the Oracle result is an environment limitation rather than policy-model verification.
+
+`./mvnw -pl case-management-core,case-management-engine-remote,case-management-spring-boot-starter -am -DskipTests package`
+
+Result: all six reactor projects succeeded (root, core, embedded, remote, REST, and starter).
+`git diff --check` also completed cleanly.

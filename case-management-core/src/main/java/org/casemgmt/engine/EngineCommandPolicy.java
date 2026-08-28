@@ -46,90 +46,84 @@ public final class EngineCommandPolicy {
         this.clock = Objects.requireNonNull(clock, "clock");
     }
 
-    /**
-     * Applies one fact to a command. {@code totalDispatchAttempts} counts requests whose dispatch
-     * has started, including the currently classified request; it is not a retry counter.
-     */
-    public Decision transition(CommandContext command, EngineCommandStatus current,
-                               int totalDispatchAttempts, CommandDispatchOutcome outcome) {
-        Objects.requireNonNull(command, "command");
-        Objects.requireNonNull(current, "current");
+    /** Applies one fact to the complete, already committed state of a command. */
+    public Decision transition(CommandState state, CommandDispatchOutcome outcome) {
+        Objects.requireNonNull(state, "state");
         Objects.requireNonNull(outcome, "outcome");
-        if (totalDispatchAttempts < 0) {
-            throw new IllegalArgumentException("totalDispatchAttempts must not be negative");
-        }
-
+        CommandContext command = state.command();
+        Decision committed = state.committedDecision();
+        validateCommittedState(command, committed);
         validateEvidence(command, outcome);
 
-        if (current == EngineCommandStatus.CONFIRMED
-                && outcome.confirmationEvidence() != null) {
-            return confirmed(totalDispatchAttempts, outcome.confirmationEvidence());
+        Decision replay = replayIfCommitted(committed, outcome);
+        if (replay != null) {
+            return replay;
         }
-        if (current == EngineCommandStatus.CANCELLED && isCancellation(outcome)) {
-            return operatorDecision(EngineCommandStatus.CANCELLED, totalDispatchAttempts,
-                    null, null, outcome, false);
-        }
-        if (current.isTerminal()) {
-            throw illegal(current, outcome);
+        if (committed.status().isTerminal()) {
+            throw illegal(committed.status(), outcome);
         }
 
         return switch (outcome.kind()) {
-            case DISPATCH_REQUESTED -> startDispatch(
-                    current, totalDispatchAttempts, outcome);
-            case TRANSPORT_FAILURE -> requireDispatching(current, totalDispatchAttempts, outcome,
+            case DISPATCH_REQUESTED -> startDispatch(committed, outcome);
+            case TRANSPORT_FAILURE -> requireDispatching(committed, outcome,
                     outcome.transportFailure().phase() == PROVEN_ZERO_BYTES_SENT
-                            ? automaticRetry(command, totalDispatchAttempts, null,
-                                    "transport.not_sent", "Remote request sent zero bytes")
-                            : diagnostic(EngineCommandStatus.AWAITING_CONFIRMATION,
-                                    totalDispatchAttempts, "transport.possibly_sent",
-                                    "Remote request may have been sent"));
-            case HTTP_RESPONSE -> requireDispatching(current, totalDispatchAttempts, outcome,
-                    classifyHttp(command, totalDispatchAttempts, outcome));
-            case MALFORMED_RESPONSE -> requireDispatching(current, totalDispatchAttempts, outcome,
-                    diagnostic(EngineCommandStatus.AWAITING_CONFIRMATION,
-                            totalDispatchAttempts, "response.malformed",
-                            "Remote response was not valid confirmation evidence"));
-            case DUPLICATE_RESPONSE -> requireDispatching(current, totalDispatchAttempts, outcome,
+                            ? automaticRetry(command, committed, null,
+                                    "transport.not_sent", "Remote request sent zero bytes", null)
+                            : diagnostic(committed, EngineCommandStatus.AWAITING_CONFIRMATION,
+                                    "transport.possibly_sent",
+                                    "Remote request may have been sent", null));
+            case HTTP_RESPONSE -> requireDispatching(committed, outcome,
+                    classifyHttp(command, committed, outcome));
+            case MALFORMED_RESPONSE -> requireDispatching(committed, outcome,
+                    diagnostic(committed, EngineCommandStatus.AWAITING_CONFIRMATION,
+                            "response.malformed",
+                            "Remote response was not valid confirmation evidence", null));
+            case DUPLICATE_RESPONSE -> requireDispatching(committed, outcome,
                     outcome.confirmationEvidence() == null
-                            ? diagnostic(EngineCommandStatus.CONFLICT, totalDispatchAttempts,
+                            ? diagnostic(committed, EngineCommandStatus.CONFLICT,
                                     "response.duplicate",
-                                    "Duplicate response lacked matching confirmation evidence")
-                            : confirmed(totalDispatchAttempts, outcome.confirmationEvidence()));
-            case LEASE_EXPIRED -> requireDispatching(current, totalDispatchAttempts, outcome,
-                    diagnostic(EngineCommandStatus.AWAITING_CONFIRMATION,
-                            totalDispatchAttempts, "dispatch.lease_expired",
-                            "Dispatch lease expired with an unknown remote outcome"));
-            case OBSERVATION_CONFIRMED -> require(current, confirmable(), outcome,
-                    confirmed(totalDispatchAttempts, outcome.confirmationEvidence()));
-            case RECONCILIATION_CONFIRMED -> require(current, reconcilable(), outcome,
-                    confirmed(totalDispatchAttempts, outcome.confirmationEvidence()));
-            case RECONCILIATION_RESULT -> require(current, reconcilable(), outcome,
-                    classifyReconciliation(command, totalDispatchAttempts, outcome));
-            case MANUAL_REVIEW_REQUESTED -> require(current,
+                                    "Duplicate response lacked matching confirmation evidence",
+                                    null)
+                            : confirmed(committed, outcome.confirmationEvidence()));
+            case LEASE_EXPIRED -> requireDispatching(committed, outcome,
+                    diagnostic(committed, EngineCommandStatus.AWAITING_CONFIRMATION,
+                            "dispatch.lease_expired",
+                            "Dispatch lease expired with an unknown remote outcome", null));
+            case OBSERVATION_CONFIRMED -> require(committed, confirmable(), outcome,
+                    confirmed(committed, outcome.confirmationEvidence()));
+            case RECONCILIATION_CONFIRMED -> require(committed, reconcilable(), outcome,
+                    confirmed(committed, outcome.confirmationEvidence()));
+            case RECONCILIATION_RESULT -> require(committed, reconcilable(), outcome,
+                    classifyReconciliation(command, committed, outcome));
+            case MANUAL_REVIEW_REQUESTED -> require(committed,
                     EnumSet.of(EngineCommandStatus.AWAITING_CONFIRMATION,
                             EngineCommandStatus.CONFLICT, EngineCommandStatus.MANUAL_REVIEW),
-                    outcome, operatorDecision(EngineCommandStatus.MANUAL_REVIEW,
-                            totalDispatchAttempts, "review.requested",
-                            "Operator requested manual review", outcome, false));
-            case RECONCILIATION_REQUESTED -> require(current, reconcilable(), outcome,
-                    operatorDecision(EngineCommandStatus.AWAITING_CONFIRMATION,
-                            totalDispatchAttempts, "reconcile.requested",
-                            "Operator requested reconciliation", outcome, false));
-            case RETRY_AFTER_REVIEWED_ABSENCE -> require(current,
+                    outcome, operatorDecision(committed, EngineCommandStatus.MANUAL_REVIEW,
+                            "review.requested", "Operator requested manual review", outcome,
+                            false, committed.automaticAttemptsInBudget(),
+                            committed.budgetEpoch()));
+            case RECONCILIATION_REQUESTED -> require(committed, reconcilable(), outcome,
+                    operatorDecision(committed, EngineCommandStatus.AWAITING_CONFIRMATION,
+                            "reconcile.requested", "Operator requested reconciliation", outcome,
+                            false, committed.automaticAttemptsInBudget(),
+                            committed.budgetEpoch()));
+            case RETRY_AFTER_REVIEWED_ABSENCE -> require(committed,
                     EnumSet.of(EngineCommandStatus.AWAITING_CONFIRMATION,
                             EngineCommandStatus.CONFLICT, EngineCommandStatus.MANUAL_REVIEW,
                             EngineCommandStatus.RETRYABLE), outcome,
-                    reviewedOperatorRetry(current, totalDispatchAttempts, outcome));
-            case CANCEL_UNSENT -> require(current,
+                    reviewedOperatorRetry(committed, outcome));
+            case CANCEL_UNSENT -> require(committed,
                     EnumSet.of(EngineCommandStatus.PENDING, EngineCommandStatus.RETRYABLE),
-                    outcome, operatorDecision(EngineCommandStatus.CANCELLED,
-                            totalDispatchAttempts, null, null, outcome, false));
-            case CANCEL_AFTER_REVIEWED_ABSENCE -> require(current,
+                    outcome, operatorDecision(committed, EngineCommandStatus.CANCELLED,
+                            null, null, outcome, false,
+                            committed.automaticAttemptsInBudget(), committed.budgetEpoch()));
+            case CANCEL_AFTER_REVIEWED_ABSENCE -> require(committed,
                     EnumSet.of(EngineCommandStatus.PENDING, EngineCommandStatus.RETRYABLE,
                             EngineCommandStatus.AWAITING_CONFIRMATION,
                             EngineCommandStatus.CONFLICT, EngineCommandStatus.MANUAL_REVIEW),
-                    outcome, operatorDecision(EngineCommandStatus.CANCELLED,
-                            totalDispatchAttempts, null, null, outcome, false));
+                    outcome, operatorDecision(committed, EngineCommandStatus.CANCELLED,
+                            null, null, outcome, false,
+                            committed.automaticAttemptsInBudget(), committed.budgetEpoch()));
         };
     }
 
@@ -155,61 +149,106 @@ public final class EngineCommandPolicy {
         };
     }
 
-    private Decision startDispatch(EngineCommandStatus current, int totalDispatchAttempts,
-                                   CommandDispatchOutcome outcome) {
-        if (totalDispatchAttempts >= MAX_AUTOMATIC_ATTEMPTS) {
-            throw new IllegalStateException("Automatic dispatch attempt budget is exhausted");
+    private Decision replayIfCommitted(Decision committed, CommandDispatchOutcome outcome) {
+        if (committed.status() == EngineCommandStatus.CONFIRMED
+                && outcome.confirmationEvidence() != null) {
+            requireEquivalentConfirmation(
+                    committed.terminalConfirmation(), outcome.confirmationEvidence());
+            return committed;
         }
-        return require(current,
-                EnumSet.of(EngineCommandStatus.PENDING, EngineCommandStatus.RETRYABLE),
-                outcome, plain(EngineCommandStatus.DISPATCHING, totalDispatchAttempts + 1));
+        CommandDispatchOutcome.OperatorAction incoming = outcome.operatorAction();
+        CommandDispatchOutcome.OperatorAction applied = committed.appliedOperatorAction();
+        if (incoming != null && applied != null && incoming.actionId().equals(applied.actionId())) {
+            if (!incoming.equals(applied)
+                    || !Objects.equals(outcome.reviewEvidence(), committed.decisionEvidence())) {
+                throw new IllegalArgumentException(
+                        "Operator action identity was repackaged with different provenance");
+            }
+            return committed;
+        }
+        return null;
     }
 
-    private Decision classifyHttp(CommandContext command, int totalDispatchAttempts,
+    private static void requireEquivalentConfirmation(
+            CommandDispatchOutcome.ConfirmationEvidence committed,
+            CommandDispatchOutcome.ConfirmationEvidence incoming) {
+        if (!committed.tenantId().equals(incoming.tenantId())
+                || !committed.operationId().equals(incoming.operationId())
+                || !committed.commandId().equals(incoming.commandId())
+                || committed.commandType() != incoming.commandType()
+                || !committed.expectedTargetIdentity().equals(incoming.expectedTargetIdentity())) {
+            throw new IllegalArgumentException("Confirmation binding differs from committed evidence");
+        }
+        if (!committed.remoteIdentity().equals(incoming.remoteIdentity())) {
+            throw new IllegalArgumentException(
+                    "Confirmation remote identity differs from committed evidence");
+        }
+        if (committed.remoteState() != incoming.remoteState()) {
+            throw new IllegalArgumentException(
+                    "Confirmation remote state differs from committed evidence");
+        }
+    }
+
+    private Decision startDispatch(Decision committed, CommandDispatchOutcome outcome) {
+        if (committed.automaticAttemptsInBudget() >= MAX_AUTOMATIC_ATTEMPTS) {
+            throw new IllegalStateException("Automatic dispatch attempt budget is exhausted");
+        }
+        if (committed.totalDispatchAttempts() == Long.MAX_VALUE) {
+            throw new IllegalStateException("Dispatch attempt lifetime counter is exhausted");
+        }
+        return require(committed,
+                EnumSet.of(EngineCommandStatus.PENDING, EngineCommandStatus.RETRYABLE),
+                outcome, new Decision(EngineCommandStatus.DISPATCHING, now(), null,
+                        null, null, committed.totalDispatchAttempts() + 1,
+                        committed.automaticAttemptsInBudget() + 1,
+                        committed.budgetEpoch(), false, null, null, null));
+    }
+
+    private Decision classifyHttp(CommandContext command, Decision committed,
                                   CommandDispatchOutcome outcome) {
         if (outcome.confirmationEvidence() != null) {
-            return confirmed(totalDispatchAttempts, outcome.confirmationEvidence());
+            return confirmed(committed, outcome.confirmationEvidence());
         }
         CommandDispatchOutcome.HttpResult http = outcome.httpResult();
         if (http.acceptance() == ACCEPTED) {
-            return diagnostic(EngineCommandStatus.AWAITING_CONFIRMATION,
-                    totalDispatchAttempts, "response.unconfirmed",
-                    "Accepted response lacked matching confirmation evidence");
+            return diagnostic(committed, EngineCommandStatus.AWAITING_CONFIRMATION,
+                    "response.unconfirmed",
+                    "Accepted response lacked matching confirmation evidence", null);
         }
         if (http.acceptance() == POSSIBLY_ACCEPTED) {
-            return diagnostic(EngineCommandStatus.AWAITING_CONFIRMATION,
-                    totalDispatchAttempts, "response.ambiguous",
-                    "Remote request may have been accepted");
+            return diagnostic(committed, EngineCommandStatus.AWAITING_CONFIRMATION,
+                    "response.ambiguous", "Remote request may have been accepted", null);
         }
 
         int status = http.status();
         if (status == 409) {
-            return diagnostic(EngineCommandStatus.CONFLICT, totalDispatchAttempts,
-                    "http.409.conflict", "Remote engine reported a command conflict");
+            return diagnostic(committed, EngineCommandStatus.CONFLICT,
+                    "http.409.conflict", "Remote engine reported a command conflict", null);
         }
         if (status == 404 && command.commandType() == EngineCommand.Type.CANCEL_PROCESS) {
-            return diagnostic(EngineCommandStatus.CONFLICT, totalDispatchAttempts,
-                    "target.not_found", "Cancellation target was not found without terminal proof");
+            return diagnostic(committed, EngineCommandStatus.CONFLICT,
+                    "target.not_found",
+                    "Cancellation target was not found without terminal proof", null);
         }
         if (status == 408 || status == 425 || status == 429 || status >= 500) {
-            return automaticRetry(command, totalDispatchAttempts, http.retryAfter(),
+            return automaticRetry(command, committed, http.retryAfter(),
                     "http." + status + ".not_accepted",
-                    "Remote endpoint proved the request was not accepted");
+                    "Remote endpoint proved the request was not accepted", null);
         }
-        return diagnostic(EngineCommandStatus.FAILED, totalDispatchAttempts,
+        return diagnostic(committed, EngineCommandStatus.FAILED,
                 "http." + status + ".rejected",
-                "Remote endpoint definitively rejected the request");
+                "Remote endpoint definitively rejected the request", null);
     }
 
-    private Decision classifyReconciliation(CommandContext command, int totalDispatchAttempts,
+    private Decision classifyReconciliation(CommandContext command, Decision committed,
                                             CommandDispatchOutcome outcome) {
         if (outcome.reviewEvidence().finding() == DEFINITIVE_ABSENCE) {
-            return automaticRetry(command, totalDispatchAttempts, null,
+            return automaticRetry(command, committed, null,
                     "reconcile.absent", "Reconciliation proved the remote effect is absent",
                     outcome.reviewEvidence());
         }
         if (outcome.reviewEvidence().finding() == INCONCLUSIVE) {
-            return diagnostic(EngineCommandStatus.MANUAL_REVIEW, totalDispatchAttempts,
+            return diagnostic(committed, EngineCommandStatus.MANUAL_REVIEW,
                     "reconcile.inconclusive",
                     "Reconciliation could not determine the remote outcome",
                     outcome.reviewEvidence());
@@ -218,55 +257,43 @@ public final class EngineCommandPolicy {
                 "Unsupported reconciliation finding " + outcome.reviewEvidence().finding());
     }
 
-    private Decision reviewedOperatorRetry(EngineCommandStatus current,
-                                           int totalDispatchAttempts,
+    private Decision reviewedOperatorRetry(Decision committed,
                                            CommandDispatchOutcome outcome) {
         CommandDispatchOutcome.OperatorAction action = outcome.operatorAction();
-        boolean exhausted = totalDispatchAttempts >= MAX_AUTOMATIC_ATTEMPTS;
-        boolean replayOfOverride = current == EngineCommandStatus.RETRYABLE
-                && totalDispatchAttempts == 0 && action.overrideAutomaticAttemptCap();
-        if (replayOfOverride) {
-            return operatorRetryDecision(0, true, outcome);
-        }
+        boolean exhausted = committed.automaticAttemptsInBudget() >= MAX_AUTOMATIC_ATTEMPTS;
         if (exhausted != action.overrideAutomaticAttemptCap()) {
             throw new IllegalStateException(exhausted
                     ? "Retry beyond the automatic attempt cap requires an audited override"
                     : "Attempt-cap override is not valid before the automatic budget is exhausted");
         }
-        int attemptsAfterDecision = exhausted ? 0 : totalDispatchAttempts;
-        return operatorRetryDecision(attemptsAfterDecision, exhausted, outcome);
-    }
-
-    private Decision operatorRetryDecision(int attemptsAfterDecision, boolean resetAttempts,
-                                           CommandDispatchOutcome outcome) {
-        CommandDispatchOutcome.OperatorAction action = outcome.operatorAction();
-        OffsetDateTime retryAt = clamp(action.performedAt());
-        return new Decision(EngineCommandStatus.RETRYABLE, retryAt,
+        int budgetAttempts = committed.automaticAttemptsInBudget();
+        long epoch = committed.budgetEpoch();
+        if (exhausted) {
+            if (epoch == Long.MAX_VALUE) {
+                throw new IllegalStateException("Automatic attempt budget epoch is exhausted");
+            }
+            budgetAttempts = 0;
+            epoch++;
+        }
+        return new Decision(EngineCommandStatus.RETRYABLE, now(), clamp(action.performedAt()),
                 "review.retry", "Reviewed evidence permits another dispatch attempt",
-                attemptsAfterDecision, resetAttempts,
-                outcome.reviewEvidence().evidenceReference(),
-                outcome.reviewEvidence().source().name(),
-                action.actionId(), action.auditReference());
+                committed.totalDispatchAttempts(), budgetAttempts, epoch, exhausted,
+                null, outcome.reviewEvidence(), action);
     }
 
-    private Decision automaticRetry(CommandContext command, int totalDispatchAttempts,
-                                    Duration retryAfter, String errorCode, String summary) {
-        return automaticRetry(command, totalDispatchAttempts, retryAfter,
-                errorCode, summary, null);
-    }
-
-    private Decision automaticRetry(CommandContext command, int totalDispatchAttempts,
+    private Decision automaticRetry(CommandContext command, Decision committed,
                                     Duration retryAfter, String errorCode, String summary,
                                     CommandDispatchOutcome.ReviewEvidence evidence) {
-        if (totalDispatchAttempts >= MAX_AUTOMATIC_ATTEMPTS) {
-            return diagnostic(EngineCommandStatus.FAILED, totalDispatchAttempts,
-                    "attempts.exhausted", "Remote command exhausted automatic dispatch attempts",
-                    evidence);
+        if (committed.automaticAttemptsInBudget() >= MAX_AUTOMATIC_ATTEMPTS) {
+            return diagnostic(committed, EngineCommandStatus.FAILED,
+                    "attempts.exhausted",
+                    "Remote command exhausted automatic dispatch attempts", evidence);
         }
         Duration base = BACKOFF.get(Math.min(
-                Math.max(totalDispatchAttempts - 1, 0), BACKOFF.size() - 1));
+                Math.max(committed.automaticAttemptsInBudget() - 1, 0), BACKOFF.size() - 1));
         long basisPoints = 8_000L + Math.floorMod(
-                31L * command.commandId().hashCode() + totalDispatchAttempts, 4_001L);
+                31L * command.commandId().hashCode()
+                        + committed.automaticAttemptsInBudget(), 4_001L);
         long jitterMillis = Math.max(1L,
                 Math.multiplyExact(base.toMillis(), basisPoints) / 10_000L);
         Duration delay = Duration.ofMillis(jitterMillis);
@@ -277,12 +304,22 @@ public final class EngineCommandPolicy {
                 delay = boundedRetryAfter;
             }
         }
-        OffsetDateTime next = saturatingAdd(clock.instant(), delay);
-        return new Decision(EngineCommandStatus.RETRYABLE, next,
-                safeCode(errorCode), safeSummary(summary), totalDispatchAttempts,
-                false,
-                evidence == null ? null : evidence.evidenceReference(),
-                evidence == null ? null : evidence.source().name(), null, null);
+        return new Decision(EngineCommandStatus.RETRYABLE, now(),
+                saturatingAdd(clock.instant(), delay), safeCode(errorCode), safeSummary(summary),
+                committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
+                committed.budgetEpoch(), false, null, evidence, null);
+    }
+
+    private void validateCommittedState(CommandContext command, Decision committed) {
+        if (committed.terminalConfirmation() != null) {
+            validateConfirmationFields(command, committed.terminalConfirmation());
+        }
+        if (committed.decisionEvidence() != null) {
+            validateReviewFields(command, committed.decisionEvidence());
+        }
+        if (committed.appliedOperatorAction() != null) {
+            validateOperator(command, committed.appliedOperatorAction());
+        }
     }
 
     private void validateEvidence(CommandContext command, CommandDispatchOutcome outcome) {
@@ -299,20 +336,7 @@ public final class EngineCommandPolicy {
 
     private void validateConfirmation(CommandContext command, CommandDispatchOutcome outcome) {
         CommandDispatchOutcome.ConfirmationEvidence evidence = outcome.confirmationEvidence();
-        same(command.tenantId(), evidence.tenantId(), "tenant");
-        same(command.operationId(), evidence.operationId(), "operation");
-        same(command.commandId(), evidence.commandId(), "command");
-        if (command.commandType() != evidence.commandType()) {
-            throw new IllegalArgumentException("Confirmation command type mismatch");
-        }
-        same(command.expectedTargetIdentity(), evidence.expectedTargetIdentity(), "target");
-        if (!expectedTerminalStates(command.commandType()).contains(evidence.remoteState())) {
-            throw new IllegalArgumentException("Confirmation remote state mismatch");
-        }
-        if (EXISTING_REMOTE_TARGET.contains(command.commandType())
-                && !command.expectedTargetIdentity().equals(evidence.remoteIdentity())) {
-            throw new IllegalArgumentException("Confirmation remote identity mismatch");
-        }
+        validateConfirmationFields(command, evidence);
         CommandDispatchOutcome.ConfirmationSource requiredSource = switch (outcome.kind()) {
             case HTTP_RESPONSE -> CommandDispatchOutcome.ConfirmationSource.HTTP_RESPONSE;
             case DUPLICATE_RESPONSE -> CommandDispatchOutcome.ConfirmationSource.DUPLICATE_RESPONSE;
@@ -327,8 +351,43 @@ public final class EngineCommandPolicy {
         }
     }
 
+    private void validateConfirmationFields(
+            CommandContext command, CommandDispatchOutcome.ConfirmationEvidence evidence) {
+        same(command.tenantId(), evidence.tenantId(), "tenant");
+        same(command.operationId(), evidence.operationId(), "operation");
+        same(command.commandId(), evidence.commandId(), "command");
+        if (command.commandType() != evidence.commandType()) {
+            throw new IllegalArgumentException("Confirmation command type mismatch");
+        }
+        same(command.expectedTargetIdentity(), evidence.expectedTargetIdentity(), "target");
+        if (!expectedTerminalStates(command.commandType()).contains(evidence.remoteState())) {
+            throw new IllegalArgumentException("Confirmation remote state mismatch");
+        }
+        if (EXISTING_REMOTE_TARGET.contains(command.commandType())
+                && !command.expectedTargetIdentity().equals(evidence.remoteIdentity())) {
+            throw new IllegalArgumentException("Confirmation remote identity mismatch");
+        }
+    }
+
     private void validateReview(CommandContext command, CommandDispatchOutcome outcome) {
-        CommandDispatchOutcome.ReviewEvidence evidence = outcome.reviewEvidence();
+        validateReviewFields(command, outcome.reviewEvidence());
+        CommandDispatchOutcome.ReviewSource expectedSource =
+                outcome.kind() == CommandDispatchOutcome.Kind.RECONCILIATION_RESULT
+                        ? CommandDispatchOutcome.ReviewSource.RECONCILIATION
+                        : CommandDispatchOutcome.ReviewSource.OPERATOR_REVIEW;
+        if (outcome.reviewEvidence().source() != expectedSource) {
+            throw new IllegalArgumentException("Review source mismatch");
+        }
+        if ((outcome.kind() == CommandDispatchOutcome.Kind.RETRY_AFTER_REVIEWED_ABSENCE
+                || outcome.kind() == CommandDispatchOutcome.Kind.CANCEL_AFTER_REVIEWED_ABSENCE)
+                && outcome.reviewEvidence().finding() != DEFINITIVE_ABSENCE) {
+            throw new IllegalArgumentException(
+                    "Operator action requires definitive absence evidence");
+        }
+    }
+
+    private static void validateReviewFields(
+            CommandContext command, CommandDispatchOutcome.ReviewEvidence evidence) {
         same(command.tenantId(), evidence.tenantId(), "tenant");
         same(command.operationId(), evidence.operationId(), "operation");
         same(command.commandId(), evidence.commandId(), "command");
@@ -336,18 +395,6 @@ public final class EngineCommandPolicy {
             throw new IllegalArgumentException("Review command type mismatch");
         }
         same(command.expectedTargetIdentity(), evidence.expectedTargetIdentity(), "target");
-        CommandDispatchOutcome.ReviewSource expectedSource =
-                outcome.kind() == CommandDispatchOutcome.Kind.RECONCILIATION_RESULT
-                        ? CommandDispatchOutcome.ReviewSource.RECONCILIATION
-                        : CommandDispatchOutcome.ReviewSource.OPERATOR_REVIEW;
-        if (evidence.source() != expectedSource) {
-            throw new IllegalArgumentException("Review source mismatch");
-        }
-        if ((outcome.kind() == CommandDispatchOutcome.Kind.RETRY_AFTER_REVIEWED_ABSENCE
-                || outcome.kind() == CommandDispatchOutcome.Kind.CANCEL_AFTER_REVIEWED_ABSENCE)
-                && evidence.finding() != DEFINITIVE_ABSENCE) {
-            throw new IllegalArgumentException("Operator action requires definitive absence evidence");
-        }
     }
 
     private static void validateOperator(
@@ -368,21 +415,21 @@ public final class EngineCommandPolicy {
     }
 
     private static Decision requireDispatching(
-            EngineCommandStatus current, int totalDispatchAttempts,
-            CommandDispatchOutcome outcome, Decision decision) {
-        if (totalDispatchAttempts == 0) {
+            Decision committed, CommandDispatchOutcome outcome, Decision decision) {
+        if (committed.totalDispatchAttempts() == 0
+                || committed.automaticAttemptsInBudget() == 0) {
             throw new IllegalArgumentException(
-                    "totalDispatchAttempts must include the current dispatch");
+                    "Dispatching state must include the current dispatch attempt");
         }
-        return require(current, EnumSet.of(EngineCommandStatus.DISPATCHING), outcome, decision);
+        return require(committed, EnumSet.of(EngineCommandStatus.DISPATCHING), outcome, decision);
     }
 
-    private static Decision require(EngineCommandStatus current,
+    private static Decision require(Decision committed,
                                     EnumSet<EngineCommandStatus> allowed,
                                     CommandDispatchOutcome outcome,
                                     Decision decision) {
-        if (!allowed.contains(current)) {
-            throw illegal(current, outcome);
+        if (!allowed.contains(committed.status())) {
+            throw illegal(committed.status(), outcome);
         }
         return decision;
     }
@@ -398,60 +445,40 @@ public final class EngineCommandPolicy {
                 EngineCommandStatus.CONFLICT, EngineCommandStatus.MANUAL_REVIEW);
     }
 
-    private static boolean isCancellation(CommandDispatchOutcome outcome) {
-        return outcome.kind() == CommandDispatchOutcome.Kind.CANCEL_UNSENT
-                || outcome.kind() == CommandDispatchOutcome.Kind.CANCEL_AFTER_REVIEWED_ABSENCE;
-    }
-
     private static IllegalStateException illegal(EngineCommandStatus current,
                                                   CommandDispatchOutcome outcome) {
         return new IllegalStateException("Outcome " + outcome.kind()
                 + " is not legal from command status " + current);
     }
 
-    private static Decision plain(EngineCommandStatus status, int totalDispatchAttempts) {
-        return new Decision(status, null, null, null, totalDispatchAttempts,
-                false, null, null, null, null);
+    private Decision confirmed(
+            Decision committed, CommandDispatchOutcome.ConfirmationEvidence evidence) {
+        return new Decision(EngineCommandStatus.CONFIRMED, now(), null, null, null,
+                committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
+                committed.budgetEpoch(), false, evidence, null, null);
     }
 
-    private static Decision confirmed(
-            int totalDispatchAttempts,
-            CommandDispatchOutcome.ConfirmationEvidence evidence) {
-        return new Decision(EngineCommandStatus.CONFIRMED, null, null, null,
-                totalDispatchAttempts, false, evidence.evidenceReference(),
-                evidence.source().name(), null, null);
+    private Decision diagnostic(Decision committed, EngineCommandStatus status,
+                                String errorCode, String summary,
+                                CommandDispatchOutcome.ReviewEvidence evidence) {
+        return new Decision(status, now(), null, safeCode(errorCode), safeSummary(summary),
+                committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
+                committed.budgetEpoch(), false, null, evidence, null);
     }
 
-    private static Decision diagnostic(EngineCommandStatus status,
-                                       int totalDispatchAttempts,
-                                       String errorCode, String summary) {
-        return new Decision(status, null, safeCode(errorCode), safeSummary(summary),
-                totalDispatchAttempts, false, null, null, null, null);
-    }
-
-    private static Decision diagnostic(EngineCommandStatus status,
-                                       int totalDispatchAttempts,
-                                       String errorCode, String summary,
-                                       CommandDispatchOutcome.ReviewEvidence evidence) {
-        return new Decision(status, null, safeCode(errorCode), safeSummary(summary),
-                totalDispatchAttempts, false,
-                evidence == null ? null : evidence.evidenceReference(),
-                evidence == null ? null : evidence.source().name(), null, null);
-    }
-
-    private static Decision operatorDecision(
-            EngineCommandStatus status, int totalDispatchAttempts,
-            String errorCode, String summary,
-            CommandDispatchOutcome outcome, boolean resetAttempts) {
-        CommandDispatchOutcome.OperatorAction action = outcome.operatorAction();
-        CommandDispatchOutcome.ReviewEvidence evidence = outcome.reviewEvidence();
-        return new Decision(status, null,
+    private Decision operatorDecision(
+            Decision committed, EngineCommandStatus status, String errorCode, String summary,
+            CommandDispatchOutcome outcome, boolean resetBudget, int budgetAttempts,
+            long budgetEpoch) {
+        return new Decision(status, now(), null,
                 errorCode == null ? null : safeCode(errorCode),
                 summary == null ? null : safeSummary(summary),
-                totalDispatchAttempts, resetAttempts,
-                evidence == null ? null : evidence.evidenceReference(),
-                evidence == null ? null : evidence.source().name(),
-                action.actionId(), action.auditReference());
+                committed.totalDispatchAttempts(), budgetAttempts, budgetEpoch, resetBudget,
+                null, outcome.reviewEvidence(), outcome.operatorAction());
+    }
+
+    private OffsetDateTime now() {
+        return clamp(OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC));
     }
 
     private static OffsetDateTime saturatingAdd(Instant start, Duration delay) {
@@ -487,6 +514,13 @@ public final class EngineCommandPolicy {
                 ? value : value.substring(0, MAX_SAFE_SUMMARY_LENGTH);
     }
 
+    public record CommandState(CommandContext command, Decision committedDecision) {
+        public CommandState {
+            Objects.requireNonNull(command, "command");
+            Objects.requireNonNull(committedDecision, "committedDecision");
+        }
+    }
+
     public record CommandContext(
             String tenantId,
             String operationId,
@@ -512,32 +546,54 @@ public final class EngineCommandPolicy {
 
     public record Decision(
             EngineCommandStatus status,
+            OffsetDateTime decidedAt,
             OffsetDateTime nextAttemptAt,
             String errorCode,
             String safeSummary,
-            int totalDispatchAttempts,
-            boolean resetAutomaticAttempts,
-            String evidenceReference,
-            String evidenceSource,
-            String operatorActionId,
-            String auditReference) {
+            long totalDispatchAttempts,
+            int automaticAttemptsInBudget,
+            long budgetEpoch,
+            boolean automaticBudgetReset,
+            CommandDispatchOutcome.ConfirmationEvidence terminalConfirmation,
+            CommandDispatchOutcome.ReviewEvidence decisionEvidence,
+            CommandDispatchOutcome.OperatorAction appliedOperatorAction) {
         public Decision {
             Objects.requireNonNull(status, "status");
+            Objects.requireNonNull(decidedAt, "decidedAt");
             if (totalDispatchAttempts < 0) {
                 throw new IllegalArgumentException("totalDispatchAttempts must not be negative");
             }
+            if (automaticAttemptsInBudget < 0
+                    || automaticAttemptsInBudget > MAX_AUTOMATIC_ATTEMPTS) {
+                throw new IllegalArgumentException(
+                        "automaticAttemptsInBudget is outside the automatic budget");
+            }
+            if (automaticAttemptsInBudget > totalDispatchAttempts) {
+                throw new IllegalArgumentException(
+                        "automaticAttemptsInBudget cannot exceed lifetime attempts");
+            }
+            if (budgetEpoch < 0) {
+                throw new IllegalArgumentException("budgetEpoch must not be negative");
+            }
             if (status == EngineCommandStatus.RETRYABLE && nextAttemptAt == null) {
-                throw new IllegalArgumentException("Retryable decisions require a next attempt time");
+                throw new IllegalArgumentException(
+                        "Retryable decisions require a next attempt time");
             }
             if (status != EngineCommandStatus.RETRYABLE && nextAttemptAt != null) {
-                throw new IllegalArgumentException("Only retryable decisions may schedule an attempt");
-            }
-            if (resetAutomaticAttempts && status != EngineCommandStatus.RETRYABLE) {
-                throw new IllegalArgumentException("Only retry decisions may reset attempts");
-            }
-            if ((operatorActionId == null) != (auditReference == null)) {
                 throw new IllegalArgumentException(
-                        "Operator action and audit reference must be retained together");
+                        "Only retryable decisions may schedule an attempt");
+            }
+            if (automaticBudgetReset && status != EngineCommandStatus.RETRYABLE) {
+                throw new IllegalArgumentException(
+                        "Only retry decisions may reset the automatic budget");
+            }
+            if ((status == EngineCommandStatus.CONFIRMED) != (terminalConfirmation != null)) {
+                throw new IllegalArgumentException(
+                        "Confirmed decisions must retain exactly one terminal confirmation");
+            }
+            if (status == EngineCommandStatus.CANCELLED && appliedOperatorAction == null) {
+                throw new IllegalArgumentException(
+                        "Cancelled decisions must retain their operator action");
             }
             if (safeSummary != null && safeSummary.length() > MAX_SAFE_SUMMARY_LENGTH) {
                 throw new IllegalArgumentException("Safe summary exceeds its storage bound");

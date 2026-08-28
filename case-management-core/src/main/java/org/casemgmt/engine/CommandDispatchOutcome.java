@@ -81,6 +81,13 @@ public record CommandDispatchOutcome(
         INCONCLUSIVE
     }
 
+    public enum ActionType {
+        MANUAL_REVIEW,
+        RECONCILE,
+        RETRY_OVERRIDE,
+        CANCEL
+    }
+
     public enum RemoteState {
         TASK_CREATED,
         TASK_CLAIMED,
@@ -160,6 +167,7 @@ public record CommandDispatchOutcome(
             String commandId,
             EngineCommand.Type commandType,
             String expectedTargetIdentity,
+            ActionType actionType,
             String actionId,
             String auditReference,
             OffsetDateTime performedAt,
@@ -170,9 +178,14 @@ public record CommandDispatchOutcome(
             commandId = identifier(commandId, "commandId");
             Objects.requireNonNull(commandType, "commandType");
             expectedTargetIdentity = identifier(expectedTargetIdentity, "expectedTargetIdentity");
+            Objects.requireNonNull(actionType, "actionType");
             actionId = safeReference(actionId, "actionId");
             auditReference = safeReference(auditReference, "auditReference");
             Objects.requireNonNull(performedAt, "performedAt");
+            if (overrideAutomaticAttemptCap && actionType != ActionType.RETRY_OVERRIDE) {
+                throw new IllegalArgumentException(
+                        "Only a retry override action may reset the automatic attempt budget");
+            }
         }
     }
 
@@ -183,6 +196,20 @@ public record CommandDispatchOutcome(
                 || httpResult.status() >= 300)) {
             throw new IllegalArgumentException(
                     "Only a 2xx HTTP response may carry confirmation evidence");
+        }
+        if (operatorAction != null) {
+            ActionType required = switch (kind) {
+                case MANUAL_REVIEW_REQUESTED -> ActionType.MANUAL_REVIEW;
+                case RECONCILIATION_REQUESTED -> ActionType.RECONCILE;
+                case RETRY_AFTER_REVIEWED_ABSENCE -> ActionType.RETRY_OVERRIDE;
+                case CANCEL_UNSENT, CANCEL_AFTER_REVIEWED_ABSENCE -> ActionType.CANCEL;
+                default -> throw new IllegalArgumentException(
+                        "Outcome " + kind + " cannot carry an operator action");
+            };
+            if (operatorAction.actionType() != required) {
+                throw new IllegalArgumentException("Operator action type "
+                        + operatorAction.actionType() + " is invalid for outcome " + kind);
+            }
         }
         switch (kind) {
             case DISPATCH_REQUESTED, MALFORMED_RESPONSE, LEASE_EXPIRED ->
