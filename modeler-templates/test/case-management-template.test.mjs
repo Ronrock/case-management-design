@@ -16,6 +16,60 @@ import BpmnModdle from 'bpmn-moddle';
 const OPERATON_NS = 'http://operaton.org/schema/1.0/bpmn';
 const CASEMGMT_NS = 'https://casemgmt.org/bpmn';
 
+const NAMESPACE_BY_PREFIX = {
+  operaton: OPERATON_NS,
+  casemgmt: CASEMGMT_NS
+};
+
+const TEMPLATE_PROPERTY_VALUES = {
+  id: 'programmatic-case',
+  'operaton:formKey': 'forms/programmatic-case',
+  'operaton:candidateGroups': 'case-workers',
+  'casemgmt:slaTargetId': 'initial-response',
+  'casemgmt:stage': 'true',
+  'casemgmt:milestoneId': 'programmatic-milestone'
+};
+
+const EXTENSION_PACKAGES = {
+  operaton: {
+    name: 'Operaton',
+    uri: OPERATON_NS,
+    prefix: 'operaton',
+    xml: { tagAlias: 'lowerCase' },
+    types: [{
+      name: 'UserTask',
+      extends: ['bpmn:UserTask'],
+      properties: [
+        { name: 'formKey', type: 'String', isAttr: true },
+        { name: 'candidateGroups', type: 'String', isAttr: true }
+      ]
+    }]
+  },
+  casemgmt: {
+    name: 'Case management',
+    uri: CASEMGMT_NS,
+    prefix: 'casemgmt',
+    xml: { tagAlias: 'lowerCase' },
+    types: [
+      {
+        name: 'UserTask',
+        extends: ['bpmn:UserTask'],
+        properties: [{ name: 'slaTargetId', type: 'String', isAttr: true }]
+      },
+      {
+        name: 'Stage',
+        extends: ['bpmn:SubProcess'],
+        properties: [{ name: 'stage', type: 'String', isAttr: true }]
+      },
+      {
+        name: 'Milestone',
+        extends: ['bpmn:IntermediateThrowEvent', 'bpmn:EndEvent'],
+        properties: [{ name: 'milestoneId', type: 'String', isAttr: true }]
+      }
+    ]
+  }
+};
+
 const TEMPLATES = JSON.parse(
   await readFile(new URL('../case-management.json', import.meta.url), 'utf8')
 );
@@ -66,13 +120,81 @@ test('every template property binds into a declared namespace', () => {
   }
 });
 
+test('every template property application round-trips with qualified values resolved by URI', async () => {
+  const moddle = new BpmnModdle(EXTENSION_PACKAGES);
+  const definitions = moddle.create('bpmn:Definitions', {
+    id: 'programmatic-definitions',
+    targetNamespace: 'https://casemgmt.org/test/programmatic-template-application'
+  });
+  const process = moddle.create('bpmn:Process', { id: 'untemplated-process' });
+  definitions.rootElements = [process];
+
+  const applications = [];
+
+  for (const template of TEMPLATES) {
+    for (const appliesTo of template.appliesTo) {
+      const target = appliesTo === 'bpmn:Process'
+        ? process
+        : moddle.create(appliesTo, {
+          id: `${template.id}-${appliesTo.slice('bpmn:'.length)}`
+        });
+
+      if (target !== process) process.get('flowElements').push(target);
+
+      for (const property of template.properties) {
+        assert.equal(property.binding.type, 'property');
+        assert.ok(Object.hasOwn(TEMPLATE_PROPERTY_VALUES, property.binding.name),
+          `no test value for binding '${property.binding.name}'`);
+        if (property.value !== undefined) {
+          assert.equal(property.value, TEMPLATE_PROPERTY_VALUES[property.binding.name]);
+        }
+        target.set(property.binding.name, TEMPLATE_PROPERTY_VALUES[property.binding.name]);
+      }
+
+      applications.push({
+        template,
+        targetId: target.id,
+        targetType: appliesTo
+      });
+    }
+  }
+
+  const { xml } = await moddle.toXML(definitions);
+  const reloaded = await moddle.fromXML(xml);
+  const reloadedProcess = reloaded.rootElement.rootElements
+    .find((element) => element.$type === 'bpmn:Process');
+
+  for (const { template, targetId, targetType } of applications) {
+    const target = targetType === 'bpmn:Process'
+      ? reloadedProcess
+      : findFlowElement(reloadedProcess, targetId);
+
+    assert.ok(target, `${template.id} application target '${targetId}' was not reloaded`);
+
+    for (const property of template.properties) {
+      const bindingName = property.binding.name;
+      const expected = TEMPLATE_PROPERTY_VALUES[bindingName];
+
+      if (!bindingName.includes(':')) {
+        assert.equal(target.get(bindingName), expected);
+        continue;
+      }
+
+      const [prefix, localName] = bindingName.split(':');
+      assert.equal(attributeByNamespaceUri(target, NAMESPACE_BY_PREFIX[prefix], localName),
+        expected,
+        `${template.id} binding '${bindingName}' did not resolve by namespace URI`);
+    }
+  }
+});
+
 /**
  * The round trip: open the shipped sample, write it back out, and open it again. Values and the
  * namespace URIs carrying them must be byte-for-byte the same properties on the way out as on
  * the way in — that is what "the modeler did not quietly change my model" means.
  */
 test('a sample opened, saved and reopened keeps its exact namespaces and values', async () => {
-  const moddle = new BpmnModdle();
+  const moddle = new BpmnModdle(EXTENSION_PACKAGES);
 
   const first = await moddle.fromXML(SAMPLE);
   const { xml } = await moddle.toXML(first.rootElement);
@@ -82,18 +204,19 @@ test('a sample opened, saved and reopened keeps its exact namespaces and values'
     const process = parsed.rootElement.rootElements.find((e) => e.$type === 'bpmn:Process');
 
     const register = findFlowElement(process, 'register');
-    assert.equal(attr(register, OPERATON_NS, 'formKey'), 'registerForm');
-    assert.equal(attr(register, OPERATON_NS, 'candidateGroups'), 'intake');
+    assert.equal(attributeByNamespaceUri(register, OPERATON_NS, 'formKey'), 'registerForm');
+    assert.equal(attributeByNamespaceUri(register, OPERATON_NS, 'candidateGroups'), 'intake');
 
     const close = findFlowElement(process, 'close-complaint');
-    assert.equal(attr(close, OPERATON_NS, 'formKey'), 'closeForm');
-    assert.equal(attr(close, CASEMGMT_NS, 'slaTargetId'), 'resolution');
+    assert.equal(attributeByNamespaceUri(close, OPERATON_NS, 'formKey'), 'closeForm');
+    assert.equal(attributeByNamespaceUri(close, CASEMGMT_NS, 'slaTargetId'), 'resolution');
 
     const acknowledged = findFlowElement(process, 'acknowledged');
-    assert.equal(attr(acknowledged, CASEMGMT_NS, 'milestoneId'), 'acknowledged');
+    assert.equal(attributeByNamespaceUri(
+      acknowledged, CASEMGMT_NS, 'milestoneId'), 'acknowledged');
 
     const intake = findFlowElement(process, 'intake');
-    assert.equal(attr(intake, CASEMGMT_NS, 'stage'), 'true');
+    assert.equal(attributeByNamespaceUri(intake, CASEMGMT_NS, 'stage'), 'true');
   }
 
   // The declarations themselves must survive, not just the resolved values.
@@ -111,15 +234,13 @@ function findFlowElement(container, id) {
   return undefined;
 }
 
-/**
- * bpmn-moddle keeps attributes it has no descriptor for in `$attrs`, keyed either by the
- * resolved `{uri}local` form or by the source prefix. Both are checked so the assertion is about
- * the namespace the attribute resolves to rather than the prefix the author happened to type.
- */
-function attr(element, namespace, localName) {
-  const attrs = element?.$attrs ?? {};
-  const resolved = attrs[`{${namespace}}${localName}`];
-  if (resolved !== undefined) return resolved;
-  const prefix = namespace === OPERATON_NS ? 'operaton' : 'casemgmt';
-  return attrs[`${prefix}:${localName}`];
+/** Resolve only modeled attributes whose declaring package owns the exact namespace URI. */
+function attributeByNamespaceUri(element, namespace, localName) {
+  const property = element?.$descriptor.properties.find((candidate) =>
+    candidate.isAttr &&
+    candidate.ns.localName === localName &&
+    candidate.definedBy.$pkg.uri === namespace);
+
+  assert.ok(property, `attribute '{${namespace}}${localName}' is not namespace-resolved`);
+  return element.get(property.ns.name);
 }

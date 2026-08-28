@@ -14,6 +14,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -161,6 +162,92 @@ class CaseDefinitionVersionServiceTest {
                 .hasMessageContaining("BPMN orchestration is authoritative");
 
         verifyNoInteractions(bindings, definitions);
+    }
+
+    @Test
+    void rejectsPlanModelContractOnBpmnReleaseBindingPath() {
+        CaseDefinitionReleaseRepository releases = mock(CaseDefinitionReleaseRepository.class);
+        CaseDefinitionVersionBindingRepository bindings =
+                mock(CaseDefinitionVersionBindingRepository.class);
+        CaseDefinitionService definitions = mock(CaseDefinitionService.class);
+        stubOrchestrationAndPresentation(releases);
+        when(releases.require("contract-1", "t1")).thenReturn(release("contract-1",
+                ReleaseKind.CONTRACT,
+                "{\"key\":\"sample-case\",\"orchestrationMode\":\"PLAN_MODEL\",\"forms\":{}}",
+                "2"));
+
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+                .bind("sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("PLAN_MODEL")
+                .hasMessageContaining("BPMN");
+
+        verifyNoInteractions(bindings, definitions);
+    }
+
+    @Test
+    void reportsAllDeterministicCrossArtifactReferenceErrorsTogether() {
+        CaseDefinitionReleaseRepository releases = mock(CaseDefinitionReleaseRepository.class);
+        CaseDefinitionVersionBindingRepository bindings =
+                mock(CaseDefinitionVersionBindingRepository.class);
+        CaseDefinitionService definitions = mock(CaseDefinitionService.class);
+        when(releases.require("orch-1", "t1")).thenReturn(release("orch-1",
+                ReleaseKind.ORCHESTRATION, """
+                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                             xmlns:operaton="http://operaton.org/schema/1.0/bpmn"
+                             xmlns:casemgmt="https://casemgmt.org/bpmn">
+                  <process id="sample-case" isExecutable="true">
+                    <userTask id="review" operaton:formKey="missingForm"
+                              operaton:candidateGroups="missingGroup"
+                              casemgmt:slaTargetId="missingSla"/>
+                  </process>
+                </definitions>""", "1", "application/bpmn+xml"));
+        when(releases.require("contract-1", "t1")).thenReturn(release("contract-1",
+                ReleaseKind.CONTRACT,
+                "{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\","
+                        + "\"candidateGroups\":[],\"fields\":{},\"forms\":{},\"slaBindings\":{}}",
+                "2"));
+        when(releases.require("presentation-1", "t1")).thenReturn(release("presentation-1",
+                ReleaseKind.PRESENTATION,
+                "{\"version\":\"1.0\",\"sections\":[{\"fields\":[\"missingField\"]}]}",
+                "3"));
+
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+                .bind("sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("missingForm")
+                .hasMessageContaining("missingGroup")
+                .hasMessageContaining("missingSla")
+                .hasMessageContaining("missingField");
+
+        verifyNoInteractions(bindings, definitions);
+    }
+
+    @Test
+    void boundsAndSummarizesLargeNumbersOfCrossArtifactReferenceErrors() {
+        CaseDefinitionVersionService service = new CaseDefinitionVersionService(
+                mock(CaseDefinitionReleaseRepository.class),
+                mock(CaseDefinitionVersionBindingRepository.class),
+                mock(CaseDefinitionService.class));
+        String missingFields = IntStream.range(0, 25)
+                .mapToObj(index -> "\"missing-%02d\"".formatted(index))
+                .reduce((left, right) -> left + "," + right)
+                .orElseThrow();
+
+        assertThatThrownBy(() -> service.validateArtifacts("sample-case", """
+                        <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+                          <process id="sample-case" isExecutable="true"/>
+                        </definitions>""".getBytes(StandardCharsets.UTF_8),
+                "application/bpmn+xml",
+                ("{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\","
+                        + "\"forms\":{},\"fields\":{}}").getBytes(StandardCharsets.UTF_8),
+                ("{\"version\":\"1.0\",\"sections\":[{\"fields\":["
+                        + missingFields + "]}]}").getBytes(StandardCharsets.UTF_8)))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("missing-00")
+                .hasMessageContaining("missing-19")
+                .hasMessageNotContaining("missing-20")
+                .hasMessageContaining("...and 5 additional reference findings");
     }
 
     private static void stubOrchestrationAndPresentation(CaseDefinitionReleaseRepository releases) {

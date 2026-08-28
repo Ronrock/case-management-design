@@ -46,14 +46,10 @@ public final class RepositoryProcessActivityClassifier implements ProcessActivit
         if (element == null) {
             return ProcessActivityClassifier.super.taskMetadata(processDefinitionId, activityId);
         }
-        String groups = attributeByLocalName(element, "candidateGroups");
+        String groups = element.getAttributeValueNs(OPERATON_NAMESPACE, "candidateGroups");
         List<String> candidateGroups = groups == null ? List.of() : Arrays.stream(groups.split(","))
                 .map(String::trim).filter(value -> !value.isBlank()).toList();
-        return new TaskMetadata(candidateGroups, attributeByLocalName(element, "formKey"));
-    }
-
-    private static String attributeByLocalName(ModelElementInstance element, String localName) {
-        String value = element.getAttributeValueNs(OPERATON_NAMESPACE, localName);
-        return value != null ? value : element.getAttributeValue(localName);
+        return new TaskMetadata(candidateGroups,
+                element.getAttributeValueNs(OPERATON_NAMESPACE, "formKey"));
     }
 }

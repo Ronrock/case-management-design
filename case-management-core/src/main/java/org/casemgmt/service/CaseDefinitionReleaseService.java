@@ -5,6 +5,8 @@ import org.casemgmt.domain.CaseIds;
 import org.casemgmt.orchestration.OrchestrationDeploymentPort;
 import org.casemgmt.release.CaseDefinitionRelease;
 import org.casemgmt.release.BpmnReleaseValidator;
+import org.casemgmt.release.CaseContractValidator;
+import org.casemgmt.release.JsonSchemaCaseContractValidator;
 import org.casemgmt.release.ReleaseKind;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.JsonCodec;
@@ -30,6 +32,7 @@ public class CaseDefinitionReleaseService {
 
     private final CaseDefinitionReleaseRepository repository;
     private final OrchestrationDeploymentPort deployments;
+    private final CaseContractValidator contracts;
 
     public CaseDefinitionReleaseService(CaseDefinitionReleaseRepository repository) {
         this(repository, (releaseId, definitionKey, tenantId, content, mediaType) ->
@@ -38,27 +41,22 @@ public class CaseDefinitionReleaseService {
 
     public CaseDefinitionReleaseService(CaseDefinitionReleaseRepository repository,
                                         OrchestrationDeploymentPort deployments) {
+        this(repository, deployments, new JsonSchemaCaseContractValidator());
+    }
+
+    public CaseDefinitionReleaseService(CaseDefinitionReleaseRepository repository,
+                                        OrchestrationDeploymentPort deployments,
+                                        CaseContractValidator contracts) {
         this.repository = repository;
         this.deployments = deployments;
+        this.contracts = contracts;
     }
 
     @Transactional
     public CaseDefinitionRelease publish(String key, String tenantId, ReleaseKind kind,
                                          String mediaType, byte[] content, String publishedBy) {
-        if (key == null || key.isBlank()) {
-            throw invalid("<unknown>", "Release requires a case-definition key");
-        }
-        byte[] bytes = content == null ? new byte[0] : content.clone();
-        if (bytes.length == 0 || bytes.length > MAX_RELEASE_BYTES) {
-            throw invalid(key, "Release content must contain between 1 and "
-                    + MAX_RELEASE_BYTES + " bytes");
-        }
-        String normalizedMediaType = normalizeMediaType(mediaType);
-        if (!MEDIA_TYPES.get(kind).contains(normalizedMediaType)) {
-            throw invalid(key, "Unsupported media type '" + normalizedMediaType
-                    + "' for " + kind.name().toLowerCase(Locale.ROOT) + " release");
-        }
-        validateContent(key, kind, normalizedMediaType, bytes);
+        byte[] bytes = snapshot(content);
+        String normalizedMediaType = validateSnapshot(key, kind, mediaType, bytes);
         String digest = sha256(bytes);
         return repository.findByDigest(tenantId, key, kind, digest).orElseGet(() -> {
             String id = kind.name().toLowerCase(Locale.ROOT) + ":" + CaseIds.newId();
@@ -74,8 +72,33 @@ public class CaseDefinitionReleaseService {
         });
     }
 
-    private static void validateContent(String key, ReleaseKind kind, String mediaType,
-                                        byte[] content) {
+    /** Runs every deterministic release check without persisting or deploying anything. */
+    public void validateForPublication(String key, ReleaseKind kind, String mediaType, byte[] content) {
+        validateSnapshot(key, kind, mediaType, snapshot(content));
+    }
+
+    private String validateSnapshot(String key, ReleaseKind kind, String mediaType, byte[] bytes) {
+        if (key == null || key.isBlank()) {
+            throw invalid("<unknown>", "Release requires a case-definition key");
+        }
+        if (bytes.length == 0 || bytes.length > MAX_RELEASE_BYTES) {
+            throw invalid(key, "Release content must contain between 1 and "
+                    + MAX_RELEASE_BYTES + " bytes");
+        }
+        String normalizedMediaType = normalizeMediaType(mediaType);
+        if (!MEDIA_TYPES.get(kind).contains(normalizedMediaType)) {
+            throw invalid(key, "Unsupported media type '" + normalizedMediaType
+                    + "' for " + kind.name().toLowerCase(Locale.ROOT) + " release");
+        }
+        validateContent(key, kind, normalizedMediaType, bytes);
+        return normalizedMediaType;
+    }
+
+    private static byte[] snapshot(byte[] content) {
+        return content == null ? new byte[0] : content.clone();
+    }
+
+    private void validateContent(String key, ReleaseKind kind, String mediaType, byte[] content) {
         if (kind == ReleaseKind.CONTRACT || kind == ReleaseKind.PRESENTATION) {
             Map<String, Object> json;
             try {
@@ -83,7 +106,13 @@ public class CaseDefinitionReleaseService {
             } catch (RuntimeException e) {
                 throw invalid(key, kind + " release must contain a JSON object");
             }
-            if (kind == ReleaseKind.PRESENTATION) {
+            if (kind == ReleaseKind.CONTRACT) {
+                Object mode = json.get("orchestrationMode");
+                if (mode == null || mode.toString().isBlank()) {
+                    throw invalid(key, "Contract release requires orchestrationMode");
+                }
+                contracts.validate(key, content);
+            } else {
                 Object version = json.getOrDefault("version", json.get("schemaVersion"));
                 String text = String.valueOf(version);
                 if (version == null || !text.matches("1(?:\\.\\d+)?")) {

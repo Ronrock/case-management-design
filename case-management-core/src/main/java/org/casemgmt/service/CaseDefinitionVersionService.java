@@ -21,6 +21,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 public class CaseDefinitionVersionService {
 
+    private static final int MAX_REPORTED_REFERENCE_ERRORS = 20;
+    private static final int MAX_REFERENCE_ERROR_LENGTH = 240;
+
     private final CaseDefinitionReleaseRepository releases;
     private final CaseDefinitionVersionBindingRepository bindings;
     private final CaseDefinitionService definitions;
@@ -77,34 +80,50 @@ public class CaseDefinitionVersionService {
     private void validateBoundArtifacts(String key, CaseDefinitionRelease orchestration,
                                         CaseDefinitionRelease contractRelease,
                                         CaseDefinitionRelease presentationRelease) {
-        requireDeclaredOrchestrationMode(key, contractRelease);
-        ValidatedCaseContract contract = contracts.validate(key, contractRelease.content());
+        validateArtifacts(key, orchestration.content(), orchestration.mediaType(),
+                contractRelease.content(), presentationRelease.content());
+    }
+
+    /**
+     * Performs the complete, side-effect-free validation needed before any artifact in a combined
+     * bundle is published or deployed. Binding calls the same gate again because it is also a
+     * public entry point and releases can be published independently.
+     */
+    public void validateArtifacts(String key, byte[] orchestrationContent, String orchestrationMediaType,
+                                  byte[] contractContent, byte[] presentationContent) {
+        requireDeclaredOrchestrationMode(key, contractContent);
+        ValidatedCaseContract contract = contracts.validate(key, contractContent);
+        if (contract.orchestrationMode() != org.casemgmt.orchestration.OrchestrationMode.BPMN) {
+            throw invalid(key, "A BPMN release binding requires orchestrationMode BPMN; "
+                    + "PLAN_MODEL definitions use the legacy definition deployment path");
+        }
 
         BpmnReleaseValidator.Index orchestrationIndex = BpmnReleaseValidator.validate(key,
-                orchestration.content(), orchestration.mediaType());
-        Map<String, Object> presentation = JsonCodec.toMap(new String(presentationRelease.content(),
+                orchestrationContent, orchestrationMediaType);
+        Map<String, Object> presentation = JsonCodec.toMap(new String(presentationContent,
                 StandardCharsets.UTF_8));
+        ReferenceErrors referenceErrors = new ReferenceErrors();
 
         Set<String> forms = contract.forms().keySet();
         for (String formRef : orchestrationIndex.formRefs()) {
             if (!dynamic(formRef) && !forms.contains(formRef)) {
-                throw invalid(key, "BPMN user task references unknown contract form '" + formRef + "'");
+                referenceErrors.add("BPMN user task references unknown contract form '" + formRef + "'");
             }
         }
         Set<String> candidateGroups = contract.candidateGroups();
         for (String candidateGroup : orchestrationIndex.candidateGroups()) {
             if (!candidateGroups.contains(candidateGroup)) {
-                throw invalid(key, "BPMN user task references undeclared candidate group '"
+                referenceErrors.add("BPMN user task references undeclared candidate group '"
                         + candidateGroup + "'");
             }
         }
         Set<String> slaTargets = contract.slaTargetIds();
         for (String slaRef : orchestrationIndex.slaRefs()) {
             if (!dynamic(slaRef) && !slaTargets.contains(slaRef)) {
-                throw invalid(key, "BPMN element references unknown SLA binding '" + slaRef + "'");
+                referenceErrors.add("BPMN element references unknown SLA binding '" + slaRef + "'");
             }
         }
-        validateAdHocActions(key, contract);
+        validateAdHocActions(contract, referenceErrors);
         Set<String> fields = contract.fields().keySet();
         Set<String> actions = new LinkedHashSet<>(Set.of("update", "cancel", "close", "claim",
                 "complete", "comment", "add-document", "remove-document", "start-process"));
@@ -119,24 +138,25 @@ public class CaseDefinitionVersionService {
             if (!(raw instanceof Map<?, ?> section)) continue;
             for (String field : strings(section.get("fields"))) {
                 if (!field.startsWith("system:") && !fields.contains(field)) {
-                    throw invalid(key, "Presentation references unknown canonical field '" + field + "'");
+                    referenceErrors.add("Presentation references unknown canonical field '" + field + "'");
                 }
             }
             String formId = text(section.get("formId"));
             if (formId != null && !forms.contains(formId)) {
-                throw invalid(key, "Presentation references unknown form '" + formId + "'");
+                referenceErrors.add("Presentation references unknown form '" + formId + "'");
             }
             for (String action : strings(section.get("actions"))) {
                 if (!actions.contains(action)) {
-                    throw invalid(key, "Presentation references unknown action '" + action + "'");
+                    referenceErrors.add("Presentation references unknown action '" + action + "'");
                 }
             }
             String searchProfile = text(section.get("searchProfileId"));
             if (searchProfile != null && !searchProfiles.contains(searchProfile)) {
-                throw invalid(key, "Presentation references unknown search profile '"
+                referenceErrors.add("Presentation references unknown search profile '"
                         + searchProfile + "'");
             }
         }
+        rejectReferenceErrors(key, referenceErrors);
     }
 
     /**
@@ -149,25 +169,70 @@ public class CaseDefinitionVersionService {
      * only question this layer can answer: whether the names an action refers to are ones the
      * contract itself declares.
      */
-    private static void validateAdHocActions(String key, ValidatedCaseContract contract) {
+    private static void validateAdHocActions(ValidatedCaseContract contract,
+                                             ReferenceErrors errors) {
         for (ValidatedCaseContract.AdHocActionDefinition action : contract.adHocActions()) {
             for (String role : action.roles()) {
                 if (!contract.roles().contains(role)) {
-                    throw invalid(key, "Ad-hoc action '" + action.id()
+                    errors.add("Ad-hoc action '" + action.id()
                             + "' references undeclared role '" + role + "'");
                 }
             }
             String form = action.formRef();
             if (form != null && !contract.forms().containsKey(form)) {
-                throw invalid(key, "Ad-hoc action '" + action.id()
+                errors.add("Ad-hoc action '" + action.id()
                         + "' references unknown form '" + form + "'");
             }
             for (String group : action.candidateGroups()) {
                 if (!contract.candidateGroups().contains(group)) {
-                    throw invalid(key, "Ad-hoc action '" + action.id()
+                    errors.add("Ad-hoc action '" + action.id()
                             + "' references undeclared candidate group '" + group + "'");
                 }
             }
+        }
+    }
+
+    private static void rejectReferenceErrors(String key, ReferenceErrors errors) {
+        if (errors.isEmpty()) return;
+        StringBuilder message = new StringBuilder("Case-definition artifact references are invalid:");
+        errors.retained().forEach(error -> message.append("\n  ").append(error));
+        if (errors.additionalFindings() > 0) {
+            message.append("\n  ...and ").append(errors.additionalFindings())
+                    .append(" additional reference findings");
+        }
+        throw invalid(key, message.toString());
+    }
+
+    /**
+     * Keeps validation diagnostics useful without allowing a hostile bundle to make memory use
+     * grow with every broken reference. Retaining the lexicographically smallest messages makes
+     * the result stable even if a source collection changes iteration order.
+     */
+    private static final class ReferenceErrors {
+        private final NavigableSet<String> retained = new TreeSet<>();
+        private int findings;
+
+        void add(String error) {
+            findings++;
+            String bounded = error.length() <= MAX_REFERENCE_ERROR_LENGTH
+                    ? error
+                    : error.substring(0, MAX_REFERENCE_ERROR_LENGTH) + "...";
+            retained.add(bounded);
+            if (retained.size() > MAX_REPORTED_REFERENCE_ERRORS) {
+                retained.pollLast();
+            }
+        }
+
+        boolean isEmpty() {
+            return findings == 0;
+        }
+
+        Set<String> retained() {
+            return Collections.unmodifiableNavigableSet(retained);
+        }
+
+        int additionalFindings() {
+            return findings - retained.size();
         }
     }
 
@@ -180,10 +245,9 @@ public class CaseDefinitionVersionService {
      * rather than inferred from which properties happen to be present — so the requirement is
      * enforced at this boundary rather than in the validator.
      */
-    private static void requireDeclaredOrchestrationMode(String key,
-                                                         CaseDefinitionRelease contractRelease) {
+    private static void requireDeclaredOrchestrationMode(String key, byte[] contractContent) {
         Map<String, Object> raw = JsonCodec.toMap(
-                new String(contractRelease.content(), StandardCharsets.UTF_8));
+                new String(contractContent, StandardCharsets.UTF_8));
         if (text(raw.get("orchestrationMode")) == null) {
             throw invalid(key, "Contract must declare orchestrationMode explicitly; "
                     + "the platform does not infer it from which properties are present");

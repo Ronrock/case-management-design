@@ -146,7 +146,7 @@
       "type": "object",
       "required": ["scope", "calendarId", "startAnchor", "meetAnchor"],
       "additionalProperties": false,
-      "anyOf": [
+      "oneOf": [
         { "required": ["duration"] },
         { "required": ["dueDateExpression"] }
       ],

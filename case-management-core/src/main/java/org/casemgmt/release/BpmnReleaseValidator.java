@@ -10,6 +10,8 @@ import org.xml.sax.InputSource;
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -22,6 +24,16 @@ public final class BpmnReleaseValidator {
 
     public static final int MAX_FILES = 100;
     public static final int MAX_DECOMPRESSED_BYTES = 25 * 1024 * 1024;
+
+    private static final String BPMN_NS = "http://www.omg.org/spec/BPMN/20100524/MODEL";
+    private static final Set<String> DMN_NAMESPACES = Set.of(
+            "http://www.omg.org/spec/DMN/20151101/dmn.xsd",
+            "http://www.omg.org/spec/DMN/20151101/dmn11.xsd",
+            "http://www.omg.org/spec/DMN/20180521/MODEL/",
+            "https://www.omg.org/spec/DMN/20191111/MODEL/",
+            "https://www.omg.org/spec/DMN/20191111/DMN13.xsd",
+            "https://www.omg.org/spec/DMN/20211108/MODEL/",
+            "https://www.omg.org/spec/DMN/20230324/MODEL/");
 
     /** Engine-owned BPMN extensions. */
     public static final String OPERATON_NS = "http://operaton.org/schema/1.0/bpmn";
@@ -40,6 +52,7 @@ public final class BpmnReleaseValidator {
             "formKey", OPERATON_NS,
             "candidateGroups", OPERATON_NS,
             "decisionRef", OPERATON_NS,
+            "stage", CASEMGMT_NS,
             "milestoneId", CASEMGMT_NS,
             "slaTargetId", CASEMGMT_NS);
 
@@ -110,11 +123,8 @@ public final class BpmnReleaseValidator {
                 if (!name.endsWith(".bpmn") && !name.endsWith(".dmn")) {
                     throw invalid(key, "Unsupported orchestration resource '" + name + "'");
                 }
-                byte[] bytes = zip.readAllBytes();
-                total = Math.addExact(total, bytes.length);
-                if (total > MAX_DECOMPRESSED_BYTES) {
-                    throw invalid(key, "Orchestration ZIP exceeds decompressed-size limit");
-                }
+                byte[] bytes = readEntry(key, zip, total);
+                total += bytes.length;
                 result.add(new Resource(name, bytes));
             }
         } catch (InvalidCaseDefinitionException e) {
@@ -123,6 +133,21 @@ public final class BpmnReleaseValidator {
             throw invalid(key, "Invalid orchestration ZIP: " + e.getMessage());
         }
         return result;
+    }
+
+    private static byte[] readEntry(String key, ZipInputStream zip, int total) throws IOException {
+        int remaining = MAX_DECOMPRESSED_BYTES - total;
+        ByteArrayOutputStream content = new ByteArrayOutputStream(Math.min(8192, remaining));
+        byte[] buffer = new byte[8192];
+        while (true) {
+            int read = zip.read(buffer, 0, Math.min(buffer.length, remaining + 1));
+            if (read == -1) return content.toByteArray();
+            if (read > remaining) {
+                throw invalid(key, "Orchestration ZIP exceeds decompressed-size limit");
+            }
+            content.write(buffer, 0, read);
+            remaining -= read;
+        }
     }
 
     private static String safePath(String key, String name) {
@@ -162,7 +187,8 @@ public final class BpmnReleaseValidator {
                                   Set<String> formRefs, Set<String> milestones,
                                   Set<String> calledElements, Set<String> decisionRefs,
                                   Set<String> candidateGroups, Set<String> slaRefs) {
-        var nodes = document.getElementsByTagNameNS("*", "*");
+        requireDocumentRoot(key, document, "BPMN", Set.of(BPMN_NS));
+        var nodes = document.getElementsByTagNameNS(BPMN_NS, "*");
         for (int i = 0; i < nodes.getLength(); i++) {
             if (!(nodes.item(i) instanceof Element element)) continue;
             checkVocabularyNamespaces(key, element);
@@ -188,10 +214,22 @@ public final class BpmnReleaseValidator {
     }
 
     private static void indexDmn(String key, Document document, Set<String> decisions) {
-        var nodes = document.getElementsByTagNameNS("*", "decision");
+        Element root = requireDocumentRoot(key, document, "DMN", DMN_NAMESPACES);
+        var nodes = document.getElementsByTagNameNS(root.getNamespaceURI(), "decision");
         for (int i = 0; i < nodes.getLength(); i++) {
             addUnique(key, decisions, attribute((Element) nodes.item(i), "id"), "decision");
         }
+    }
+
+    private static Element requireDocumentRoot(String key, Document document, String kind,
+                                               Set<String> namespaces) {
+        Element root = document.getDocumentElement();
+        if (root == null || !"definitions".equals(root.getLocalName())
+                || !namespaces.contains(root.getNamespaceURI())) {
+            throw invalid(key, kind + " document root must be 'definitions' in namespace "
+                    + String.join(", ", namespaces));
+        }
+        return root;
     }
 
     /**

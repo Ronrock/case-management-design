@@ -344,6 +344,58 @@ class JsonSchemaCaseContractValidatorTest {
                 .isInstanceOf(InvalidCaseDefinitionException.class);
     }
 
+    @ParameterizedTest(name = "[{index}] duplicate JSON key")
+    @ValueSource(strings = {
+            "{\"key\":\"sample-case\",\"key\":\"other-case\","
+                    + "\"orchestrationMode\":\"BPMN\",\"fields\":{},\"forms\":{}}",
+            "{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\","
+                    + "\"fields\":{\"amount\":{\"schema\":{\"type\":\"integer\","
+                    + "\"type\":\"string\"}}},\"forms\":{}}"
+    })
+    void rejectsDuplicateJsonKeysAtRootAndNestedLevels(String json) {
+        assertThatThrownBy(() -> validate(json))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("Contract release is not well-formed JSON")
+                .hasMessageNotContaining("other-case");
+    }
+
+    @Test
+    void rejectsContentAfterTheSingleJsonDocument() {
+        String trailingSecret = "customer-secret-after-root";
+        String json = """
+                {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{}}
+                {"secret":"%s"}
+                """.formatted(trailingSecret);
+
+        assertThatThrownBy(() -> validate(json))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("Contract release is not well-formed JSON")
+                .hasMessageNotContaining(trailingSecret);
+    }
+
+    @Test
+    void rejectsAnSlaBindingWithBothDurationAndDueDateExpression() {
+        assertThatThrownBy(() -> validate("""
+                {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{"resolution":{"scope":"CASE","calendarId":"nl-business",
+                   "duration":"P5D","dueDateExpression":"${case.targetDate}",
+                   "startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED"}}}
+                """))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/slaBindings/resolution");
+    }
+
+    @Test
+    void rejectsOversizedContractBeforeParsingIt() {
+        byte[] oversized = new byte[JsonSchemaCaseContractValidator.MAX_CONTRACT_BYTES + 1];
+        java.util.Arrays.fill(oversized, (byte) ' ');
+
+        assertThatThrownBy(() -> validator.validate(KEY, oversized))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("exceeds")
+                .hasMessageContaining(String.valueOf(JsonSchemaCaseContractValidator.MAX_CONTRACT_BYTES));
+    }
+
     /**
      * WS1-AC8. A diagnostic is read by an author and stored in logs, so it must stay bounded and
      * must not echo submitted content back — a contract can carry customer-shaped defaults.

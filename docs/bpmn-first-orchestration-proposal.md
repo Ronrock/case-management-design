@@ -36,7 +36,8 @@ POST /case-api/v2/case-definitions/{key}/presentation-releases
 POST /case-api/v2/case-definitions/{key}/versions
 ```
 
-Cross-artifact references are validated when the version is bound. Releases are content-addressed,
+Cross-artifact references are validated before a combined bundle publishes or deploys anything,
+and are validated again when independently published releases are bound. Releases are content-addressed,
 immutable, and reusable by more than one version. Embedded orchestration deployment becomes
 `ACTIVE` in the request transaction. Remote deployment reports `DEPLOYING` and later `ACTIVE` or
 `FAILED` after outbox execution and observation.
@@ -44,8 +45,9 @@ immutable, and reusable by more than one version. Embedded orchestration deploym
 ## Modeling and publication
 
 Desktop Modeler plus a distributed element-template catalog is the first authoring path. The
-templates constrain platform extension properties such as `casemgmt:formKey`,
-`casemgmt:slaTargetId`, stage and milestone tags, and candidate groups. A later Studio uses the
+templates constrain engine extension properties such as `operaton:formKey` and
+`operaton:candidateGroups`, plus platform properties such as `casemgmt:slaTargetId`,
+`casemgmt:stage`, and `casemgmt:milestoneId`. A later Studio uses the
 same catalog; Studio is not a runtime dependency.
 
 Publication rejects unsafe or inconsistent artifacts, including:

@@ -103,7 +103,7 @@ private static String caseMgmt(Element element, String name) {
 }
 ```
 
-Read `formKey`, `candidateGroups`, and engine decision properties from `OPERATON_NS`. Read `stageId`, `milestoneId`, and `slaTargetId` from `CASEMGMT_NS`. Reject a supported local name in an unexpected namespace to give the author a useful error rather than silently ignoring it.
+Read `formKey`, `candidateGroups`, and engine decision properties from `OPERATON_NS`. Read the `stage` marker, `milestoneId`, and `slaTargetId` from `CASEMGMT_NS`. A subprocess remains identified by its BPMN `id`; `casemgmt:stage="true"` marks it for stage projection. Reject a supported local name in an unexpected namespace to give the author a useful error rather than silently ignoring it.
 
 ## File map
 

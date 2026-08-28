@@ -149,6 +149,7 @@ A small example:
   "key": "my-request",
   "name": "My request",
   "version": "1.0",
+  "orchestrationMode": "BPMN",
   "roles": ["owner", "handler", "watcher"],
   "candidateGroups": ["reviewers"],
   "fields": {

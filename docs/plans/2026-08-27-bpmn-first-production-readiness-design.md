@@ -574,7 +574,7 @@ The BPMN-first contract must not define an alternative lifecycle, gateways, task
 Use two clearly separated namespaces:
 
 - `operaton` (`http://operaton.org/schema/1.0/bpmn`) for engine-owned attributes such as `formKey` and `candidateGroups`.
-- `casemgmt` (`https://casemgmt.org/bpmn`) for platform metadata such as `stageId`, `milestoneId`, and `slaTargetId`.
+- `casemgmt` (`https://casemgmt.org/bpmn`) for platform metadata such as the `stage` marker, `milestoneId`, and `slaTargetId`. A projected stage keeps the subprocess BPMN `id` as its identifier; `casemgmt:stage="true"` marks the subprocess as a stage.
 
 The chosen SLA attribute is `casemgmt:slaTargetId`. The modeler template, samples, authoring guide, validator, release publisher, embedded adapter, and remote adapter must all use that exact name and namespace.
 

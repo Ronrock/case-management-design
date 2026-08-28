@@ -20,9 +20,11 @@ release lifecycle. The platform supplies the common lifecycle, task, event, SLA,
 webhook and UI-integration mechanics; it is not a centrally operated case-management service.
 
 **What exists today:** a backend case-management service built on the Operaton process engine.
-It manages *cases* (long-running, human-driven work items) whose structure is described by a
-declarative **case definition** rather than by code. The engine is used for human tasks and BPMN
-sub-processes; the case lifecycle itself is owned by this service.
+It manages *cases* (long-running, human-driven work items) whose behavior is selected explicitly
+per definition. In `BPMN` mode, Operaton owns token flow, gateways, task activation, process timers,
+subprocesses, and compensation. In legacy `PLAN_MODEL` mode, the service's declarative evaluator
+owns plan-item lifecycle. The service owns the shared case API, canonical data, authorization,
+audit, SLA, search, and presentation contracts in both modes.
 
 **UI scope:** the backend remains the main implemented surface, but a Lit Web Components package
 now provides the standalone shell and a generic enterprise portal-adapter contract.

@@ -79,6 +79,77 @@ class CombinedCaseDefinitionArchiveTest {
         verifyNoInteractions(releases, versions);
     }
 
+    @Test
+    void rejectsAnUndeclaredOrchestrationModeBeforePublishingAnyRelease() throws Exception {
+        CaseDefinitionReleaseService releases = mock(CaseDefinitionReleaseService.class);
+        CaseDefinitionVersionService versions = mock(CaseDefinitionVersionService.class);
+        byte[] archive = zip(Map.of(
+                "processes/sample-case.bpmn", "<definitions/>",
+                "contract.json", "{\"key\":\"sample-case\",\"forms\":{}}",
+                "presentation.json", "{\"version\":\"1.0\",\"sections\":[]}"));
+
+        assertThatThrownBy(() -> new CombinedCaseDefinitionDeploymentService(releases, versions)
+                .deploy("t1", archive, "alice"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("orchestrationMode");
+
+        verifyNoInteractions(releases, versions);
+    }
+
+    @Test
+    void rejectsCrossArtifactMismatchBeforePublishingOrDeployingAnything() throws Exception {
+        var releaseRepository = mock(org.casemgmt.repo.CaseDefinitionReleaseRepository.class);
+        var deployments = mock(org.casemgmt.orchestration.OrchestrationDeploymentPort.class);
+        CaseDefinitionReleaseService releases = new CaseDefinitionReleaseService(
+                releaseRepository, deployments);
+        CaseDefinitionVersionService versions = new CaseDefinitionVersionService(
+                mock(org.casemgmt.repo.CaseDefinitionReleaseRepository.class),
+                mock(org.casemgmt.repo.CaseDefinitionVersionBindingRepository.class),
+                mock(org.casemgmt.service.CaseDefinitionService.class));
+        byte[] archive = zip(Map.of(
+                "processes/sample-case.bpmn", """
+                        <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                                     xmlns:operaton="http://operaton.org/schema/1.0/bpmn">
+                          <process id="sample-case" isExecutable="true">
+                            <userTask id="review" operaton:formKey="missingForm"/>
+                          </process>
+                        </definitions>""",
+                "contract.json", "{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\","
+                        + "\"fields\":{},\"forms\":{}}",
+                "presentation.json", "{\"version\":\"1.0\",\"sections\":[]}"));
+
+        assertThatThrownBy(() -> new CombinedCaseDefinitionDeploymentService(releases, versions)
+                .deploy("t1", archive, "alice"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("missingForm");
+
+        verifyNoInteractions(releaseRepository, deployments);
+    }
+
+    @Test
+    void rejectsUnsupportedPresentationVersionBeforePublishingOrDeployingAnything() throws Exception {
+        var releaseRepository = mock(org.casemgmt.repo.CaseDefinitionReleaseRepository.class);
+        var deployments = mock(org.casemgmt.orchestration.OrchestrationDeploymentPort.class);
+        CaseDefinitionReleaseService releases = new CaseDefinitionReleaseService(
+                releaseRepository, deployments);
+        CaseDefinitionVersionService versions = mock(CaseDefinitionVersionService.class);
+        byte[] archive = zip(Map.of(
+                "processes/sample-case.bpmn", """
+                        <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+                          <process id="sample-case" isExecutable="true"/>
+                        </definitions>""",
+                "contract.json", "{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\","
+                        + "\"fields\":{},\"forms\":{}}",
+                "presentation.json", "{\"version\":\"2.0\",\"sections\":[]}"));
+
+        assertThatThrownBy(() -> new CombinedCaseDefinitionDeploymentService(releases, versions)
+                .deploy("t1", archive, "alice"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("version");
+
+        verifyNoInteractions(releaseRepository, deployments, versions);
+    }
+
     private static byte[] zip(Map<String, String> entries) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (ZipOutputStream zip = new ZipOutputStream(bytes)) {

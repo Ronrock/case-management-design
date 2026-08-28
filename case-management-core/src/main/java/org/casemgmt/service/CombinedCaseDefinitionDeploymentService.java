@@ -34,16 +34,31 @@ public class CombinedCaseDefinitionDeploymentService {
     @Transactional
     public CaseDefinitionVersionBinding deploy(String tenantId, byte[] archive, String deployedBy) {
         CombinedCaseDefinitionArchive parsed = CombinedCaseDefinitionArchive.read("<combined>", archive);
-        Object rawKey = JsonCodec.toMap(parsed.contractJson()).get("key");
+        var rawContract = JsonCodec.toMap(parsed.contractJson());
+        Object rawKey = rawContract.get("key");
         if (rawKey == null || rawKey.toString().isBlank()) {
             throw new InvalidCaseDefinitionException("<combined>",
                     "Combined deployment contract.json requires key");
         }
         String key = rawKey.toString();
+        Object rawMode = rawContract.get("orchestrationMode");
+        if (rawMode == null || rawMode.toString().isBlank()) {
+            throw new InvalidCaseDefinitionException(key,
+                    "Combined deployment contract.json requires orchestrationMode");
+        }
         // Before publication, not after: a release row that was written and then rolled back is
         // still a release an operator saw appear. Binding validates again because it is a public
         // entry point in its own right.
         contracts.validate(key, parsed.contractJson().getBytes(StandardCharsets.UTF_8));
+        releases.validateForPublication(key, ReleaseKind.ORCHESTRATION, "application/zip",
+                parsed.orchestrationZip());
+        releases.validateForPublication(key, ReleaseKind.CONTRACT, "application/json",
+                parsed.contractJson().getBytes(StandardCharsets.UTF_8));
+        releases.validateForPublication(key, ReleaseKind.PRESENTATION, "application/json",
+                parsed.presentationJson().getBytes(StandardCharsets.UTF_8));
+        versions.validateArtifacts(key, parsed.orchestrationZip(), "application/zip",
+                parsed.contractJson().getBytes(StandardCharsets.UTF_8),
+                parsed.presentationJson().getBytes(StandardCharsets.UTF_8));
         CaseDefinitionRelease orchestration = releases.publish(key, tenantId,
                 ReleaseKind.ORCHESTRATION, "application/zip", parsed.orchestrationZip(), deployedBy);
         CaseDefinitionRelease contract = releases.publish(key, tenantId, ReleaseKind.CONTRACT,

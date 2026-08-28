@@ -1,8 +1,11 @@
 package org.casemgmt.release;
 
+import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.PathType;
@@ -40,6 +43,7 @@ import java.util.Set;
 public final class JsonSchemaCaseContractValidator implements CaseContractValidator {
 
     static final String SCHEMA_RESOURCE = "/schemas/case-contract-v1.schema.json";
+    static final int MAX_CONTRACT_BYTES = 25 * 1024 * 1024;
 
     /**
      * Root properties that decide sequence or task activation. In {@code BPMN} mode the process
@@ -63,7 +67,10 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
 
     private static final JsonSchema SCHEMA = compileSchema();
 
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper mapper = JsonMapper.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .build();
 
     @Override
     public ValidatedCaseContract validate(String definitionKey, byte[] utf8Json) {
@@ -85,6 +92,10 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
     private JsonNode parse(String definitionKey, byte[] utf8Json) {
         if (utf8Json == null || utf8Json.length == 0) {
             throw invalid(definitionKey, "Contract release is empty");
+        }
+        if (utf8Json.length > MAX_CONTRACT_BYTES) {
+            throw invalid(definitionKey, "Contract release exceeds " + MAX_CONTRACT_BYTES
+                    + " bytes");
         }
         String json;
         try {

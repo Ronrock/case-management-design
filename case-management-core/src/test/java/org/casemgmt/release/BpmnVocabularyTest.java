@@ -78,6 +78,17 @@ class BpmnVocabularyTest {
         assertThat(index.slaRefs()).containsExactly("review-sla");
     }
 
+    @Test
+    void rejectsStageMarkerInTheWrongNamespace() {
+        assertThatThrownBy(() -> validate("""
+                xmlns:foo="https://example.invalid/bpmn\"""", """
+                <bpmn:subProcess id="intake" foo:stage="true"/>"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("BPMN element 'intake'")
+                .hasMessageContaining("'stage'")
+                .hasMessageContaining(CASEMGMT_NS);
+    }
+
     /**
      * The Task 3 interface contract: {@code slaRefs()} carries {@code casemgmt:slaTargetId}
      * values and nothing else, so binding cross-references one spelling.
