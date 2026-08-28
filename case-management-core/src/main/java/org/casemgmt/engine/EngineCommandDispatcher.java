@@ -8,6 +8,8 @@ import org.casemgmt.repo.EngineCommandRepository;
 
 import java.util.Base64;
 import java.time.OffsetDateTime;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
@@ -69,6 +71,10 @@ public class EngineCommandDispatcher {
     private final EngineGateway delegate;
     private final SyncReporter syncReporter;
     private final DeploymentReporter deploymentReporter;
+    private final EngineCommandTransport transport;
+    private final String workerOwner;
+    private final Clock clock;
+    private final Duration leaseDuration;
 
     public EngineCommandDispatcher(EngineCommandRepository commands, EngineGateway delegate,
                                    SyncReporter syncReporter) {
@@ -82,9 +88,28 @@ public class EngineCommandDispatcher {
         this.delegate = delegate;
         this.syncReporter = syncReporter;
         this.deploymentReporter = deploymentReporter;
+        this.transport = null;
+        this.workerOwner = null;
+        this.clock = null;
+        this.leaseDuration = null;
+    }
+
+    /** Production dispatcher: all results flow through the typed policy/store boundary. */
+    public EngineCommandDispatcher(
+            EngineCommandRepository commands, EngineCommandTransport transport,
+            String workerOwner, Clock clock, Duration leaseDuration) {
+        this.commands = java.util.Objects.requireNonNull(commands, "commands");
+        this.transport = java.util.Objects.requireNonNull(transport, "transport");
+        this.workerOwner = java.util.Objects.requireNonNull(workerOwner, "workerOwner");
+        this.clock = java.util.Objects.requireNonNull(clock, "clock");
+        this.leaseDuration = java.util.Objects.requireNonNull(leaseDuration, "leaseDuration");
+        this.delegate = null;
+        this.syncReporter = null;
+        this.deploymentReporter = null;
     }
 
     public int drainOnce() {
+        if (transport != null) return drainProduction();
         List<EngineCommand> due = commands.claimDue(50);
         for (EngineCommand command : due) {
             try {
@@ -99,6 +124,29 @@ public class EngineCommandDispatcher {
                             EngineCommand.nextAttempt(command.attempts()));
                 }
             }
+        }
+        return due.size();
+    }
+
+    private int drainProduction() {
+        OffsetDateTime now = OffsetDateTime.now(clock);
+        commands.recoverExpiredLeases(now);
+        List<ProductionEngineCommandStore.LeasedCommand> due = commands.claimDue(
+                workerOwner, 50, now, leaseDuration);
+        for (ProductionEngineCommandStore.LeasedCommand lease : due) {
+            ProductionEngineCommandStore.StoredCommand command = lease.command();
+            CommandDispatchOutcome outcome;
+            try {
+                outcome = java.util.Objects.requireNonNull(
+                        transport.dispatch(command), "transport outcome");
+            } catch (RuntimeException unexpected) {
+                // An unclassified client failure may have happened after bytes left this process.
+                // Persist uncertainty instead of blindly re-sending a non-idempotent command.
+                outcome = CommandDispatchOutcome.transportFailure(
+                        CommandDispatchOutcome.TransportFailure.UNKNOWN);
+            }
+            commands.commitLeaseOutcome(command.state().command().tenantId(),
+                    command.operationId(), lease.leaseToken(), command.version(), outcome);
         }
         return due.size();
     }

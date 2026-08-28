@@ -94,6 +94,55 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
         assertThat(second).isEmpty();
     }
 
+    @Test
+    void everyCommittedDecisionAppendsAContiguousBoundTransition() {
+        repository.submit(request("command-a", "operation-a", "key-a"));
+        var lease = repository.claimDue("worker-a", 1, NOW, Duration.ofMinutes(5)).getFirst();
+        repository.commitLeaseOutcome("tenant-a", "operation-a", lease.leaseToken(),
+                lease.command().version(), CommandDispatchOutcome.transportFailure(
+                        CommandDispatchOutcome.TransportFailure.PRE_CONNECT_FAILURE));
+
+        var rows = JdbcClient.create(dataSource()).sql("""
+                SELECT VERSION_ || ':' || OUTCOME_KIND_ || ':' || FROM_STATUS_ || ':' || TO_STATUS_
+                FROM CM_ENGINE_COMMAND_TRANSITION WHERE COMMAND_ID_='command-a'
+                ORDER BY VERSION_
+                """).query(String.class).list();
+        assertThat(rows).containsExactly(
+                "0:BASELINE_NATIVE:PENDING:PENDING",
+                "1:DISPATCH_REQUESTED:PENDING:DISPATCHING",
+                "2:TRANSPORT_FAILURE:DISPATCHING:RETRYABLE");
+    }
+
+    @Test
+    void missingOrTamperedTransitionHistoryFailsRehydration() {
+        repository.submit(request("command-a", "operation-a", "key-a"));
+        repository.claimDue("worker-a", 1, NOW, Duration.ofMinutes(5));
+        var jdbc = JdbcClient.create(dataSource());
+        jdbc.sql("DELETE FROM CM_ENGINE_COMMAND_TRANSITION "
+                + "WHERE COMMAND_ID_='command-a' AND VERSION_=1").update();
+
+        assertThatThrownBy(() -> repository.require("tenant-a", "operation-a"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("transition");
+    }
+
+    @Test
+    void operatorTransitionReferencesItsNormalizedActionRow() {
+        repository.submit(request("command-a", "operation-a", "key-a"));
+        var pending = repository.require("tenant-a", "operation-a");
+        repository.applyOperatorOutcome("tenant-a", "operation-a", pending.version(),
+                CommandDispatchOutcome.cancelUnsent(action(
+                        "cancel-a", CommandDispatchOutcome.ActionType.CANCEL, false, null)));
+
+        assertThat(JdbcClient.create(dataSource()).sql("""
+                SELECT T.ACTION_SEQUENCE_ || ':' || A.ACTION_ID_
+                FROM CM_ENGINE_COMMAND_TRANSITION T
+                JOIN CM_ENGINE_COMMAND_ACTION A
+                  ON A.COMMAND_ID_=T.COMMAND_ID_ AND A.SEQUENCE_=T.ACTION_SEQUENCE_
+                WHERE T.COMMAND_ID_='command-a' AND T.VERSION_=1
+                """).query(String.class).single()).isEqualTo("1:cancel-a");
+    }
+
     @ParameterizedTest(name = "rejects forged current timestamps for {0}")
     @EnumSource(EngineCommandStatus.class)
     void rejectsForgedCurrentTimestampTupleForEveryStatus(EngineCommandStatus status) {

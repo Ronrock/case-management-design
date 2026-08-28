@@ -1,0 +1,184 @@
+package org.casemgmt.engine.remote;
+
+import org.casemgmt.engine.*;
+import org.casemgmt.orchestration.EngineDeploymentIdentity;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestClient;
+
+import java.net.ConnectException;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
+
+class RemoteEngineCommandTransportTest {
+
+    @ParameterizedTest
+    @EnumSource(EngineCommand.Type.class)
+    void everyCommandTypeReturnsCommandBoundConfirmation(EngineCommand.Type type) {
+        var gateway = new SuccessfulGateway();
+        var command = command(type, payload(type));
+
+        CommandDispatchOutcome outcome = gateway.dispatch(command);
+
+        assertThat(outcome.kind()).isEqualTo(CommandDispatchOutcome.Kind.HTTP_RESPONSE);
+        int expectedStatus = switch (type) {
+            case CLAIM_TASK, COMPLETE_TASK, CANCEL_PROCESS, CORRELATE_MESSAGE -> 204;
+            default -> 200;
+        };
+        assertThat(outcome.httpResult().status()).isEqualTo(expectedStatus);
+        assertThat(outcome.confirmationEvidence()).satisfies(evidence -> {
+            assertThat(evidence.tenantId()).isEqualTo("tenant-1");
+            assertThat(evidence.operationId()).isEqualTo("operation-1");
+            assertThat(evidence.commandId()).isEqualTo("command-1");
+            assertThat(evidence.commandType()).isEqualTo(type);
+            assertThat(evidence.expectedTargetIdentity()).isEqualTo("target-1");
+            assertThat(evidence.evidenceReference())
+                    .isEqualTo("http:" + expectedStatus + ":command-1");
+        });
+    }
+
+    @Test
+    void httpFailuresPreserveStatusAcceptanceAndRetryAfterWithoutRawBody() {
+        RestClient.Builder builder = RestClient.builder().baseUrl("http://engine.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        server.expect(requestTo("http://engine.test/task/task-1/complete"))
+                .andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS)
+                        .header(HttpHeaders.RETRY_AFTER, "90")
+                        .contentType(MediaType.TEXT_PLAIN).body("password=do-not-store"));
+        RemoteEngineGateway gateway = new RemoteEngineGateway(builder.build());
+
+        CommandDispatchOutcome outcome = gateway.dispatch(command(
+                EngineCommand.Type.COMPLETE_TASK,
+                Map.of("engineTaskId", "task-1", "variables", Map.of())));
+
+        assertThat(outcome).isEqualTo(CommandDispatchOutcome.http(429,
+                CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED,
+                Duration.ofSeconds(90), null));
+        assertThat(outcome.toString()).doesNotContain("password");
+        server.verify();
+    }
+
+    @ParameterizedTest
+    @MethodSource("httpFailureMatrix")
+    void classifiesTheCompleteHttpFailureMatrixConservatively(
+            HttpStatus status, CommandDispatchOutcome.Acceptance acceptance) {
+        RestClient.Builder builder = RestClient.builder().baseUrl("http://engine.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        server.expect(requestTo("http://engine.test/task/task-1/complete"))
+                .andRespond(withStatus(status));
+
+        CommandDispatchOutcome outcome = new RemoteEngineGateway(builder.build()).dispatch(
+                command(EngineCommand.Type.COMPLETE_TASK,
+                        Map.of("engineTaskId", "task-1", "variables", Map.of())));
+
+        assertThat(outcome.httpResult()).isEqualTo(
+                new CommandDispatchOutcome.HttpResult(status.value(), acceptance, null));
+        server.verify();
+    }
+
+    static Stream<Arguments> httpFailureMatrix() {
+        return Stream.of(
+                Arguments.of(HttpStatus.BAD_REQUEST,
+                        CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED),
+                Arguments.of(HttpStatus.NOT_FOUND,
+                        CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED),
+                Arguments.of(HttpStatus.CONFLICT,
+                        CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED),
+                Arguments.of(HttpStatus.REQUEST_TIMEOUT,
+                        CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED),
+                Arguments.of(HttpStatus.TOO_EARLY,
+                        CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED),
+                Arguments.of(HttpStatus.TOO_MANY_REQUESTS,
+                        CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED),
+                Arguments.of(HttpStatus.INTERNAL_SERVER_ERROR,
+                        CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED));
+    }
+
+    @Test
+    void connectionRefusalIsTheOnlyOrdinaryFailureClassifiedBeforeConnect() {
+        assertThat(RemoteEngineGateway.classifyTransport(new ResourceAccessException(
+                "safe", new ConnectException("refused"))))
+                .isEqualTo(CommandDispatchOutcome.TransportFailure.PRE_CONNECT_FAILURE);
+        assertThat(RemoteEngineGateway.classifyTransport(new ResourceAccessException(
+                "safe", new java.net.SocketTimeoutException("timed out"))))
+                .isEqualTo(CommandDispatchOutcome.TransportFailure.TIMEOUT);
+        assertThat(RemoteEngineGateway.classifyTransport(new ResourceAccessException(
+                "safe", new java.net.SocketException("reset"))))
+                .isEqualTo(CommandDispatchOutcome.TransportFailure.MID_WRITE_FAILURE);
+        assertThat(RemoteEngineGateway.classifyTransport(new ResourceAccessException("safe")))
+                .isEqualTo(CommandDispatchOutcome.TransportFailure.UNKNOWN);
+    }
+
+    private static ProductionEngineCommandStore.StoredCommand command(
+            EngineCommand.Type type, Map<String, Object> payload) {
+        ProductionEngineCommandStore.StoredCommand command =
+                mock(ProductionEngineCommandStore.StoredCommand.class);
+        EngineCommandPolicy.CommandState state = mock(EngineCommandPolicy.CommandState.class);
+        when(command.commandId()).thenReturn("command-1");
+        when(command.operationId()).thenReturn("operation-1");
+        when(command.caseId()).thenReturn("case-1");
+        when(command.expectedTargetIdentity()).thenReturn("target-1");
+        when(command.payload()).thenReturn(payload);
+        when(command.state()).thenReturn(state);
+        when(state.command()).thenReturn(new EngineCommandPolicy.CommandContext(
+                "tenant-1", "operation-1", "command-1", type, "target-1"));
+        return command;
+    }
+
+    private static Map<String, Object> payload(EngineCommand.Type type) {
+        return switch (type) {
+            case CREATE_TASK -> Map.of("planItemId", "plan-1", "name", "Approve",
+                    "assignee", "", "candidateGroups", List.of(), "formKey", "",
+                    "variables", Map.of());
+            case CLAIM_TASK -> Map.of("engineTaskId", "task-1", "userId", "alice");
+            case COMPLETE_TASK -> Map.of("engineTaskId", "task-1", "variables", Map.of());
+            case START_PROCESS -> Map.of("selectionType", "ID",
+                    "processDefinitionId", "definition-1", "processDefinitionKey", "orders",
+                    "tenantId", "tenant-1", "planItemId", "", "correlationId", "corr-1",
+                    "variables", Map.of());
+            case CANCEL_PROCESS -> Map.of("processInstanceId", "process-1", "reason", "done");
+            case DEPLOY_ORCHESTRATION -> Map.of("releaseId", "release-1",
+                    "definitionKey", "orders", "tenantId", "tenant-1",
+                    "contentBase64", "YQ==", "mediaType", "application/xml");
+            case CORRELATE_MESSAGE -> Map.of("messageName", "continue", "variables", Map.of());
+        };
+    }
+
+    private static final class SuccessfulGateway extends RemoteEngineGateway {
+        private SuccessfulGateway() { super(RestClient.create()); }
+        @Override public EngineTaskRef createHumanTask(HumanTaskRequest request) {
+            return new EngineTaskRef("task-1", request.name(), request.assignee(),
+                    request.caseId(), OffsetDateTime.parse("2026-08-29T00:00:00Z"));
+        }
+        @Override public void claimTask(String engineTaskId, String userId) { }
+        @Override public void completeTask(String engineTaskId, Map<String, Object> variables) { }
+        @Override public EngineProcessRef startProcess(StartProcessRequest request) {
+            return new EngineProcessRef("process-1", request.processDefinitionId(),
+                    request.processDefinitionKey(), request.caseId());
+        }
+        @Override public void cancelProcess(String processInstanceId, String reason) { }
+        @Override public EngineDeploymentIdentity deploy(String releaseId, String definitionKey,
+                String tenantId, byte[] content, String mediaType) {
+            return new EngineDeploymentIdentity("deployment-1", "definition-1",
+                    definitionKey, 1, tenantId);
+        }
+        @Override public void correlateMessage(MessageCorrelationRequest request) { }
+    }
+}

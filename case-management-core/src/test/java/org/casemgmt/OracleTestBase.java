@@ -253,6 +253,7 @@ public abstract class OracleTestBase {
                 "CM_BULK_OPERATION_ITEM",
                 "CM_BULK_OPERATION",
                 "CM_DEF_IDENTITY_LINK",
+                "CM_ENGINE_COMMAND_TRANSITION",
                 "CM_ENGINE_COMMAND_ACTION",
                 "CM_ENGINE_COMMAND",
                 "CM_QUEUE",

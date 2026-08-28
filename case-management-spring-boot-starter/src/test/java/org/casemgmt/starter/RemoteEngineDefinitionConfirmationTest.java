@@ -1,51 +1,59 @@
 package org.casemgmt.starter;
 
+import org.casemgmt.engine.CommandDispatchOutcome;
 import org.casemgmt.engine.EngineCommand;
-import org.casemgmt.engine.EngineProcessRef;
+import org.casemgmt.engine.EngineCommandPolicy;
+import org.casemgmt.engine.ProductionEngineCommandStore;
 import org.casemgmt.engine.remote.RemoteEngineGateway;
-import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.EngineCommandRepository;
-import org.casemgmt.repo.LinkedProcessRepository;
-import org.casemgmt.service.LinkedProcessService;
-import org.casemgmt.service.OrchestrationDeploymentReportService;
 import org.junit.jupiter.api.Test;
 
 import java.time.OffsetDateTime;
 import java.util.List;
-import java.util.Map;
+import java.time.Duration;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RemoteEngineDefinitionConfirmationTest {
 
     @Test
-    void remoteDispatcherWiringConfirmsExactDefinitionIdentity() {
+    void remoteDispatcherWiringPersistsEvidenceWithoutWritingAProjectionCallback() {
         EngineCommandRepository commands = mock(EngineCommandRepository.class);
         RemoteEngineGateway gateway = mock(RemoteEngineGateway.class);
-        LinkedProcessService linkedProcesses = mock(LinkedProcessService.class);
-        EngineCommand command = new EngineCommand("command-1", "case-1",
-                EngineCommand.Type.START_PROCESS, Map.of(
-                "selectionType", "ID", "processDefinitionId", "orders:9:exact",
-                "processDefinitionKey", "orders", "tenantId", "",
-                "planItemId", "", "variables", Map.of(),
-                "correlationId", "correlation-1"), "CLAIMED", 0,
-                OffsetDateTime.parse("2026-08-28T07:00:00Z"), null);
-        when(commands.claimDue(50)).thenReturn(List.of(command));
-        when(gateway.startProcess(any())).thenReturn(new EngineProcessRef(
-                "process-42", "orders:9:exact", "orders", "case-1"));
+        ProductionEngineCommandStore.StoredCommand command =
+                mock(ProductionEngineCommandStore.StoredCommand.class);
+        EngineCommandPolicy.CommandState state = mock(EngineCommandPolicy.CommandState.class);
+        when(command.state()).thenReturn(state);
+        when(state.command()).thenReturn(new EngineCommandPolicy.CommandContext(
+                "tenant-1", "operation-1", "command-1", EngineCommand.Type.START_PROCESS,
+                "orders:9:exact"));
+        when(command.operationId()).thenReturn("operation-1");
+        when(command.version()).thenReturn(1L);
+        var lease = new ProductionEngineCommandStore.LeasedCommand(command,
+                "lease-1", "worker", OffsetDateTime.now().plusMinutes(5));
+        var evidence = new CommandDispatchOutcome.ConfirmationEvidence(
+                "tenant-1", "operation-1", "command-1", EngineCommand.Type.START_PROCESS,
+                "orders:9:exact", "process-42",
+                CommandDispatchOutcome.RemoteState.PROCESS_STARTED,
+                CommandDispatchOutcome.ConfirmationSource.HTTP_RESPONSE,
+                "http:200:command-1");
+        CommandDispatchOutcome outcome = CommandDispatchOutcome.http(200,
+                CommandDispatchOutcome.Acceptance.ACCEPTED, null, evidence);
+        when(commands.claimDue(anyString(), eq(50), any(), eq(Duration.ofMinutes(5))))
+                .thenReturn(List.of(lease));
+        when(gateway.dispatch(command)).thenReturn(outcome);
         var dispatcher = new RemoteEngineAutoConfiguration().engineCommandDispatcher(
-                commands, gateway, mock(CaseTaskRepository.class),
-                mock(LinkedProcessRepository.class), linkedProcesses,
-                mock(OrchestrationDeploymentReportService.class));
+                commands, gateway);
 
         dispatcher.drainOnce();
 
-        verify(linkedProcesses).confirmStarted(eq("case-1"), eq("correlation-1"),
-                eq("process-42"), eq("orders:9:exact"), eq("orders"),
-                any(OffsetDateTime.class));
+        verify(commands).commitLeaseOutcome(
+                "tenant-1", "operation-1", "lease-1", 1, outcome);
+        verify(gateway, never()).startProcess(any());
     }
 }

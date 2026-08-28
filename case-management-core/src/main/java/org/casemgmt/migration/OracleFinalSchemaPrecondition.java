@@ -91,6 +91,15 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                 num("OVERRIDE_AUTO_CAP_",1,false,null), v("REVIEW_FINDING_",32,true,null),
                 v("REVIEW_SOURCE_",32,true,null), v("REVIEW_REFERENCE_",160,true,null),
                 ts("CREATED_AT_",false,"SYSTIMESTAMP"));
+        add(columns, "CM_ENGINE_COMMAND_TRANSITION", false,
+                v("COMMAND_ID_",64,false,null), num("VERSION_",19,false,null),
+                v("TENANT_ID_",64,false,null), v("OPERATION_ID_",64,false,null),
+                v("COMMAND_TYPE_",30,false,null), v("EXPECTED_TARGET_",255,false,null),
+                v("FROM_STATUS_",20,false,null), v("TO_STATUS_",20,false,null),
+                num("OUTCOME_FORMAT_",3,false,null), v("OUTCOME_KIND_",40,false,null),
+                clob("OUTCOME_JSON_",false,null), num("ACTION_SEQUENCE_",19,true,null),
+                ts("DECIDED_AT_",false,null), v("PREVIOUS_DECISION_DIGEST_",64,true,null),
+                v("NEXT_DECISION_DIGEST_",64,false,null), ts("CREATED_AT_",false,"SYSTIMESTAMP"));
         return new SchemaContract(columns, productionConstraints(), productionIndexes());
     }
 
@@ -126,7 +135,19 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                 new ConstraintContract("CK_CM_ECA_INVARIANTS","CM_ENGINE_COMMAND_ACTION","C",null,null,
                         "SEQUENCE_>0ANDOVERRIDE_AUTO_CAP_IN(0,1)AND((REVIEW_FINDING_ISNULLANDREVIEW_SOURCE_ISNULLANDREVIEW_REFERENCE_ISNULL)OR(REVIEW_FINDING_ISNOTNULLANDREVIEW_SOURCE_ISNOTNULLANDREVIEW_REFERENCE_ISNOTNULL))"),
                 new ConstraintContract("FK_CM_ECA_COMMAND","CM_ENGINE_COMMAND_ACTION","R",
-                        List.of("COMMAND_ID_"),"CM_ENGINE_COMMAND:ID_",null));
+                        List.of("COMMAND_ID_"),"CM_ENGINE_COMMAND:ID_",null),
+                new ConstraintContract("UQ_CM_ECA_SEQUENCE_C","CM_ENGINE_COMMAND_ACTION","U",
+                        List.of("COMMAND_ID_","SEQUENCE_"),null,null),
+                new ConstraintContract("PK_CM_ECT","CM_ENGINE_COMMAND_TRANSITION","P",
+                        List.of("COMMAND_ID_","VERSION_"),null,null),
+                new ConstraintContract("CK_CM_ECT_INVARIANTS","CM_ENGINE_COMMAND_TRANSITION","C",
+                        null,null,
+                        "OUTCOME_FORMAT_=1AND((VERSION_=0ANDPREVIOUS_DECISION_DIGEST_ISNULLANDFROM_STATUS_=TO_STATUS_ANDACTION_SEQUENCE_ISNULL)OR(VERSION_>0ANDPREVIOUS_DECISION_DIGEST_ISNOTNULL))AND(ACTION_SEQUENCE_ISNULLORACTION_SEQUENCE_>0)"),
+                new ConstraintContract("FK_CM_ECT_COMMAND","CM_ENGINE_COMMAND_TRANSITION","R",
+                        List.of("COMMAND_ID_"),"CM_ENGINE_COMMAND:ID_",null),
+                new ConstraintContract("FK_CM_ECT_ACTION","CM_ENGINE_COMMAND_TRANSITION","R",
+                        List.of("COMMAND_ID_","ACTION_SEQUENCE_"),
+                        "CM_ENGINE_COMMAND_ACTION:COMMAND_ID_,SEQUENCE_",null));
     }
 
     private static List<IndexContract> productionIndexes() {
@@ -143,7 +164,8 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                 ix("IX_CM_ENGCMD_CASE_STATUS","CM_ENGINE_COMMAND",false,"TENANT_ID_","CASE_ID_","STATUS_"),
                 ix("IX_CM_ENGCMD_REVIEW","CM_ENGINE_COMMAND",false,"STATUS_","UPDATED_AT_"),
                 ix("UQ_CM_ECA_ACTION","CM_ENGINE_COMMAND_ACTION",true,"COMMAND_ID_","ACTION_ID_"),
-                ix("UQ_CM_ECA_SEQUENCE","CM_ENGINE_COMMAND_ACTION",true,"COMMAND_ID_","SEQUENCE_"));
+                ix("UQ_CM_ECA_SEQUENCE","CM_ENGINE_COMMAND_ACTION",true,"COMMAND_ID_","SEQUENCE_"),
+                ix("PK_CM_ECT","CM_ENGINE_COMMAND_TRANSITION",true,"COMMAND_ID_","VERSION_"));
     }
 
     private static List<ConstraintContract> observationConstraints() {

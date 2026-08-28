@@ -3,17 +3,12 @@ package org.casemgmt.starter;
 import org.casemgmt.engine.EngineCommandDispatcher;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
-import org.casemgmt.domain.CaseTask;
 import org.casemgmt.engine.remote.RemoteEngineGateway;
 import org.casemgmt.engine.remote.RemoteObservationPoller;
 import org.casemgmt.engine.remote.RemoteProcessActivityClassifier;
 import org.casemgmt.orchestration.OrchestrationDeploymentPort;
 import org.casemgmt.orchestration.OutboxOrchestrationDeploymentPort;
-import org.casemgmt.repo.CaseTaskRepository;
-import org.casemgmt.service.OrchestrationDeploymentReportService;
-import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.repo.EngineCommandRepository;
-import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.projection.ActiveBpmnCaseRepository;
 import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.projection.RemotePollingCheckpointRepository;
@@ -24,7 +19,6 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.web.client.RestClient;
 
 import java.util.Optional;
-import java.time.OffsetDateTime;
 
 @AutoConfiguration(before = CaseManagementAutoConfiguration.class)
 // Fix round 1, Important 1: the master switch guard. Without it, casemgmt.enabled=false with
@@ -187,34 +181,10 @@ public class RemoteEngineAutoConfiguration {
      * in one transaction. A definitive process-start failure updates only the waiting link state.
      */
     @Bean
-    public EngineCommandDispatcher engineCommandDispatcher(EngineCommandRepository commands,
-                                                            RemoteEngineGateway delegate,
-                                                            CaseTaskRepository tasks,
-                                                            LinkedProcessRepository linkedProcesses,
-                                                            LinkedProcessService linkedProcessService,
-                                                            OrchestrationDeploymentReportService deployments) {
-        return new EngineCommandDispatcher(commands, delegate, new EngineCommandDispatcher.SyncReporter() {
-            @Override
-            public void report(String correlationKey, CaseTask.EngineSync sync,
-                               String engineId) {
-                tasks.findByPlanItemId(correlationKey)
-                        .ifPresent(t -> tasks.markSync(t.id(), sync, engineId));
-                if (sync != CaseTask.EngineSync.SYNCED) {
-                    linkedProcesses.markSync(correlationKey, sync, null);
-                }
-            }
-
-            @Override
-            public void confirmProcessStarted(String caseId, String correlationId,
-                                              String engineProcessInstanceId,
-                                              String processDefinitionId,
-                                              String processDefinitionKey,
-                                              OffsetDateTime confirmedAt) {
-                linkedProcessService.confirmStarted(caseId, correlationId,
-                        engineProcessInstanceId, processDefinitionId,
-                        processDefinitionKey, confirmedAt);
-            }
-        },
-                deployments::report);
+    public EngineCommandDispatcher engineCommandDispatcher(
+            EngineCommandRepository commands, RemoteEngineGateway delegate) {
+        return new EngineCommandDispatcher(commands, delegate,
+                "remote-dispatcher-" + java.util.UUID.randomUUID(),
+                java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(5));
     }
 }

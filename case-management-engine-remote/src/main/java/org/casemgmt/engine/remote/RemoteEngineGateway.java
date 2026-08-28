@@ -12,6 +12,8 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.time.OffsetDateTime;
+import java.time.Duration;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
@@ -24,7 +26,8 @@ import java.util.*;
  * Calls here are NOT in the case transaction. Callers must therefore reach this
  * class through the command outbox (Task 13), never directly from a request thread.
  */
-public class RemoteEngineGateway implements EngineGateway, OrchestrationDeploymentClient {
+public class RemoteEngineGateway implements EngineGateway, OrchestrationDeploymentClient,
+        EngineCommandTransport {
 
     public static final String CASE_ID_VARIABLE = "caseId";
     private static final String PLAN_ITEM_VARIABLE = "planItemId";
@@ -49,6 +52,200 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
 
     public RemoteEngineGateway(RestClient client) {
         this.client = client;
+    }
+
+    /** Production outbox delivery. All failures are reduced to safe policy facts. */
+    @Override
+    public CommandDispatchOutcome dispatch(ProductionEngineCommandStore.StoredCommand command) {
+        Objects.requireNonNull(command, "command");
+        Map<String, Object> payload = command.payload();
+        try {
+            RemoteResult result = switch (command.state().command().commandType()) {
+                case CREATE_TASK -> {
+                    EngineTaskRef ref = createHumanTask(new HumanTaskRequest(
+                            command.caseId(), text(payload, "planItemId"), text(payload, "name"),
+                            nullable(payload, "assignee"), strings(payload.get("candidateGroups")),
+                            nullable(payload, "formKey"), map(payload.get("variables")),
+                            command.commandId()));
+                    yield new RemoteResult(ref.engineTaskId(),
+                            CommandDispatchOutcome.RemoteState.TASK_CREATED, 200);
+                }
+                case CLAIM_TASK -> {
+                    String id = text(payload, "engineTaskId");
+                    claimTask(id, text(payload, "userId"));
+                    yield new RemoteResult(id, CommandDispatchOutcome.RemoteState.TASK_CLAIMED, 204);
+                }
+                case COMPLETE_TASK -> {
+                    String id = text(payload, "engineTaskId");
+                    completeTask(id, map(payload.get("variables")));
+                    yield new RemoteResult(id, CommandDispatchOutcome.RemoteState.TASK_COMPLETED, 204);
+                }
+                case START_PROCESS -> {
+                    EngineProcessRef ref;
+                    if ("ID".equals(text(payload, "selectionType"))) {
+                        ref = startProcess(new StartProcessRequest(command.caseId(),
+                                nullable(payload, "planItemId"),
+                                text(payload, "processDefinitionId"),
+                                nullable(payload, "processDefinitionKey"),
+                                nullable(payload, "tenantId"), map(payload.get("variables")),
+                                nullable(payload, "correlationId")));
+                    } else {
+                        ref = startProcessByKey(new StartProcessByKeyRequest(command.caseId(),
+                                nullable(payload, "planItemId"),
+                                text(payload, "processDefinitionKey"),
+                                map(payload.get("variables")), nullable(payload, "correlationId"),
+                                nullable(payload, "tenantId")));
+                    }
+                    yield new RemoteResult(ref.processInstanceId(),
+                            CommandDispatchOutcome.RemoteState.PROCESS_STARTED, 200);
+                }
+                case CANCEL_PROCESS -> {
+                    String id = text(payload, "processInstanceId");
+                    cancelProcess(id, nullable(payload, "reason"));
+                    yield new RemoteResult(id,
+                            CommandDispatchOutcome.RemoteState.PROCESS_CANCELLED, 204);
+                }
+                case DEPLOY_ORCHESTRATION -> {
+                    EngineDeploymentIdentity identity = deploy(text(payload, "releaseId"),
+                            text(payload, "definitionKey"), nullable(payload, "tenantId"),
+                            Base64.getDecoder().decode(text(payload, "contentBase64")),
+                            text(payload, "mediaType"));
+                    yield new RemoteResult(identity.deploymentId(),
+                            CommandDispatchOutcome.RemoteState.ORCHESTRATION_DEPLOYED, 200);
+                }
+                case CORRELATE_MESSAGE -> {
+                    correlateMessage(new MessageCorrelationRequest(command.caseId(),
+                            text(payload, "messageName"), map(payload.get("variables"))));
+                    yield new RemoteResult(command.expectedTargetIdentity(),
+                            CommandDispatchOutcome.RemoteState.MESSAGE_CORRELATED, 204);
+                }
+            };
+            return CommandDispatchOutcome.http(result.httpStatus(),
+                    CommandDispatchOutcome.Acceptance.ACCEPTED, null,
+                    confirmation(command, result,
+                            "http:" + result.httpStatus() + ":" + command.commandId()));
+        } catch (EngineException failure) {
+            RestClientResponseException response = responseCause(failure);
+            if (response != null) return classifyHttpFailure(command, response);
+            RestClientException transport = transportCause(failure);
+            if (transport != null) return CommandDispatchOutcome.transportFailure(
+                    classifyTransport(transport));
+            return CommandDispatchOutcome.malformedResponse();
+        } catch (IllegalArgumentException malformed) {
+            return CommandDispatchOutcome.malformedResponse();
+        }
+    }
+
+    private static CommandDispatchOutcome classifyHttpFailure(
+            ProductionEngineCommandStore.StoredCommand command,
+            RestClientResponseException response) {
+        int status = response.getStatusCode().value();
+        CommandDispatchOutcome.Acceptance acceptance = switch (status) {
+            case 408 -> CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED;
+            case 425, 429 -> CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED;
+            default -> status >= 500
+                    ? CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED
+                    : CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED;
+        };
+        return CommandDispatchOutcome.http(status, acceptance, retryAfter(response), null);
+    }
+
+    private static Duration retryAfter(RestClientResponseException response) {
+        String value = response.getResponseHeaders() == null ? null
+                : response.getResponseHeaders().getFirst("Retry-After");
+        if (value == null || value.isBlank()) return null;
+        try {
+            long seconds = Long.parseLong(value.trim());
+            return seconds < 0 ? null : Duration.ofSeconds(seconds);
+        } catch (NumberFormatException ignored) {
+            try {
+                Duration result = Duration.between(java.time.Instant.now(),
+                        ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant());
+                return result.isNegative() ? Duration.ZERO : result;
+            } catch (java.time.DateTimeException invalid) {
+                return null;
+            }
+        }
+    }
+
+    static CommandDispatchOutcome.TransportFailure classifyTransport(
+            RestClientException failure) {
+        Throwable cause = failure;
+        while (cause != null) {
+            if (cause instanceof java.net.ConnectException
+                    || cause instanceof java.net.UnknownHostException) {
+                return CommandDispatchOutcome.TransportFailure.PRE_CONNECT_FAILURE;
+            }
+            if (cause instanceof java.net.SocketTimeoutException
+                    || cause instanceof java.net.http.HttpTimeoutException) {
+                return CommandDispatchOutcome.TransportFailure.TIMEOUT;
+            }
+            if (cause instanceof java.net.SocketException) {
+                return CommandDispatchOutcome.TransportFailure.MID_WRITE_FAILURE;
+            }
+            cause = cause.getCause();
+        }
+        return CommandDispatchOutcome.TransportFailure.UNKNOWN;
+    }
+
+    private static RestClientResponseException responseCause(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof RestClientResponseException response) return response;
+        }
+        return null;
+    }
+
+    private static RestClientException transportCause(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof RestClientException transport) return transport;
+        }
+        return null;
+    }
+
+    private static CommandDispatchOutcome.ConfirmationEvidence confirmation(
+            ProductionEngineCommandStore.StoredCommand command, RemoteResult result,
+            String evidenceReference) {
+        EngineCommandPolicy.CommandContext context = command.state().command();
+        return new CommandDispatchOutcome.ConfirmationEvidence(context.tenantId(),
+                context.operationId(), context.commandId(), context.commandType(),
+                context.expectedTargetIdentity(), result.remoteIdentity(), result.remoteState(),
+                CommandDispatchOutcome.ConfirmationSource.HTTP_RESPONSE, evidenceReference);
+    }
+
+    private static String text(Map<String, Object> payload, String field) {
+        Object value = payload.get(field);
+        if (value == null || value.toString().isBlank()) {
+            throw new IllegalArgumentException("Missing command field " + field);
+        }
+        return value.toString();
+    }
+
+    private static String nullable(Map<String, Object> payload, String field) {
+        Object value = payload.get(field);
+        return value == null || value.toString().isBlank() ? null : value.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> map(Object value) {
+        return value instanceof Map<?, ?> result ? (Map<String, Object>) result : Map.of();
+    }
+
+    private static List<String> strings(Object value) {
+        return value instanceof List<?> result
+                ? result.stream().map(String::valueOf).toList() : List.of();
+    }
+
+    private record RemoteResult(
+            String remoteIdentity, CommandDispatchOutcome.RemoteState remoteState,
+            int httpStatus) {
+        private RemoteResult {
+            if (remoteIdentity == null || remoteIdentity.isBlank()) {
+                throw new IllegalArgumentException("Remote response identity is missing");
+            }
+            if (httpStatus < 200 || httpStatus >= 300) {
+                throw new IllegalArgumentException("Remote success status is not 2xx");
+            }
+        }
     }
 
     @Override

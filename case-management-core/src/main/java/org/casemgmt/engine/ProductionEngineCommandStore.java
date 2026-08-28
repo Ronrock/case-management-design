@@ -108,48 +108,28 @@ public class ProductionEngineCommandStore {
 
     @Deprecated(forRemoval = false)
     public void markDone(String id) {
-        jdbc.sql("""
-                UPDATE CM_ENGINE_COMMAND SET STATUS_ = 'AWAITING_CONFIRMATION',
-                    SAFE_ERROR_CODE_='response.unconfirmed',
-                    SAFE_SUMMARY_='Accepted response lacked matching confirmation evidence',
-                    LEASE_TOKEN_=NULL, LEASE_OWNER_=NULL, LEASE_EXPIRES_AT_=NULL,
-                    UPDATED_AT_=SYSTIMESTAMP, DECIDED_AT_=SYSTIMESTAMP,
-                    MIGRATION_BASELINE_ACTIVE_=CASE
-                      WHEN ORIGINAL_STATUS_ IS NULL THEN NULL ELSE 0 END,
-                    ROW_VERSION_=ROW_VERSION_+1
-                WHERE ID_ = :id AND STATUS_='DISPATCHING'""")
-            .param("id", id).update();
+        commitLegacyOutcome(id, CommandDispatchOutcome.http(202,
+                CommandDispatchOutcome.Acceptance.ACCEPTED, null, null));
     }
 
     @Deprecated(forRemoval = false)
     public void markRetry(String id, String error, OffsetDateTime nextAttempt) {
-        jdbc.sql("""
-                UPDATE CM_ENGINE_COMMAND SET STATUS_ = 'RETRYABLE',
-                    NEXT_ATTEMPT_AT_ = :next,
-                    SAFE_ERROR_CODE_='transport.not_sent',
-                    SAFE_SUMMARY_='Remote request sent zero bytes',
-                    LEASE_TOKEN_=NULL, LEASE_OWNER_=NULL, LEASE_EXPIRES_AT_=NULL,
-                    UPDATED_AT_=SYSTIMESTAMP, DECIDED_AT_=SYSTIMESTAMP,
-                    MIGRATION_BASELINE_ACTIVE_=CASE
-                      WHEN ORIGINAL_STATUS_ IS NULL THEN NULL ELSE 0 END,
-                    ROW_VERSION_=ROW_VERSION_+1
-                WHERE ID_ = :id AND STATUS_='DISPATCHING'""")
-            .param("next", nextAttempt).param("id", id).update();
+        commitLegacyOutcome(id, CommandDispatchOutcome.transportFailure(
+                CommandDispatchOutcome.TransportFailure.PRE_CONNECT_FAILURE));
     }
 
     @Deprecated(forRemoval = false)
     public void markDead(String id, String error) {
-        jdbc.sql("""
-                UPDATE CM_ENGINE_COMMAND SET STATUS_ = 'FAILED',
-                    SAFE_ERROR_CODE_='attempts.exhausted',
-                    SAFE_SUMMARY_='Remote command exhausted automatic dispatch attempts',
-                    LEASE_TOKEN_=NULL, LEASE_OWNER_=NULL, LEASE_EXPIRES_AT_=NULL,
-                    FAILED_AT_=SYSTIMESTAMP, UPDATED_AT_=SYSTIMESTAMP, DECIDED_AT_=SYSTIMESTAMP,
-                    MIGRATION_BASELINE_ACTIVE_=CASE
-                      WHEN ORIGINAL_STATUS_ IS NULL THEN NULL ELSE 0 END,
-                    ROW_VERSION_=ROW_VERSION_+1
-                WHERE ID_ = :id AND STATUS_='DISPATCHING'""")
-            .param("id", id).update();
+        commitLegacyOutcome(id, CommandDispatchOutcome.http(400,
+                CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED, null, null));
+    }
+
+    private void commitLegacyOutcome(String commandId, CommandDispatchOutcome outcome) {
+        StoredCommand current = requireByCommandId(commandId);
+        String leaseToken = currentLeaseToken(commandId);
+        if (leaseToken == null) return;
+        commitLeaseOutcome(current.state().command().tenantId(), current.operationId(),
+                leaseToken, current.version(), outcome);
     }
 
     public List<EngineCommand> findDead(int limit) {
@@ -224,6 +204,7 @@ public class ProductionEngineCommandStore {
                         + "WHERE ID_=:id AND CLAIM_TOKEN_=:creationToken")
                         .param("id", request.commandId())
                         .param("creationToken", creationToken).update();
+                insertNativeBaseline(request);
             }
             Optional<StoredCommand> byIdempotency = findByIdempotency(
                     request.tenantId(), request.idempotencyKey());
@@ -286,14 +267,14 @@ public class ProductionEngineCommandStore {
             EngineCommandPolicy policy = policyAt(decisionTime);
             for (String commandId : candidates) {
                 StoredCommand prior = requireByCommandId(commandId);
-                EngineCommandPolicy.Decision next = policy.transition(
-                        prior.state(), CommandDispatchOutcome.dispatchRequested());
+                CommandDispatchOutcome outcome = CommandDispatchOutcome.dispatchRequested();
+                EngineCommandPolicy.Decision next = policy.transition(prior.state(), outcome);
                 String token = UUID.randomUUID().toString();
                 OffsetDateTime expiresAt = EngineCommandPolicy.canonicalPersistedTimestamp(
                         decisionTime.plus(leaseDuration), "lease expiry");
                 int updated = persistDecision(prior, next, prior.version(),
                         prior.state().committedDecision().actionLedgerSummary(),
-                        new LeaseState(token, safeOwner, expiresAt), true);
+                        new LeaseState(token, safeOwner, expiresAt), true, outcome);
                 if (updated == 1) {
                     StoredCommand persisted = requireByCommandId(commandId);
                     claimed.add(new LeasedCommand(persisted, token, safeOwner, expiresAt));
@@ -319,10 +300,11 @@ public class ProductionEngineCommandStore {
             EngineCommandPolicy policy = policyAt(decisionTime);
             for (String commandId : expired) {
                 StoredCommand prior = requireByCommandId(commandId);
-                EngineCommandPolicy.Decision next = policy.transition(
-                        prior.state(), CommandDispatchOutcome.leaseExpired());
+                CommandDispatchOutcome outcome = CommandDispatchOutcome.leaseExpired();
+                EngineCommandPolicy.Decision next = policy.transition(prior.state(), outcome);
                 recovered += persistDecision(prior, next, prior.version(),
-                        prior.state().committedDecision().actionLedgerSummary(), null, false);
+                        prior.state().committedDecision().actionLedgerSummary(), null, false,
+                        outcome);
             }
             return recovered;
         });
@@ -355,7 +337,8 @@ public class ProductionEngineCommandStore {
                 return current;
             }
             int updated = persistDecision(current, decision, expectedVersion,
-                    current.state().committedDecision().actionLedgerSummary(), null, false);
+                    current.state().committedDecision().actionLedgerSummary(), null, false,
+                    outcome);
             if (updated != 1) {
                 throw new OptimisticCommandException(
                         "Lease token, row version, or command state changed before commit");
@@ -386,7 +369,8 @@ public class ProductionEngineCommandStore {
                 return current;
             }
             int updated = persistDecision(current, decision, expectedVersion,
-                    current.state().committedDecision().actionLedgerSummary(), null, false);
+                    current.state().committedDecision().actionLedgerSummary(), null, false,
+                    outcome);
             if (updated != 1) {
                 throw new OptimisticCommandException("Command state changed before outcome");
             }
@@ -476,7 +460,7 @@ public class ProductionEngineCommandStore {
                         "Command version or action summary changed during append");
             }
             int updated = persistDecision(current, transition.decision(), expectedVersion,
-                    append.expectedSummary(), null, false);
+                    append.expectedSummary(), null, false, outcome);
             if (updated != 1) {
                 throw new OptimisticCommandException(
                         "Command version or action summary changed during append");
@@ -600,7 +584,7 @@ public class ProductionEngineCommandStore {
     private int persistDecision(
             StoredCommand prior, EngineCommandPolicy.Decision decision, long expectedVersion,
             EngineCommandPolicy.ActionLedgerSummary expectedSummary, LeaseState lease,
-            boolean startingDispatch) {
+            boolean startingDispatch, CommandDispatchOutcome outcome) {
         new EngineCommandPolicy.CommandState(prior.state().command(), decision);
         beforeDecisionCas.run();
         EngineCommandPolicy.ActionLedgerSummary summary = decision.actionLedgerSummary();
@@ -609,7 +593,7 @@ public class ProductionEngineCommandStore {
         CommandDispatchOutcome.ReviewEvidence review = decision.decisionEvidence();
         Long currentAction = decision.appliedAction() == null
                 ? null : decision.appliedAction().sequence();
-        return jdbc.sql("""
+        int updated = jdbc.sql("""
                 UPDATE CM_ENGINE_COMMAND SET
                   STATUS_=:status, NEXT_ATTEMPT_AT_=:nextAttempt, DECIDED_AT_=:decidedAt,
                   UPDATED_AT_=:decidedAt, SAFE_ERROR_CODE_=:errorCode,
@@ -703,6 +687,78 @@ public class ProductionEngineCommandStore {
                         prior.migrationCas().rawPayload()))
                 .param("expectedPayload", clobParameter(
                         prior.migrationCas().payload())).update();
+        if (updated == 1) {
+            appendTransition(prior, decision, expectedVersion + 1, outcome);
+        }
+        return updated;
+    }
+
+    private void insertNativeBaseline(ProductionCommandRequest request) {
+        EngineCommandPolicy.CommandContext context = new EngineCommandPolicy.CommandContext(
+                request.tenantId(), request.operationId(), request.commandId(),
+                request.commandType(), request.expectedTargetIdentity());
+        EngineCommandPolicy.Decision baseline = new EngineCommandPolicy.Decision(
+                EngineCommandStatus.PENDING, request.submittedAt(), null, null, null,
+                0, 0, 0, false, null, null, null,
+                EngineCommandPolicy.ActionLedgerSummary.empty());
+        String encoded = EngineCommandTransitionHistory.encodeBaseline(baseline);
+        String digest = EngineCommandTransitionHistory.digestDecision(baseline);
+        int inserted = jdbc.sql("""
+                INSERT INTO CM_ENGINE_COMMAND_TRANSITION
+                  (COMMAND_ID_,VERSION_,TENANT_ID_,OPERATION_ID_,COMMAND_TYPE_,EXPECTED_TARGET_,
+                   FROM_STATUS_,TO_STATUS_,OUTCOME_FORMAT_,OUTCOME_KIND_,OUTCOME_JSON_,
+                   ACTION_SEQUENCE_,DECIDED_AT_,PREVIOUS_DECISION_DIGEST_,NEXT_DECISION_DIGEST_)
+                VALUES (:commandId,0,:tenantId,:operationId,:commandType,:target,
+                        'PENDING','PENDING',:format,'BASELINE_NATIVE',:outcome,
+                        NULL,:decidedAt,NULL,:digest)
+                """).param("commandId", context.commandId())
+                .param("tenantId", context.tenantId())
+                .param("operationId", context.operationId())
+                .param("commandType", context.commandType().name())
+                .param("target", context.expectedTargetIdentity())
+                .param("format", EngineCommandTransitionHistory.FORMAT_VERSION)
+                .param("outcome", clobParameter(encoded))
+                .param("decidedAt", baseline.decidedAt()).param("digest", digest).update();
+        if (inserted != 1) {
+            throw new OptimisticCommandException("Native command baseline was not persisted");
+        }
+    }
+
+    private void appendTransition(
+            StoredCommand prior, EngineCommandPolicy.Decision decision, long version,
+            CommandDispatchOutcome outcome) {
+        EngineCommandTransitionHistory.RecordedTransition recorded =
+                EngineCommandTransitionHistory.record(prior.state().command(), version,
+                        prior.state().committedDecision(), outcome, decision.decidedAt());
+        if (!recorded.nextDecision().equals(decision)) {
+            throw new IllegalArgumentException(
+                    "Persisted decision differs from its policy transition history");
+        }
+        EngineCommandTransitionHistory.TransitionRow row = recorded.row();
+        int inserted = jdbc.sql("""
+                INSERT INTO CM_ENGINE_COMMAND_TRANSITION
+                  (COMMAND_ID_,VERSION_,TENANT_ID_,OPERATION_ID_,COMMAND_TYPE_,EXPECTED_TARGET_,
+                   FROM_STATUS_,TO_STATUS_,OUTCOME_FORMAT_,OUTCOME_KIND_,OUTCOME_JSON_,
+                   ACTION_SEQUENCE_,DECIDED_AT_,PREVIOUS_DECISION_DIGEST_,NEXT_DECISION_DIGEST_)
+                VALUES (:commandId,:version,:tenantId,:operationId,:commandType,:target,
+                        :fromStatus,:toStatus,:format,:kind,:outcome,:actionSequence,
+                        :decidedAt,:previousDigest,:nextDigest)
+                """).param("commandId", row.commandId()).param("version", row.version())
+                .param("tenantId", row.tenantId()).param("operationId", row.operationId())
+                .param("commandType", row.commandType().name())
+                .param("target", row.expectedTargetIdentity())
+                .param("fromStatus", row.fromStatus().name())
+                .param("toStatus", row.toStatus().name())
+                .param("format", EngineCommandTransitionHistory.FORMAT_VERSION)
+                .param("kind", outcome.kind().name())
+                .param("outcome", clobParameter(row.outcomeJson()))
+                .param("actionSequence", row.actionSequence())
+                .param("decidedAt", row.decidedAt())
+                .param("previousDigest", row.previousDecisionDigest())
+                .param("nextDigest", row.nextDecisionDigest()).update();
+        if (inserted != 1) {
+            throw new OptimisticCommandException("Command transition history was not appended");
+        }
     }
 
     private StoredCommand requireByCommandId(String commandId) {
@@ -807,6 +863,8 @@ public class ProductionEngineCommandStore {
         if (version < 0) {
             throw new IllegalArgumentException("Persisted command version must not be negative");
         }
+        validateTransitionHistory(context, decision, version,
+                rs.getString("ORIGINAL_STATUS_"));
         OffsetDateTime createdAt = Objects.requireNonNull(
                 rs.getObject("CREATED_AT_", OffsetDateTime.class), "persisted createdAt");
         OffsetDateTime updatedAt = Objects.requireNonNull(
@@ -1048,29 +1106,102 @@ public class ProductionEngineCommandStore {
                 throw new IllegalArgumentException(
                         "Untouched legacy command no longer matches its migration decision");
             }
-        } else {
-            CommandDispatchOutcome.ReviewEvidence review = decision.decisionEvidence();
-            boolean coherentEvolution = !done && isPolicyReachableLegacyEvolution(
-                    new LegacyEvolutionFacts(mapped, decision.status(), expectedAttempts,
-                            decision.totalDispatchAttempts(),
-                            decision.actionLedgerSummary().actionCount(),
-                            actions.stream().filter(action -> action.action().actionType()
-                                    == CommandDispatchOutcome.ActionType.RETRY_OVERRIDE).count(),
-                            actions.stream().filter(action -> action.action().actionType()
-                                    == CommandDispatchOutcome.ActionType.CANCEL).count(),
-                            decision.appliedOperatorAction() == null ? null
-                                    : decision.appliedOperatorAction().actionType(),
-                            review == null ? null : review.finding(),
-                            review == null ? null : review.source(),
-                            decision.terminalConfirmation() != null,
-                            rs.getLong("ROW_VERSION_"), baselineDecidedAt,
-                            decision.decidedAt()));
-            if (!coherentEvolution) {
-                throw new IllegalArgumentException(
-                        "Evolved legacy command lacks a policy-reachable repository transition");
-            }
+        } else if (rs.getLong("ROW_VERSION_") == 0) {
+            throw new IllegalArgumentException(
+                    "Evolved legacy command has no committed policy transition");
         }
     }
+
+    private void validateTransitionHistory(
+            EngineCommandPolicy.CommandContext context,
+            EngineCommandPolicy.Decision current, long currentVersion,
+            String originalStatus) {
+        BaselineRow baselineRow = jdbc.sql("""
+                SELECT TENANT_ID_,OPERATION_ID_,COMMAND_TYPE_,EXPECTED_TARGET_,FROM_STATUS_,
+                       TO_STATUS_,OUTCOME_FORMAT_,OUTCOME_KIND_,OUTCOME_JSON_,ACTION_SEQUENCE_,
+                       DECIDED_AT_,PREVIOUS_DECISION_DIGEST_,NEXT_DECISION_DIGEST_
+                FROM CM_ENGINE_COMMAND_TRANSITION
+                WHERE COMMAND_ID_=:commandId AND VERSION_=0
+                """).param("commandId", context.commandId()).query((rs, n) ->
+                new BaselineRow(rs.getString("TENANT_ID_"), rs.getString("OPERATION_ID_"),
+                        rs.getString("COMMAND_TYPE_"), rs.getString("EXPECTED_TARGET_"),
+                        rs.getString("FROM_STATUS_"), rs.getString("TO_STATUS_"),
+                        rs.getInt("OUTCOME_FORMAT_"), rs.getString("OUTCOME_KIND_"),
+                        readClob(rs, "OUTCOME_JSON_"),
+                        rs.getObject("ACTION_SEQUENCE_", Long.class),
+                        rs.getObject("DECIDED_AT_", OffsetDateTime.class),
+                        rs.getString("PREVIOUS_DECISION_DIGEST_"),
+                        rs.getString("NEXT_DECISION_DIGEST_"))).optional()
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Command transition baseline is missing"));
+        EngineCommandPolicy.Decision baseline = EngineCommandTransitionHistory.decodeBaseline(
+                context, baselineRow.outcomeJson());
+        String expectedKind = originalStatus == null ? "BASELINE_NATIVE" : "BASELINE_LEGACY";
+        boolean exactBaseline = context.tenantId().equals(baselineRow.tenantId())
+                && context.operationId().equals(baselineRow.operationId())
+                && context.commandType().name().equals(baselineRow.commandType())
+                && context.expectedTargetIdentity().equals(baselineRow.expectedTarget())
+                && baseline.status().name().equals(baselineRow.fromStatus())
+                && baseline.status().name().equals(baselineRow.toStatus())
+                && baselineRow.outcomeFormat() == EngineCommandTransitionHistory.FORMAT_VERSION
+                && expectedKind.equals(baselineRow.outcomeKind())
+                && baselineRow.actionSequence() == null
+                && baseline.decidedAt().equals(baselineRow.decidedAt())
+                && baselineRow.previousDigest() == null
+                && EngineCommandTransitionHistory.digestDecision(baseline)
+                        .equals(baselineRow.nextDigest());
+        if (!exactBaseline) {
+            throw new IllegalArgumentException("Command transition baseline is incompatible");
+        }
+        List<EngineCommandTransitionHistory.TransitionRow> transitions = jdbc.sql("""
+                SELECT VERSION_,TENANT_ID_,OPERATION_ID_,COMMAND_TYPE_,EXPECTED_TARGET_,
+                       FROM_STATUS_,TO_STATUS_,OUTCOME_FORMAT_,OUTCOME_KIND_,OUTCOME_JSON_,
+                       ACTION_SEQUENCE_,DECIDED_AT_,PREVIOUS_DECISION_DIGEST_,
+                       NEXT_DECISION_DIGEST_
+                FROM CM_ENGINE_COMMAND_TRANSITION
+                WHERE COMMAND_ID_=:commandId AND VERSION_>0 ORDER BY VERSION_
+                """).param("commandId", context.commandId()).query((rs, n) -> {
+                    if (rs.getInt("OUTCOME_FORMAT_")
+                            != EngineCommandTransitionHistory.FORMAT_VERSION) {
+                        throw new IllegalArgumentException(
+                                "Unsupported command transition history format");
+                    }
+                    String outcomeJson = readClob(rs, "OUTCOME_JSON_");
+                    CommandDispatchOutcome outcome =
+                            EngineCommandTransitionHistory.decodeOutcome(outcomeJson);
+                    if (!outcome.kind().name().equals(rs.getString("OUTCOME_KIND_"))) {
+                        throw new IllegalArgumentException(
+                                "Command transition outcome kind differs from its evidence");
+                    }
+                    return new EngineCommandTransitionHistory.TransitionRow(
+                            context.commandId(), rs.getString("TENANT_ID_"),
+                            rs.getString("OPERATION_ID_"),
+                            EngineCommand.Type.valueOf(rs.getString("COMMAND_TYPE_")),
+                            rs.getString("EXPECTED_TARGET_"), rs.getLong("VERSION_"),
+                            EngineCommandStatus.valueOf(rs.getString("FROM_STATUS_")),
+                            EngineCommandStatus.valueOf(rs.getString("TO_STATUS_")),
+                            outcomeJson, rs.getObject("ACTION_SEQUENCE_", Long.class),
+                            rs.getObject("DECIDED_AT_", OffsetDateTime.class),
+                            rs.getString("PREVIOUS_DECISION_DIGEST_"),
+                            rs.getString("NEXT_DECISION_DIGEST_"));
+                }).list();
+        if (transitions.size() != currentVersion) {
+            throw new IllegalArgumentException(
+                    "Command row version does not match transition history length");
+        }
+        EngineCommandPolicy.Decision replayed = EngineCommandTransitionHistory.replay(
+                context, baseline, transitions);
+        if (!replayed.equals(current)) {
+            throw new IllegalArgumentException(
+                    "Command row does not match replayed policy transition history");
+        }
+    }
+
+    private record BaselineRow(
+            String tenantId, String operationId, String commandType, String expectedTarget,
+            String fromStatus, String toStatus, int outcomeFormat, String outcomeKind,
+            String outcomeJson, Long actionSequence, OffsetDateTime decidedAt,
+            String previousDigest, String nextDigest) { }
 
     static boolean matchesRetainedLegacyPayload(
             String rawLegacyPayloadJson, String currentPayloadJson) {
@@ -1089,115 +1220,6 @@ public class ProductionEngineCommandStore {
         boolean leaseTime = status != EngineCommandStatus.DISPATCHING
                 || leaseExpiresAt != null && leaseExpiresAt.isAfter(decidedAt);
         return retryTime && leaseTime;
-    }
-
-    record LegacyEvolutionFacts(
-            EngineCommandStatus baselineStatus,
-            EngineCommandStatus currentStatus,
-            long baselineAttempts,
-            long currentAttempts,
-            long actionCount,
-            long retryActionCount,
-            long cancelActionCount,
-            CommandDispatchOutcome.ActionType appliedActionType,
-            CommandDispatchOutcome.ReviewFinding reviewFinding,
-            CommandDispatchOutcome.ReviewSource reviewSource,
-            boolean hasConfirmation,
-            long rowVersion,
-            OffsetDateTime baselineDecidedAt,
-            OffsetDateTime currentDecidedAt) {
-        LegacyEvolutionFacts {
-            Objects.requireNonNull(baselineStatus, "baselineStatus");
-            Objects.requireNonNull(currentStatus, "currentStatus");
-            Objects.requireNonNull(baselineDecidedAt, "baselineDecidedAt");
-            Objects.requireNonNull(currentDecidedAt, "currentDecidedAt");
-            if (baselineAttempts < 0 || currentAttempts < 0 || actionCount < 0
-                    || retryActionCount < 0 || cancelActionCount < 0
-                    || retryActionCount > actionCount || cancelActionCount > actionCount) {
-                throw new IllegalArgumentException("Legacy evolution counters must be coherent");
-            }
-            if ((reviewFinding == null) != (reviewSource == null)) {
-                throw new IllegalArgumentException("Legacy evolution review provenance is partial");
-            }
-        }
-    }
-
-    static boolean isPolicyReachableLegacyEvolution(LegacyEvolutionFacts facts) {
-        EngineCommandStatus baseline = facts.baselineStatus();
-        EngineCommandStatus current = facts.currentStatus();
-        if (baseline == EngineCommandStatus.CONFIRMED || baseline == EngineCommandStatus.FAILED
-                || current == EngineCommandStatus.PENDING
-                || facts.currentAttempts() < facts.baselineAttempts()
-                || facts.rowVersion() <= 0
-                || !facts.currentDecidedAt().isAfter(facts.baselineDecidedAt())
-                || facts.hasConfirmation() != (current == EngineCommandStatus.CONFIRMED)
-                || (facts.cancelActionCount() > 0) != (current == EngineCommandStatus.CANCELLED)) {
-            return false;
-        }
-        if (facts.appliedActionType() != null && switch (facts.appliedActionType()) {
-            case MANUAL_REVIEW -> current != EngineCommandStatus.MANUAL_REVIEW;
-            case RECONCILE -> current != EngineCommandStatus.AWAITING_CONFIRMATION;
-            case RETRY_OVERRIDE -> current != EngineCommandStatus.RETRYABLE;
-            case CANCEL -> current != EngineCommandStatus.CANCELLED;
-        }) {
-            return false;
-        }
-        long attemptDelta = facts.currentAttempts() - facts.baselineAttempts();
-        long minimumVersion;
-        try {
-            minimumVersion = Math.addExact(facts.actionCount(), Math.multiplyExact(2L, attemptDelta));
-            if (current == EngineCommandStatus.DISPATCHING && attemptDelta > 0) minimumVersion--;
-            if (baseline == EngineCommandStatus.AWAITING_CONFIRMATION && attemptDelta > 0
-                    && facts.retryActionCount() == 0) minimumVersion++;
-            if (attemptDelta == 0 && facts.actionCount() > 0
-                    && facts.appliedActionType() == null) minimumVersion++;
-        } catch (ArithmeticException ex) {
-            return false;
-        }
-        if (facts.rowVersion() < Math.max(1L, minimumVersion)) return false;
-
-        boolean definitiveReconciliation = facts.reviewFinding()
-                == CommandDispatchOutcome.ReviewFinding.DEFINITIVE_ABSENCE
-                && facts.reviewSource() == CommandDispatchOutcome.ReviewSource.RECONCILIATION;
-        boolean definitiveOperatorReview = facts.reviewFinding()
-                == CommandDispatchOutcome.ReviewFinding.DEFINITIVE_ABSENCE
-                && facts.reviewSource() == CommandDispatchOutcome.ReviewSource.OPERATOR_REVIEW;
-        boolean inconclusiveReconciliation = facts.reviewFinding()
-                == CommandDispatchOutcome.ReviewFinding.INCONCLUSIVE
-                && facts.reviewSource() == CommandDispatchOutcome.ReviewSource.RECONCILIATION;
-        return switch (current) {
-            case PENDING -> false;
-            case DISPATCHING -> attemptDelta > 0;
-            case RETRYABLE -> attemptDelta > 0
-                    || facts.appliedActionType()
-                        == CommandDispatchOutcome.ActionType.RETRY_OVERRIDE
-                        && (baseline == EngineCommandStatus.RETRYABLE
-                            || baseline == EngineCommandStatus.AWAITING_CONFIRMATION)
-                    || baseline == EngineCommandStatus.AWAITING_CONFIRMATION
-                        && definitiveReconciliation;
-            case AWAITING_CONFIRMATION -> attemptDelta > 0
-                    || baseline == EngineCommandStatus.AWAITING_CONFIRMATION
-                        && facts.appliedActionType()
-                        == CommandDispatchOutcome.ActionType.RECONCILE;
-            case CONFIRMED -> facts.hasConfirmation();
-            case FAILED -> attemptDelta > 0
-                    || baseline == EngineCommandStatus.AWAITING_CONFIRMATION
-                        && facts.baselineAttempts()
-                        == EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS
-                        && definitiveReconciliation;
-            case CONFLICT -> attemptDelta > 0;
-            case MANUAL_REVIEW -> (inconclusiveReconciliation
-                    || facts.appliedActionType()
-                        == CommandDispatchOutcome.ActionType.MANUAL_REVIEW)
-                    && (baseline == EngineCommandStatus.AWAITING_CONFIRMATION
-                        || attemptDelta > 0);
-            case CANCELLED -> facts.appliedActionType()
-                    == CommandDispatchOutcome.ActionType.CANCEL
-                    && facts.cancelActionCount() == 1
-                    && (attemptDelta == 0
-                        && baseline != EngineCommandStatus.AWAITING_CONFIRMATION
-                        || definitiveOperatorReview);
-        };
     }
 
     private static int countPresent(Object... values) {

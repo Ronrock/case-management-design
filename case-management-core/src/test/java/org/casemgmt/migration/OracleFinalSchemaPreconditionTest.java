@@ -11,25 +11,31 @@ import static org.assertj.core.api.Assertions.assertThat;
 class OracleFinalSchemaPreconditionTest {
 
     @Test
-    void productionContractExhaustivelyNamesEveryCommandAndActionColumn() {
+    void productionContractExhaustivelyNamesEveryCommandActionAndTransitionColumn() {
         var contract = OracleFinalSchemaPrecondition.productionCommandContract();
 
         assertThat(contract.columns().stream()
                 .filter(column -> column.table().equals("CM_ENGINE_COMMAND"))).hasSize(61);
         assertThat(contract.columns().stream()
                 .filter(column -> column.table().equals("CM_ENGINE_COMMAND_ACTION"))).hasSize(15);
+        assertThat(contract.columns().stream()
+                .filter(column -> column.table().equals("CM_ENGINE_COMMAND_TRANSITION")))
+                .hasSize(16);
         assertThat(contract.constraints()).extracting(
                 OracleFinalSchemaPrecondition.ConstraintContract::name)
                 .containsExactlyInAnyOrder("CK_CM_ENGCMD_STATUS", "CK_CM_ENGCMD_COUNTERS",
                         "CK_CM_ENGCMD_LEASE", "CK_CM_ENGCMD_TEMPORAL",
-                        "CK_CM_ECA_INVARIANTS", "FK_CM_ECA_COMMAND");
+                        "CK_CM_ECA_INVARIANTS", "FK_CM_ECA_COMMAND",
+                        "UQ_CM_ECA_SEQUENCE_C",
+                        "PK_CM_ECT", "CK_CM_ECT_INVARIANTS", "FK_CM_ECT_COMMAND",
+                        "FK_CM_ECT_ACTION");
         assertThat(contract.indexes()).extracting(
                 OracleFinalSchemaPrecondition.IndexContract::name)
                 .containsExactlyInAnyOrder("IX_CM_ENGCMD_DUE", "IX_CM_ENGCMD_CLAIM",
                         "UQ_CM_ENGCMD_OPERATION", "UQ_CM_ENGCMD_IDEMPOTENCY",
                         "IX_CM_ENGCMD_PROD_DUE", "IX_CM_ENGCMD_LEASE",
                         "IX_CM_ENGCMD_CASE_STATUS", "IX_CM_ENGCMD_REVIEW",
-                        "UQ_CM_ECA_ACTION", "UQ_CM_ECA_SEQUENCE");
+                        "UQ_CM_ECA_ACTION", "UQ_CM_ECA_SEQUENCE", "PK_CM_ECT");
     }
 
     @Test
@@ -106,7 +112,7 @@ class OracleFinalSchemaPreconditionTest {
     @Test
     void byteConversionPlansCoverEveryContractVarcharWithoutDuplicateTargets() {
         assertThat(OracleByteSemanticsMigration.targets("production-command"))
-                .hasSize(39).doesNotHaveDuplicates();
+                .hasSize(49).doesNotHaveDuplicates();
         assertThat(OracleByteSemanticsMigration.targets("engine-observation"))
                 .hasSize(16).doesNotHaveDuplicates();
     }

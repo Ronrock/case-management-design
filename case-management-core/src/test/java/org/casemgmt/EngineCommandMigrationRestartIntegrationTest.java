@@ -71,6 +71,13 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
             "cm-engine-command-lease-index",
             "cm-engine-command-case-status-index",
             "cm-engine-command-review-index",
+            "cm-engine-command-transition-table-guard",
+            "cm-engine-command-transition-table",
+            "cm-engine-command-transition-baseline",
+            "cm-engine-command-transition-objects-guard",
+            "cm-engine-command-action-sequence-constraint",
+            "cm-engine-command-transition-command-fk",
+            "cm-engine-command-transition-action-fk",
             "cm-production-engine-command-byte-semantics",
             "cm-production-engine-command-final-state-guard");
     private static String jdbcUrl;

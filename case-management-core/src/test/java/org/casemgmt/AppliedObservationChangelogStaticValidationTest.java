@@ -202,6 +202,16 @@ class AppliedObservationChangelogStaticValidationTest {
                         "cm-production-engine-command-temporal-guard",
                         "cm-production-engine-command-temporal-invariants",
                         "cm-production-engine-command-objects-guard");
+        assertThat(production).extracting(change -> change.getId()).containsSubsequence(
+                "cm-engine-command-transition-table-guard",
+                "cm-engine-command-transition-table",
+                "cm-engine-command-transition-baseline",
+                "cm-engine-command-transition-objects-guard",
+                "cm-engine-command-action-sequence-constraint",
+                "cm-engine-command-transition-command-fk",
+                "cm-engine-command-transition-action-fk",
+                "cm-production-engine-command-byte-semantics",
+                "cm-production-engine-command-final-state-guard");
         assertThat(production).extracting(change -> change.getId())
                 .endsWith("cm-production-engine-command-final-state-guard");
         assertThat(production.stream().filter(change -> change.getId().endsWith("guard")))
@@ -223,6 +233,7 @@ class AppliedObservationChangelogStaticValidationTest {
                 .contains("CLAIM_TOKEN_ = NULL")
                 .contains("CLAIMED_AT_ = NULL")
                 .contains("CM_ENGINE_COMMAND_ACTION")
+                .contains("CM_ENGINE_COMMAND_TRANSITION")
                 .contains("UQ_CM_ENGCMD_IDEMPOTENCY")
                 .doesNotContain("DBMS_CRYPTO");
     }
