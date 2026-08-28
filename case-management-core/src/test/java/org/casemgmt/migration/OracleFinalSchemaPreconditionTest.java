@@ -1,6 +1,10 @@
 package org.casemgmt.migration;
 
 import org.junit.jupiter.api.Test;
+import org.w3c.dom.Element;
+
+import javax.xml.parsers.DocumentBuilderFactory;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -75,5 +79,35 @@ class OracleFinalSchemaPreconditionTest {
                 "VARCHAR2", 20, "B", null, null, true, "PENDING").matches(expected)).isFalse();
         assertThat(new OracleFinalSchemaPrecondition.ActualColumn(
                 "VARCHAR2", 20, "B", null, null, false, null).matches(expected)).isFalse();
+    }
+
+    @Test
+    void migrationColumnDeclarationsMakeByteSemanticsIndependentOfTheOracleSession()
+            throws Exception {
+        for (String changelog : List.of(
+                "db/changelog/cm-production-engine-command.xml",
+                "db/changelog/cm-engine-observation-effects.xml")) {
+            try (var input = getClass().getClassLoader().getResourceAsStream(changelog)) {
+                var document = DocumentBuilderFactory.newInstance().newDocumentBuilder()
+                        .parse(input);
+                var columns = document.getElementsByTagName("column");
+                for (int index = 0; index < columns.getLength(); index++) {
+                    Element column = (Element) columns.item(index);
+                    String type = column.getAttribute("type");
+                    if (type.startsWith("VARCHAR2(")) {
+                        assertThat(type).as(changelog + ":" + column.getAttribute("name"))
+                                .endsWith(" BYTE)");
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void byteConversionPlansCoverEveryContractVarcharWithoutDuplicateTargets() {
+        assertThat(OracleByteSemanticsMigration.targets("production-command"))
+                .hasSize(39).doesNotHaveDuplicates();
+        assertThat(OracleByteSemanticsMigration.targets("engine-observation"))
+                .hasSize(16).doesNotHaveDuplicates();
     }
 }

@@ -18,6 +18,7 @@ import java.sql.Connection;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -252,6 +253,73 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
     }
 
     @Test
+    void clobCasRejectsConcurrentMutationWhenExpectedRawPayloadIsNull() {
+        var store = storeWithDecisionInterlock("""
+                UPDATE CM_ENGINE_COMMAND
+                SET RAW_LEGACY_PAYLOAD_='{"forged":true}',
+                    PAYLOAD_JSON_='{"engineTaskId":"task-b"}'
+                WHERE ID_='command-a'
+                """);
+        store.submit(request("command-a", "operation-a", "key-a"));
+        var pending = store.require("tenant-a", "operation-a");
+
+        assertThatThrownBy(() -> store.applyOutcome(
+                "tenant-a", "operation-a", pending.version(),
+                CommandDispatchOutcome.observation(confirmation(
+                        "command-a", "operation-a", "evidence-null-raw"))))
+                .isInstanceOf(ProductionEngineCommandStore.OptimisticCommandException.class);
+    }
+
+    @Test
+    void clobCasRejectsConcurrentMutationWhenExpectedRawPayloadIsNonNull() {
+        var store = storeWithDecisionInterlock("""
+                UPDATE CM_ENGINE_COMMAND
+                SET RAW_LEGACY_PAYLOAD_='{"forged":true}',
+                    PAYLOAD_JSON_='{"engineTaskId":"task-b"}'
+                WHERE ID_='command-a'
+                """);
+        store.submit(request("command-a", "operation-a", "key-a"));
+        makePendingRowLookLikeAnExactLegacyBaseline("command-a");
+        var pending = store.require("__legacy_unscoped__", "command-a");
+
+        assertThatThrownBy(() -> store.applyOutcome(
+                "__legacy_unscoped__", "command-a", pending.version(),
+                CommandDispatchOutcome.observation(new CommandDispatchOutcome.ConfirmationEvidence(
+                        "__legacy_unscoped__", "command-a", "command-a",
+                        EngineCommand.Type.COMPLETE_TASK, "task-a", "task-a",
+                        CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                        CommandDispatchOutcome.ConfirmationSource.OBSERVATION,
+                        "evidence-non-null-raw"))))
+                .isInstanceOf(ProductionEngineCommandStore.OptimisticCommandException.class);
+    }
+
+    @Test
+    void clobCasAllowsConcurrentRewriteToTheExactExpectedRawAndCurrentValues() {
+        var store = storeWithDecisionInterlock("""
+                UPDATE CM_ENGINE_COMMAND
+                SET RAW_LEGACY_PAYLOAD_=RAW_LEGACY_PAYLOAD_,
+                    PAYLOAD_JSON_=PAYLOAD_JSON_
+                WHERE ID_='command-a'
+                """);
+        store.submit(request("command-a", "operation-a", "key-a"));
+        makePendingRowLookLikeAnExactLegacyBaseline("command-a");
+        var pending = store.require("__legacy_unscoped__", "command-a");
+        var evidence = new CommandDispatchOutcome.ConfirmationEvidence(
+                "__legacy_unscoped__", "command-a", "command-a",
+                EngineCommand.Type.COMPLETE_TASK, "task-a", "task-a",
+                CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                CommandDispatchOutcome.ConfirmationSource.OBSERVATION,
+                "evidence-exact-rewrite");
+
+        var confirmed = store.applyOutcome(
+                "__legacy_unscoped__", "command-a", pending.version(),
+                CommandDispatchOutcome.observation(evidence));
+
+        assertThat(confirmed.state().committedDecision().status())
+                .isEqualTo(EngineCommandStatus.CONFIRMED);
+    }
+
+    @Test
     void actionInsertAndSummaryCasAreAtomicAndCollisionReloadIsExactOrConflict() {
         repository.submit(request("command-a", "operation-a", "key-a"));
         repository.claimDue("worker-a", 1, NOW, Duration.ofMinutes(5));
@@ -459,6 +527,44 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
         } catch (EngineCommandRepository.IdempotencyConflictException conflict) {
             return "CONFLICT";
         }
+    }
+
+    private ProductionEngineCommandStore storeWithDecisionInterlock(String concurrentUpdate) {
+        return new ProductionEngineCommandStore(dataSource(), Clock.fixed(
+                NOW.plusSeconds(10).toInstant(), ZoneOffset.UTC), () -> {
+            try (var executor = Executors.newSingleThreadExecutor()) {
+                var update = executor.submit(() -> JdbcClient.create(dataSource())
+                        .sql(concurrentUpdate).update());
+                assertThat(update.get(5, TimeUnit.SECONDS)).isEqualTo(1);
+            } catch (Exception failure) {
+                throw new AssertionError("Concurrent CLOB mutation did not commit", failure);
+            }
+        });
+    }
+
+    private void makePendingRowLookLikeAnExactLegacyBaseline(String commandId) {
+        JdbcClient.create(dataSource()).sql("""
+                UPDATE CM_ENGINE_COMMAND SET
+                  TENANT_ID_='__legacy_unscoped__',
+                  OPERATION_ID_=ID_,
+                  IDEMPOTENCY_KEY_='legacy:' || ID_,
+                  ORIGINAL_STATUS_='PENDING',
+                  RAW_LEGACY_PAYLOAD_=PAYLOAD_JSON_,
+                  RAW_LEGACY_ATTEMPTS_=ATTEMPTS_,
+                  RAW_LEGACY_CREATED_AT_=CREATED_AT_,
+                  RAW_LEGACY_UPDATED_AT_=CREATED_AT_,
+                  MIGRATION_BASELINE_DECIDED_AT_=CREATED_AT_,
+                  MIGRATION_BASELINE_ACTIVE_=1
+                WHERE ID_=:commandId
+                """).param("commandId", commandId).update();
+    }
+
+    private CommandDispatchOutcome.ConfirmationEvidence confirmation(
+            String commandId, String operationId, String evidenceReference) {
+        return new CommandDispatchOutcome.ConfirmationEvidence(
+                "tenant-a", operationId, commandId, EngineCommand.Type.COMPLETE_TASK,
+                "task-a", "task-a", CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                CommandDispatchOutcome.ConfirmationSource.OBSERVATION, evidenceReference);
     }
 
     private EngineCommandRepository.StoredCommand commandInStatus(EngineCommandStatus status) {

@@ -71,6 +71,7 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
             "cm-engine-command-lease-index",
             "cm-engine-command-case-status-index",
             "cm-engine-command-review-index",
+            "cm-production-engine-command-byte-semantics",
             "cm-production-engine-command-final-state-guard");
     private static String jdbcUrl;
 
@@ -154,6 +155,30 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         assertThat(new EngineCommandRepository(scenario)
                 .require("__legacy_unscoped__", "large").payload())
                 .containsEntry("raw", "é".repeat(40_000));
+    }
+
+    @Test
+    void nullableLegacyPayloadRetainsNullEvidenceAndUsesCanonicalEmptyLivePayload()
+            throws Exception {
+        DataSource scenario = recreateBaseline();
+        JdbcClient jdbc = JdbcClient.create(scenario);
+        jdbc.sql("""
+                INSERT INTO CM_ENGINE_COMMAND
+                  (ID_,CASE_ID_,TYPE_,PAYLOAD_JSON_,STATUS_,ATTEMPTS_,CREATED_AT_)
+                VALUES ('null-payload','case-a','COMPLETE_TASK',NULL,'PENDING',0,SYSTIMESTAMP)
+                """).update();
+
+        migrate(scenario);
+
+        assertThat(jdbc.sql("""
+                SELECT COUNT(*) FROM CM_ENGINE_COMMAND
+                WHERE ID_='null-payload' AND RAW_LEGACY_PAYLOAD_ IS NULL
+                  AND DBMS_LOB.COMPARE(PAYLOAD_JSON_, TO_CLOB('{}'))=0
+                  AND PAYLOAD_DIGEST_=:digest
+                """).param("digest", JsonCodec.sha256("{}"))
+                .query(Integer.class).single()).isEqualTo(1);
+        assertThat(new EngineCommandRepository(scenario)
+                .require("__legacy_unscoped__", "null-payload").payload()).isEmpty();
     }
 
     @Test
@@ -317,6 +342,25 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                 .hasStackTraceContaining("incompatible");
     }
 
+    @Test
+    void charLengthSessionConvergesEveryCommandAndObservationContractColumnToByteSemantics()
+            throws Exception {
+        DataSource scenario = recreateBaseline(true);
+
+        migrate(scenario, true);
+
+        assertThat(JdbcClient.create(scenario).sql("""
+                SELECT COUNT(*) FROM USER_TAB_COLUMNS
+                WHERE DATA_TYPE='VARCHAR2' AND CHAR_USED<>'B' AND (
+                  TABLE_NAME IN ('CM_ENGINE_COMMAND','CM_ENGINE_COMMAND_ACTION',
+                                 'CM_APPLIED_ENGINE_OBSERVATION')
+                  OR (TABLE_NAME='CM_PLAN_ITEM' AND COLUMN_NAME='PROC_INST_ID_')
+                  OR (TABLE_NAME='CM_TASK' AND COLUMN_NAME='PROC_INST_ID_')
+                  OR (TABLE_NAME='CM_LINKED_PROCESS' AND COLUMN_NAME='PROC_DEF_ID_'))
+                """).query(Integer.class).single()).isZero();
+        migrate(scenario, true);
+    }
+
     private static void installMalformed(JdbcClient jdbc, MalformedObject malformed) {
         switch (malformed) {
             case STATUS_CONSTRAINT -> {
@@ -457,6 +501,10 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
     }
 
     private static DataSource recreateBaseline() throws Exception {
+        return recreateBaseline(false);
+    }
+
+    private static DataSource recreateBaseline(boolean charSemantics) throws Exception {
         try (Connection system = DriverManager.getConnection(jdbcUrl, "system", "cm")) {
             dropSchema(system);
             try (Statement statement = system.createStatement()) {
@@ -467,6 +515,11 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         }
         DataSource scenario = new DriverManagerDataSource(jdbcUrl, SCHEMA, PASSWORD);
         try (Connection connection = scenario.getConnection()) {
+            if (charSemantics) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("ALTER SESSION SET NLS_LENGTH_SEMANTICS=CHAR");
+                }
+            }
             var database = DatabaseFactory.getInstance()
                     .findCorrectDatabaseImplementation(new JdbcConnection(connection));
             try (var liquibase = new Liquibase(
@@ -553,7 +606,16 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
     }
 
     private static void migrate(DataSource scenario) throws Exception {
+        migrate(scenario, false);
+    }
+
+    private static void migrate(DataSource scenario, boolean charSemantics) throws Exception {
         try (Connection connection = scenario.getConnection()) {
+            if (charSemantics) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("ALTER SESSION SET NLS_LENGTH_SEMANTICS=CHAR");
+                }
+            }
             var database = DatabaseFactory.getInstance()
                     .findCorrectDatabaseImplementation(new JdbcConnection(connection));
             try (var liquibase = new Liquibase(MASTER,

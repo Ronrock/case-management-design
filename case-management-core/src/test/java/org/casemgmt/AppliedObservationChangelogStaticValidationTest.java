@@ -39,7 +39,7 @@ class AppliedObservationChangelogStaticValidationTest {
                 .anySatisfy(change -> {
                     assertThat(change.getTableName()).isEqualTo("CM_PLAN_ITEM");
                     assertThat(change.getColumnName()).isEqualTo("PROC_INST_ID_");
-                    assertThat(change.getNewDataType()).isEqualTo("VARCHAR2(128)");
+                    assertThat(change.getNewDataType()).isEqualTo("VARCHAR2(128 BYTE)");
                 });
     }
 
@@ -100,9 +100,11 @@ class AppliedObservationChangelogStaticValidationTest {
             assertThat(changes).extracting(change -> change.getId())
                     .contains("cm-applied-engine-observation",
                             "cm-engine-observation-hardening-kind",
+                            "cm-engine-observation-byte-semantics",
                             "cm-engine-observation-final-state-guard")
                     .containsSubsequence(
                             "cm-engine-observation-channel-engine-index",
+                            "cm-engine-observation-byte-semantics",
                             "cm-engine-observation-final-state-guard",
                             "cm-production-engine-command-columns-guard");
 

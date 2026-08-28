@@ -3,10 +3,14 @@ package org.casemgmt.engine;
 import org.casemgmt.repo.JsonCodec;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
+import org.springframework.jdbc.core.SqlParameterValue;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
+import java.io.IOException;
+import java.io.Reader;
+import java.sql.Types;
 import java.time.Duration;
 import java.time.Clock;
 import java.time.OffsetDateTime;
@@ -45,11 +49,13 @@ public class ProductionEngineCommandStore {
     private final JdbcClient jdbc;
     private final TransactionTemplate transactions;
     private final Clock clock;
+    private final Runnable beforeDecisionCas;
 
     public ProductionEngineCommandStore(JdbcClient jdbc) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
         this.transactions = null;
         this.clock = Clock.systemUTC();
+        this.beforeDecisionCas = () -> { };
     }
 
     /** Production constructor: JDBC and local transactions are derived from one exact resource. */
@@ -59,6 +65,11 @@ public class ProductionEngineCommandStore {
 
     /** Testable production constructor with the policy clock kept inside persistence ownership. */
     public ProductionEngineCommandStore(DataSource dataSource, Clock clock) {
+        this(dataSource, clock, () -> { });
+    }
+
+    ProductionEngineCommandStore(
+            DataSource dataSource, Clock clock, Runnable beforeDecisionCas) {
         DataSource resource = Objects.requireNonNull(dataSource, "dataSource");
         while (resource instanceof TransactionAwareDataSourceProxy proxy) {
             resource = Objects.requireNonNull(proxy.getTargetDataSource(), "targetDataSource");
@@ -66,6 +77,7 @@ public class ProductionEngineCommandStore {
         this.jdbc = JdbcClient.create(dataSource);
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(resource));
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.beforeDecisionCas = Objects.requireNonNull(beforeDecisionCas, "beforeDecisionCas");
     }
 
     public void enqueue(EngineCommand c) {
@@ -590,6 +602,7 @@ public class ProductionEngineCommandStore {
             EngineCommandPolicy.ActionLedgerSummary expectedSummary, LeaseState lease,
             boolean startingDispatch) {
         new EngineCommandPolicy.CommandState(prior.state().command(), decision);
+        beforeDecisionCas.run();
         EngineCommandPolicy.ActionLedgerSummary summary = decision.actionLedgerSummary();
         CommandDispatchOutcome.ConfirmationEvidence confirmation =
                 decision.terminalConfirmation();
@@ -634,8 +647,12 @@ public class ProductionEngineCommandStore {
                   AND DECODE(RAW_LEGACY_UPDATED_AT_,:expectedRawUpdatedAt,1,0)=1
                   AND DECODE(MIGRATION_BASELINE_DECIDED_AT_,:expectedBaselineDecidedAt,1,0)=1
                   AND PAYLOAD_DIGEST_=:expectedPayloadDigest
-                  AND (ORIGINAL_STATUS_ IS NULL
-                       OR DBMS_LOB.COMPARE(RAW_LEGACY_PAYLOAD_,PAYLOAD_JSON_)=0)
+                  AND ((RAW_LEGACY_PAYLOAD_ IS NULL AND :expectedRawPayload IS NULL)
+                       OR (RAW_LEGACY_PAYLOAD_ IS NOT NULL AND :expectedRawPayload IS NOT NULL
+                           AND DBMS_LOB.COMPARE(RAW_LEGACY_PAYLOAD_,:expectedRawPayload)=0))
+                  AND ((PAYLOAD_JSON_ IS NULL AND :expectedPayload IS NULL)
+                       OR (PAYLOAD_JSON_ IS NOT NULL AND :expectedPayload IS NOT NULL
+                           AND DBMS_LOB.COMPARE(PAYLOAD_JSON_,:expectedPayload)=0))
                 """).param("status", decision.status().name())
                 .param("nextAttempt", decision.nextAttemptAt())
                 .param("decidedAt", decision.decidedAt())
@@ -681,7 +698,11 @@ public class ProductionEngineCommandStore {
                 .param("expectedRawCreatedAt", prior.migrationCas().rawCreatedAt())
                 .param("expectedRawUpdatedAt", prior.migrationCas().rawUpdatedAt())
                 .param("expectedBaselineDecidedAt", prior.migrationCas().baselineDecidedAt())
-                .param("expectedPayloadDigest", prior.payloadDigest()).update();
+                .param("expectedPayloadDigest", prior.payloadDigest())
+                .param("expectedRawPayload", clobParameter(
+                        prior.migrationCas().rawPayload()))
+                .param("expectedPayload", clobParameter(
+                        prior.migrationCas().payload())).update();
     }
 
     private StoredCommand requireByCommandId(String commandId) {
@@ -771,7 +792,8 @@ public class ProductionEngineCommandStore {
                     "Persisted payloadDigest must be lowercase SHA-256");
         }
         String payloadJson = Objects.requireNonNull(
-                rs.getString("PAYLOAD_JSON_"), "persisted payloadJson");
+                readClob(rs, "PAYLOAD_JSON_"), "persisted payloadJson");
+        String rawPayloadJson = readClob(rs, "RAW_LEGACY_PAYLOAD_");
         java.util.Map<String, Object> payload = JsonCodec.toMap(payloadJson);
         String expectedDigest = rs.getString("ORIGINAL_STATUS_") == null
                 ? JsonCodec.canonicalSha256(payload) : JsonCodec.sha256(payloadJson);
@@ -780,7 +802,7 @@ public class ProductionEngineCommandStore {
                     "Persisted payloadDigest does not match its retained payload");
         }
         validatePersistedTuple(rs, decision);
-        validateHistoricalTuple(rs, payloadJson, decision);
+        validateHistoricalTuple(rs, payloadJson, rawPayloadJson, decision, actions);
         long version = rs.getLong("ROW_VERSION_");
         if (version < 0) {
             throw new IllegalArgumentException("Persisted command version must not be negative");
@@ -811,7 +833,8 @@ public class ProductionEngineCommandStore {
                         rs.getObject("RAW_LEGACY_CREATED_AT_", OffsetDateTime.class),
                         rs.getObject("RAW_LEGACY_UPDATED_AT_", OffsetDateTime.class),
                         rs.getObject("MIGRATION_BASELINE_DECIDED_AT_", OffsetDateTime.class),
-                        rs.getObject("CURRENT_ACTION_SEQ_", Long.class)));
+                        rs.getObject("CURRENT_ACTION_SEQ_", Long.class),
+                        payloadJson, rawPayloadJson));
     }
 
     private static void validatePersistedTuple(
@@ -928,13 +951,15 @@ public class ProductionEngineCommandStore {
     }
 
     private static void validateHistoricalTuple(
-            java.sql.ResultSet rs, String payloadJson, EngineCommandPolicy.Decision decision)
+            java.sql.ResultSet rs, String payloadJson, String rawPayloadJson,
+            EngineCommandPolicy.Decision decision,
+            List<EngineCommandPolicy.ProcessedAction> actions)
             throws java.sql.SQLException {
         String original = rs.getString("ORIGINAL_STATUS_");
         Object[] legacyFields = {
                 rs.getString("LEGACY_ROW_ID_"), rs.getString("LEGACY_STATUS_"),
                 rs.getString("LEGACY_MIGRATION_REF_"), rs.getObject("LEGACY_MIGRATED_AT_"),
-                rs.getObject("LEGACY_FAILURE_COUNT_"), rs.getString("RAW_LEGACY_PAYLOAD_"),
+                rs.getObject("LEGACY_FAILURE_COUNT_"), rawPayloadJson,
                 rs.getString("RAW_LEGACY_ERROR_"), rs.getString("RAW_LEGACY_CLAIM_TOKEN_"),
                 rs.getObject("RAW_LEGACY_CLAIMED_AT_"),
                 rs.getObject("RAW_LEGACY_ATTEMPTS_"),
@@ -983,7 +1008,7 @@ public class ProductionEngineCommandStore {
         java.util.Map<String, Object> payload = JsonCodec.toMap(payloadJson);
         String expectedTarget = legacyTarget(type, payload, rs.getString("CASE_ID_"));
         boolean immutableBaseline = oldAttempts >= 0
-                && Objects.equals(payloadJson, rs.getString("RAW_LEGACY_PAYLOAD_"))
+                && matchesRetainedLegacyPayload(rawPayloadJson, payloadJson)
                 && rs.getInt("ATTEMPTS_") == oldAttempts
                 && Objects.equals(rs.getString("LAST_ERROR_"), rs.getString("RAW_LEGACY_ERROR_"))
                 && Objects.equals(createdAt, rawCreatedAt)
@@ -1024,18 +1049,35 @@ public class ProductionEngineCommandStore {
                         "Untouched legacy command no longer matches its migration decision");
             }
         } else {
+            CommandDispatchOutcome.ReviewEvidence review = decision.decisionEvidence();
             boolean coherentEvolution = !done && isPolicyReachableLegacyEvolution(
-                    mapped, decision.status(), expectedAttempts,
-                    decision.totalDispatchAttempts(),
-                    decision.actionLedgerSummary().actionCount(),
-                    decision.terminalConfirmation() != null,
-                    decision.decisionEvidence() != null,
-                    rs.getLong("ROW_VERSION_"), baselineDecidedAt, decision.decidedAt());
+                    new LegacyEvolutionFacts(mapped, decision.status(), expectedAttempts,
+                            decision.totalDispatchAttempts(),
+                            decision.actionLedgerSummary().actionCount(),
+                            actions.stream().filter(action -> action.action().actionType()
+                                    == CommandDispatchOutcome.ActionType.RETRY_OVERRIDE).count(),
+                            actions.stream().filter(action -> action.action().actionType()
+                                    == CommandDispatchOutcome.ActionType.CANCEL).count(),
+                            decision.appliedOperatorAction() == null ? null
+                                    : decision.appliedOperatorAction().actionType(),
+                            review == null ? null : review.finding(),
+                            review == null ? null : review.source(),
+                            decision.terminalConfirmation() != null,
+                            rs.getLong("ROW_VERSION_"), baselineDecidedAt,
+                            decision.decidedAt()));
             if (!coherentEvolution) {
                 throw new IllegalArgumentException(
                         "Evolved legacy command lacks a policy-reachable repository transition");
             }
         }
+    }
+
+    static boolean matchesRetainedLegacyPayload(
+            String rawLegacyPayloadJson, String currentPayloadJson) {
+        return currentPayloadJson != null
+                && (rawLegacyPayloadJson == null
+                ? "{}".equals(currentPayloadJson)
+                : rawLegacyPayloadJson.equals(currentPayloadJson));
     }
 
     static boolean validTemporalDecision(
@@ -1049,42 +1091,139 @@ public class ProductionEngineCommandStore {
         return retryTime && leaseTime;
     }
 
-    static boolean isPolicyReachableLegacyEvolution(
-            EngineCommandStatus baselineStatus, EngineCommandStatus currentStatus,
-            long baselineAttempts, long currentAttempts, long actionCount,
-            boolean hasConfirmation, boolean hasReviewEvidence, long rowVersion,
-            OffsetDateTime baselineDecidedAt, OffsetDateTime currentDecidedAt) {
-        boolean durableEvidence = currentAttempts > baselineAttempts || actionCount > 0
-                || hasConfirmation || hasReviewEvidence;
-        boolean sameRetryableHasCausalDelta = baselineStatus != EngineCommandStatus.RETRYABLE
-                || currentStatus != EngineCommandStatus.RETRYABLE
-                || currentAttempts > baselineAttempts || actionCount > 0;
-        boolean causalStateEvidence = switch (currentStatus) {
+    record LegacyEvolutionFacts(
+            EngineCommandStatus baselineStatus,
+            EngineCommandStatus currentStatus,
+            long baselineAttempts,
+            long currentAttempts,
+            long actionCount,
+            long retryActionCount,
+            long cancelActionCount,
+            CommandDispatchOutcome.ActionType appliedActionType,
+            CommandDispatchOutcome.ReviewFinding reviewFinding,
+            CommandDispatchOutcome.ReviewSource reviewSource,
+            boolean hasConfirmation,
+            long rowVersion,
+            OffsetDateTime baselineDecidedAt,
+            OffsetDateTime currentDecidedAt) {
+        LegacyEvolutionFacts {
+            Objects.requireNonNull(baselineStatus, "baselineStatus");
+            Objects.requireNonNull(currentStatus, "currentStatus");
+            Objects.requireNonNull(baselineDecidedAt, "baselineDecidedAt");
+            Objects.requireNonNull(currentDecidedAt, "currentDecidedAt");
+            if (baselineAttempts < 0 || currentAttempts < 0 || actionCount < 0
+                    || retryActionCount < 0 || cancelActionCount < 0
+                    || retryActionCount > actionCount || cancelActionCount > actionCount) {
+                throw new IllegalArgumentException("Legacy evolution counters must be coherent");
+            }
+            if ((reviewFinding == null) != (reviewSource == null)) {
+                throw new IllegalArgumentException("Legacy evolution review provenance is partial");
+            }
+        }
+    }
+
+    static boolean isPolicyReachableLegacyEvolution(LegacyEvolutionFacts facts) {
+        EngineCommandStatus baseline = facts.baselineStatus();
+        EngineCommandStatus current = facts.currentStatus();
+        if (baseline == EngineCommandStatus.CONFIRMED || baseline == EngineCommandStatus.FAILED
+                || current == EngineCommandStatus.PENDING
+                || facts.currentAttempts() < facts.baselineAttempts()
+                || facts.rowVersion() <= 0
+                || !facts.currentDecidedAt().isAfter(facts.baselineDecidedAt())
+                || facts.hasConfirmation() != (current == EngineCommandStatus.CONFIRMED)
+                || (facts.cancelActionCount() > 0) != (current == EngineCommandStatus.CANCELLED)) {
+            return false;
+        }
+        if (facts.appliedActionType() != null && switch (facts.appliedActionType()) {
+            case MANUAL_REVIEW -> current != EngineCommandStatus.MANUAL_REVIEW;
+            case RECONCILE -> current != EngineCommandStatus.AWAITING_CONFIRMATION;
+            case RETRY_OVERRIDE -> current != EngineCommandStatus.RETRYABLE;
+            case CANCEL -> current != EngineCommandStatus.CANCELLED;
+        }) {
+            return false;
+        }
+        long attemptDelta = facts.currentAttempts() - facts.baselineAttempts();
+        long minimumVersion;
+        try {
+            minimumVersion = Math.addExact(facts.actionCount(), Math.multiplyExact(2L, attemptDelta));
+            if (current == EngineCommandStatus.DISPATCHING && attemptDelta > 0) minimumVersion--;
+            if (baseline == EngineCommandStatus.AWAITING_CONFIRMATION && attemptDelta > 0
+                    && facts.retryActionCount() == 0) minimumVersion++;
+            if (attemptDelta == 0 && facts.actionCount() > 0
+                    && facts.appliedActionType() == null) minimumVersion++;
+        } catch (ArithmeticException ex) {
+            return false;
+        }
+        if (facts.rowVersion() < Math.max(1L, minimumVersion)) return false;
+
+        boolean definitiveReconciliation = facts.reviewFinding()
+                == CommandDispatchOutcome.ReviewFinding.DEFINITIVE_ABSENCE
+                && facts.reviewSource() == CommandDispatchOutcome.ReviewSource.RECONCILIATION;
+        boolean definitiveOperatorReview = facts.reviewFinding()
+                == CommandDispatchOutcome.ReviewFinding.DEFINITIVE_ABSENCE
+                && facts.reviewSource() == CommandDispatchOutcome.ReviewSource.OPERATOR_REVIEW;
+        boolean inconclusiveReconciliation = facts.reviewFinding()
+                == CommandDispatchOutcome.ReviewFinding.INCONCLUSIVE
+                && facts.reviewSource() == CommandDispatchOutcome.ReviewSource.RECONCILIATION;
+        return switch (current) {
             case PENDING -> false;
-            case DISPATCHING -> currentAttempts > baselineAttempts
-                    && (baselineStatus == EngineCommandStatus.PENDING
-                    || baselineStatus == EngineCommandStatus.RETRYABLE || actionCount > 0);
-            case RETRYABLE -> actionCount > 0 || currentAttempts > baselineAttempts
-                    && (baselineStatus == EngineCommandStatus.PENDING
-                    || baselineStatus == EngineCommandStatus.RETRYABLE);
-            case AWAITING_CONFIRMATION -> currentAttempts > baselineAttempts
-                    || actionCount > 0 || hasReviewEvidence;
-            case CONFIRMED -> hasConfirmation;
-            case FAILED -> currentAttempts > baselineAttempts
-                    && (baselineStatus != EngineCommandStatus.FAILED || actionCount > 0);
-            case CONFLICT, MANUAL_REVIEW -> actionCount > 0 || hasReviewEvidence;
-            case CANCELLED -> actionCount > 0;
+            case DISPATCHING -> attemptDelta > 0;
+            case RETRYABLE -> attemptDelta > 0
+                    || facts.appliedActionType()
+                        == CommandDispatchOutcome.ActionType.RETRY_OVERRIDE
+                        && (baseline == EngineCommandStatus.RETRYABLE
+                            || baseline == EngineCommandStatus.AWAITING_CONFIRMATION)
+                    || baseline == EngineCommandStatus.AWAITING_CONFIRMATION
+                        && definitiveReconciliation;
+            case AWAITING_CONFIRMATION -> attemptDelta > 0
+                    || baseline == EngineCommandStatus.AWAITING_CONFIRMATION
+                        && facts.appliedActionType()
+                        == CommandDispatchOutcome.ActionType.RECONCILE;
+            case CONFIRMED -> facts.hasConfirmation();
+            case FAILED -> attemptDelta > 0
+                    || baseline == EngineCommandStatus.AWAITING_CONFIRMATION
+                        && facts.baselineAttempts()
+                        == EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS
+                        && definitiveReconciliation;
+            case CONFLICT -> attemptDelta > 0;
+            case MANUAL_REVIEW -> (inconclusiveReconciliation
+                    || facts.appliedActionType()
+                        == CommandDispatchOutcome.ActionType.MANUAL_REVIEW)
+                    && (baseline == EngineCommandStatus.AWAITING_CONFIRMATION
+                        || attemptDelta > 0);
+            case CANCELLED -> facts.appliedActionType()
+                    == CommandDispatchOutcome.ActionType.CANCEL
+                    && facts.cancelActionCount() == 1
+                    && (attemptDelta == 0
+                        && baseline != EngineCommandStatus.AWAITING_CONFIRMATION
+                        || definitiveOperatorReview);
         };
-        return rowVersion > 0 && currentStatus != EngineCommandStatus.PENDING
-                && currentAttempts >= baselineAttempts
-                && currentDecidedAt.isAfter(baselineDecidedAt)
-                && durableEvidence && causalStateEvidence && sameRetryableHasCausalDelta;
     }
 
     private static int countPresent(Object... values) {
         int count = 0;
         for (Object value : values) if (value != null) count++;
         return count;
+    }
+
+    private static SqlParameterValue clobParameter(String value) {
+        return new SqlParameterValue(Types.CLOB, value);
+    }
+
+    private static String readClob(java.sql.ResultSet rs, String column)
+            throws java.sql.SQLException {
+        Reader reader = rs.getCharacterStream(column);
+        if (reader == null) return null;
+        try (reader) {
+            StringBuilder value = new StringBuilder();
+            char[] buffer = new char[8192];
+            for (int read; (read = reader.read(buffer)) >= 0; ) {
+                if (read > 0) value.append(buffer, 0, read);
+            }
+            return value.toString();
+        } catch (IOException ex) {
+            throw new java.sql.SQLException("Unable to read persisted CLOB " + column, ex);
+        }
     }
 
     private static void validateLegacyDoneRow(
@@ -1337,12 +1476,15 @@ public class ProductionEngineCommandStore {
         private final OffsetDateTime rawUpdatedAt;
         private final OffsetDateTime baselineDecidedAt;
         private final Long currentActionSequence;
+        private final String payload;
+        private final String rawPayload;
 
         private MigrationCas(
                 Integer baselineActive, String originalStatus, String rawError,
                 String rawClaimToken, OffsetDateTime rawClaimedAt, Integer rawAttempts,
                 OffsetDateTime rawCreatedAt, OffsetDateTime rawUpdatedAt,
-                OffsetDateTime baselineDecidedAt, Long currentActionSequence) {
+                OffsetDateTime baselineDecidedAt, Long currentActionSequence,
+                String payload, String rawPayload) {
             this.baselineActive = baselineActive;
             this.originalStatus = originalStatus;
             this.rawError = rawError;
@@ -1353,6 +1495,8 @@ public class ProductionEngineCommandStore {
             this.rawUpdatedAt = rawUpdatedAt;
             this.baselineDecidedAt = baselineDecidedAt;
             this.currentActionSequence = currentActionSequence;
+            this.payload = payload;
+            this.rawPayload = rawPayload;
         }
 
         private Integer baselineActive() { return baselineActive; }
@@ -1365,6 +1509,8 @@ public class ProductionEngineCommandStore {
         private OffsetDateTime rawUpdatedAt() { return rawUpdatedAt; }
         private OffsetDateTime baselineDecidedAt() { return baselineDecidedAt; }
         private Long currentActionSequence() { return currentActionSequence; }
+        private String payload() { return payload; }
+        private String rawPayload() { return rawPayload; }
 
         @Override public boolean equals(Object other) {
             if (this == other) return true;
@@ -1378,13 +1524,15 @@ public class ProductionEngineCommandStore {
                     && Objects.equals(rawCreatedAt, that.rawCreatedAt)
                     && Objects.equals(rawUpdatedAt, that.rawUpdatedAt)
                     && Objects.equals(baselineDecidedAt, that.baselineDecidedAt)
-                    && Objects.equals(currentActionSequence, that.currentActionSequence);
+                    && Objects.equals(currentActionSequence, that.currentActionSequence)
+                    && Objects.equals(payload, that.payload)
+                    && Objects.equals(rawPayload, that.rawPayload);
         }
 
         @Override public int hashCode() {
             return Objects.hash(baselineActive, originalStatus, rawError, rawClaimToken,
                     rawClaimedAt, rawAttempts, rawCreatedAt, rawUpdatedAt,
-                    baselineDecidedAt, currentActionSequence);
+                    baselineDecidedAt, currentActionSequence, payload, rawPayload);
         }
     }
 

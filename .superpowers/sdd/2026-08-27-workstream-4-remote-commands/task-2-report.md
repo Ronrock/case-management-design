@@ -268,6 +268,7 @@ follow-up closes the persistence review without changing dispatcher or REST beha
 - `./mvnw -pl case-management-spring-boot-starter -am -DskipTests compile` — six reactor modules
   compiled successfully.
 - `git diff --check` — clean.
+
 - focused Oracle repository test was attempted both sandboxed and with escalated Docker access.
   Sandboxed access was denied; escalated Docker reached Docker Desktop but returned
   `Status 503: Docker Desktop is unable to start` before Oracle/Testcontainers startup. Therefore
@@ -388,6 +389,7 @@ and adds strict final-state deployment gates.
   reactor-required modules compiled successfully.
 - `./mvnw -pl case-management-core -DskipTests test-compile` — all 96 core test sources compiled.
 - `git diff --check` — clean.
+
 - The focused Oracle command for `EngineCommandMigrationRestartIntegrationTest`,
   `EngineCommandRepositoryProductionTest`, and `AppliedObservationMigrationRestartIntegrationTest`
   was attempted with escalated Docker access on 2026-08-29. Docker Desktop returned HTTP 503
@@ -452,3 +454,65 @@ migrated-baseline/current-state findings without changing the restart-tolerant p
   environment), so the Oracle mutation, CAS, no-op, and migration-cycle scenarios are
   compile-verified but were not runtime-executed here.
 - `git diff --check` — clean.
+
+## Review hardening round 5
+
+Commit: `fix: finalize command persistence contracts`
+
+The final hash is recorded in the handoff. This breaker round replaces the remaining heuristic
+legacy validation, makes Oracle string semantics deterministic, and closes the raw/current CLOB
+compare-and-set gap.
+
+### Exact legacy evolution validation
+
+- migrated `DONE`/`CONFIRMED` and `DEAD`/`FAILED` baselines are immutable forever. Live
+  `PENDING`, `RETRYING`, and `CLAIMED` baselines are checked against an explicit current-status,
+  attempt-delta, normalized-action, review/confirmation provenance, row-version, and timestamp
+  matrix.
+- the matrix accounts for the exact number of repository decisions needed for claim/outcome
+  cycles, operator retry/cancel actions, and an automatic reconciliation exit from
+  `AWAITING_CONFIRMATION`. A capped claimed baseline may reconcile definitive absence to
+  `FAILED` without another attempt; an uncapped or insufficient-version forgery is rejected.
+- exhaustive tests cover every five original statuses by every nine production statuses plus
+  marker-only, cap, multi-step reconciliation/retry, consumed action, cancel, confirmation, and
+  provenance/version edge cases. Nullable PoC payloads preserve a null raw value while the live
+  payload is canonicalized to `{}` for hashing and safe rehydration.
+
+### Deterministic Oracle BYTE semantics
+
+- every new production command/action and Workstream 3 observation/hardening `VARCHAR2`
+  declaration explicitly uses `BYTE` semantics.
+- a restart-safe custom Liquibase change derives the complete VARCHAR2 inventory from the same
+  strict final-schema contracts (39 command/action and 16 observation/related columns). It
+  preflights all CHAR-semantics columns with `LENGTHB` before issuing any DDL, halts before partial
+  conversion on overflow, converts only compatible CHAR columns, and skips already-converted BYTE
+  columns on restart.
+- isolated-schema Oracle coverage sets `NLS_LENGTH_SEMANTICS=CHAR` on both the baseline and final
+  Liquibase connections, migrates, asserts every contract column has `CHAR_USED='B'`, and reruns.
+  Static tests independently validate the exact target inventory and all new XML declarations.
+
+### Full null-safe raw/current CLOB CAS
+
+- repository rehydration streams and closes both live and retained raw CLOB readers. The immutable
+  CAS snapshot now carries each value separately and binds each as an Oracle CLOB.
+- every decision update compares expected raw and expected live payload through independent,
+  explicit null-safe predicates; it never compares the retained raw value to the mutable live
+  column.
+- Oracle concurrency tests interpose a separate committed connection exactly after rehydration and
+  before the decision CAS. They cover expected raw null, expected raw non-null, divergent mutation
+  of both columns (rejected), and an exact-value concurrent rewrite (accepted).
+
+### Round-5 verification
+
+- strict RED/GREEN evidence included missing exact evolution facts, terminal baseline evolution,
+  consumed-action version accounting, nullable retained payload handling, BYTE target/declaration
+  inventory, the decision-CAS interlock, and an insufficient-version claimed redispatch.
+- focused policy/durable/legacy/action/static/schema/digest suite: 1,503 tests passed, zero
+  failures/errors/skips (including 66 exact legacy-evolution cases).
+- `./mvnw -pl case-management-spring-boot-starter -am -DskipTests compile` — all six selected and
+  reactor-required modules compiled successfully.
+- `git diff --check` and the no-implicit-VARCHAR2 scan for the two production changelogs are clean.
+- the focused Oracle repository and migration-restart suites were attempted with escalated Docker
+  access. Docker Desktop returned HTTP 503 before Testcontainers/Oracle startup, so the new CHAR
+  session, nullable legacy payload, and three CLOB concurrency methods are compile-verified but
+  remain runtime-unexecuted in this environment.

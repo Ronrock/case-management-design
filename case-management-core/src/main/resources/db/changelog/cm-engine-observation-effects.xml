@@ -42,22 +42,22 @@
       <not><tableExists tableName="CM_APPLIED_ENGINE_OBSERVATION"/></not>
     </preConditions>
     <createTable tableName="CM_APPLIED_ENGINE_OBSERVATION">
-      <column name="OBSERVATION_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
-      <column name="TENANT_ID_" type="VARCHAR2(64)"/>
-      <column name="FINGERPRINT_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
-      <column name="CLAIM_TOKEN_" type="VARCHAR2(43)"><constraints nullable="false"/></column>
-      <column name="STATUS_" type="VARCHAR2(16)"><constraints nullable="false"/></column>
-      <column name="SOURCE_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
-      <column name="CASE_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
-      <column name="PROCESS_INSTANCE_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
-      <column name="ENTITY_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
+      <column name="OBSERVATION_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="TENANT_ID_" type="VARCHAR2(64 BYTE)"/>
+      <column name="FINGERPRINT_" type="VARCHAR2(64 BYTE)"><constraints nullable="false"/></column>
+      <column name="CLAIM_TOKEN_" type="VARCHAR2(43 BYTE)"><constraints nullable="false"/></column>
+      <column name="STATUS_" type="VARCHAR2(16 BYTE)"><constraints nullable="false"/></column>
+      <column name="SOURCE_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="CASE_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="PROCESS_INSTANCE_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="ENTITY_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
       <column name="ENTITY_REVISION_" type="NUMBER(19)"/>
-      <column name="EVENT_TYPE_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="EVENT_TYPE_" type="VARCHAR2(64 BYTE)"><constraints nullable="false"/></column>
       <column name="ENGINE_OCCURRED_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
       <column name="CLAIMED_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
       <column name="APPLIED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
       <column name="FAILED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
-      <column name="FAILURE_DETAIL_" type="VARCHAR2(2000)"/>
+      <column name="FAILURE_DETAIL_" type="VARCHAR2(2000 BYTE)"/>
     </createTable>
   </changeSet>
 
@@ -248,7 +248,7 @@
       <not><columnExists tableName="CM_APPLIED_ENGINE_OBSERVATION" columnName="OBSERVATION_KIND_"/></not>
     </preConditions>
     <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
-      <column name="OBSERVATION_KIND_" type="VARCHAR2(32)" defaultValue="LEGACY">
+      <column name="OBSERVATION_KIND_" type="VARCHAR2(32 BYTE)" defaultValue="LEGACY">
         <constraints nullable="false"/>
       </column>
     </addColumn>
@@ -308,7 +308,7 @@
       <columnExists tableName="CM_PLAN_ITEM" columnName="PROC_INST_ID_"/>
     </preConditions>
     <modifyDataType tableName="CM_PLAN_ITEM" columnName="PROC_INST_ID_"
-                    newDataType="VARCHAR2(128)"/>
+                    newDataType="VARCHAR2(128 BYTE)"/>
   </changeSet>
 
   <changeSet id="cm-engine-observation-hardening-task-process" author="casemgmt">
@@ -316,7 +316,7 @@
       <not><columnExists tableName="CM_TASK" columnName="PROC_INST_ID_"/></not>
     </preConditions>
     <addColumn tableName="CM_TASK">
-      <column name="PROC_INST_ID_" type="VARCHAR2(128)"/>
+      <column name="PROC_INST_ID_" type="VARCHAR2(128 BYTE)"/>
     </addColumn>
   </changeSet>
 
@@ -346,7 +346,7 @@
     <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
       <!-- Historical rows cannot be assigned an engine identity from SOURCE_: source names an
            adapter channel. Null therefore remains a deliberate reconciliation barrier. -->
-      <column name="ENGINE_ID_" type="VARCHAR2(128)"/>
+      <column name="ENGINE_ID_" type="VARCHAR2(128 BYTE)"/>
     </addColumn>
   </changeSet>
 
@@ -356,7 +356,7 @@
     </preConditions>
     <addColumn tableName="CM_LINKED_PROCESS">
       <!-- Exact deployed identity is unknown for historical links and must be reconciled. -->
-      <column name="PROC_DEF_ID_" type="VARCHAR2(128)"/>
+      <column name="PROC_DEF_ID_" type="VARCHAR2(128 BYTE)"/>
     </addColumn>
   </changeSet>
 
@@ -373,6 +373,15 @@
 
   <!-- Earlier guards accept absent objects so every Oracle auto-commit prefix can resume. This
        final runAlways gate requires the complete post-migration contract on every later start. -->
+  <changeSet id="cm-engine-observation-byte-semantics" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT">
+      <dbms type="oracle"/>
+    </preConditions>
+    <customChange class="org.casemgmt.migration.OracleByteSemanticsMigration">
+      <param name="contract" value="engine-observation"/>
+    </customChange>
+  </changeSet>
+
   <changeSet id="cm-engine-observation-final-state-guard" author="casemgmt" runAlways="true">
     <preConditions onFail="HALT" onError="HALT"
                    onFailMessage="Engine observation final structure is incompatible">

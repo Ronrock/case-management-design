@@ -59,6 +59,7 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
             "cm-engine-observation-channel-engine-id",
             "cm-engine-observation-channel-child-definition",
             "cm-engine-observation-channel-engine-index",
+            "cm-engine-observation-byte-semantics",
             "cm-engine-observation-final-state-guard");
 
     @BeforeAll
