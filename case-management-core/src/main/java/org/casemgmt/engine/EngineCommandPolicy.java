@@ -6,7 +6,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -23,6 +25,7 @@ public final class EngineCommandPolicy {
     public static final int MAX_AUTOMATIC_RETRIES = 5;
     public static final int MAX_AUTOMATIC_ATTEMPTS = MAX_AUTOMATIC_RETRIES + 1;
     public static final int MAX_SAFE_SUMMARY_LENGTH = 256;
+    public static final int MAX_PROCESSED_ACTION_HISTORY = 64;
     public static final Duration MAX_RETRY_AFTER = Duration.ofDays(30);
     public static final OffsetDateTime MAX_PERSISTABLE_TIMESTAMP = OffsetDateTime.parse(
             "9999-12-31T23:59:59.999999Z");
@@ -133,6 +136,11 @@ public final class EngineCommandPolicy {
 
     public Set<CommandDispatchOutcome.RemoteState> expectedTerminalStates(
             EngineCommand.Type type) {
+        return terminalStates(type);
+    }
+
+    private static Set<CommandDispatchOutcome.RemoteState> terminalStates(
+            EngineCommand.Type type) {
         Objects.requireNonNull(type, "type");
         return switch (type) {
             case CREATE_TASK -> EnumSet.of(CommandDispatchOutcome.RemoteState.TASK_CREATED);
@@ -157,16 +165,32 @@ public final class EngineCommandPolicy {
             return committed;
         }
         CommandDispatchOutcome.OperatorAction incoming = outcome.operatorAction();
-        CommandDispatchOutcome.OperatorAction applied = committed.appliedOperatorAction();
-        if (incoming != null && applied != null && incoming.actionId().equals(applied.actionId())) {
-            if (!incoming.equals(applied)
-                    || !Objects.equals(outcome.reviewEvidence(), committed.decisionEvidence())) {
-                throw new IllegalArgumentException(
-                        "Operator action identity was repackaged with different provenance");
+        if (incoming != null) {
+            for (ProcessedAction processed : committed.processedActions()) {
+                if (incoming.actionId().equals(processed.action().actionId())) {
+                    if (!incoming.equals(processed.action())
+                            || !Objects.equals(
+                                    outcome.reviewEvidence(), processed.reviewEvidence())) {
+                        throw new IllegalArgumentException(
+                                "Operator action identity was repackaged with different provenance");
+                    }
+                    return committed;
+                }
             }
-            return committed;
         }
         return null;
+    }
+
+    private static List<ProcessedAction> appendProcessedAction(
+            Decision committed, CommandDispatchOutcome outcome) {
+        if (committed.processedActions().size() >= MAX_PROCESSED_ACTION_HISTORY) {
+            throw new IllegalStateException(
+                    "Processed operator action history capacity is exhausted");
+        }
+        List<ProcessedAction> appended = new ArrayList<>(committed.processedActions());
+        appended.add(new ProcessedAction(
+                appended.size() + 1, outcome.operatorAction(), outcome.reviewEvidence()));
+        return List.copyOf(appended);
     }
 
     private static void requireEquivalentConfirmation(
@@ -201,7 +225,8 @@ public final class EngineCommandPolicy {
                 outcome, new Decision(EngineCommandStatus.DISPATCHING, now(), null,
                         null, null, committed.totalDispatchAttempts() + 1,
                         committed.automaticAttemptsInBudget() + 1,
-                        committed.budgetEpoch(), false, null, null, null));
+                        committed.budgetEpoch(), false, null, null, null,
+                        committed.processedActions()));
     }
 
     private Decision classifyHttp(CommandContext command, Decision committed,
@@ -278,7 +303,8 @@ public final class EngineCommandPolicy {
         return new Decision(EngineCommandStatus.RETRYABLE, now(), clamp(action.performedAt()),
                 "review.retry", "Reviewed evidence permits another dispatch attempt",
                 committed.totalDispatchAttempts(), budgetAttempts, epoch, exhausted,
-                null, outcome.reviewEvidence(), action);
+                null, outcome.reviewEvidence(), action,
+                appendProcessedAction(committed, outcome));
     }
 
     private Decision automaticRetry(CommandContext command, Decision committed,
@@ -307,10 +333,11 @@ public final class EngineCommandPolicy {
         return new Decision(EngineCommandStatus.RETRYABLE, now(),
                 saturatingAdd(clock.instant(), delay), safeCode(errorCode), safeSummary(summary),
                 committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
-                committed.budgetEpoch(), false, null, evidence, null);
+                committed.budgetEpoch(), false, null, evidence, null,
+                committed.processedActions());
     }
 
-    private void validateCommittedState(CommandContext command, Decision committed) {
+    private static void validateCommittedState(CommandContext command, Decision committed) {
         if (committed.terminalConfirmation() != null) {
             validateConfirmationFields(command, committed.terminalConfirmation());
         }
@@ -319,6 +346,12 @@ public final class EngineCommandPolicy {
         }
         if (committed.appliedOperatorAction() != null) {
             validateOperator(command, committed.appliedOperatorAction());
+        }
+        for (ProcessedAction processed : committed.processedActions()) {
+            validateOperator(command, processed.action());
+            if (processed.reviewEvidence() != null) {
+                validateReviewFields(command, processed.reviewEvidence());
+            }
         }
     }
 
@@ -351,7 +384,7 @@ public final class EngineCommandPolicy {
         }
     }
 
-    private void validateConfirmationFields(
+    private static void validateConfirmationFields(
             CommandContext command, CommandDispatchOutcome.ConfirmationEvidence evidence) {
         same(command.tenantId(), evidence.tenantId(), "tenant");
         same(command.operationId(), evidence.operationId(), "operation");
@@ -360,7 +393,7 @@ public final class EngineCommandPolicy {
             throw new IllegalArgumentException("Confirmation command type mismatch");
         }
         same(command.expectedTargetIdentity(), evidence.expectedTargetIdentity(), "target");
-        if (!expectedTerminalStates(command.commandType()).contains(evidence.remoteState())) {
+        if (!terminalStates(command.commandType()).contains(evidence.remoteState())) {
             throw new IllegalArgumentException("Confirmation remote state mismatch");
         }
         if (EXISTING_REMOTE_TARGET.contains(command.commandType())
@@ -455,7 +488,8 @@ public final class EngineCommandPolicy {
             Decision committed, CommandDispatchOutcome.ConfirmationEvidence evidence) {
         return new Decision(EngineCommandStatus.CONFIRMED, now(), null, null, null,
                 committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
-                committed.budgetEpoch(), false, evidence, null, null);
+                committed.budgetEpoch(), false, evidence, null, null,
+                committed.processedActions());
     }
 
     private Decision diagnostic(Decision committed, EngineCommandStatus status,
@@ -463,7 +497,8 @@ public final class EngineCommandPolicy {
                                 CommandDispatchOutcome.ReviewEvidence evidence) {
         return new Decision(status, now(), null, safeCode(errorCode), safeSummary(summary),
                 committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
-                committed.budgetEpoch(), false, null, evidence, null);
+                committed.budgetEpoch(), false, null, evidence, null,
+                committed.processedActions());
     }
 
     private Decision operatorDecision(
@@ -474,7 +509,8 @@ public final class EngineCommandPolicy {
                 errorCode == null ? null : safeCode(errorCode),
                 summary == null ? null : safeSummary(summary),
                 committed.totalDispatchAttempts(), budgetAttempts, budgetEpoch, resetBudget,
-                null, outcome.reviewEvidence(), outcome.operatorAction());
+                null, outcome.reviewEvidence(), outcome.operatorAction(),
+                appendProcessedAction(committed, outcome));
     }
 
     private OffsetDateTime now() {
@@ -518,6 +554,7 @@ public final class EngineCommandPolicy {
         public CommandState {
             Objects.requireNonNull(command, "command");
             Objects.requireNonNull(committedDecision, "committedDecision");
+            validateCommittedState(command, committedDecision);
         }
     }
 
@@ -544,6 +581,49 @@ public final class EngineCommandPolicy {
         }
     }
 
+    /**
+     * One normalized, persistence-ready operator action ledger row. Entries are retained for the
+     * lifetime of the command and are never replaced or evicted by the policy.
+     */
+    public record ProcessedAction(
+            int sequence,
+            CommandDispatchOutcome.OperatorAction action,
+            CommandDispatchOutcome.ReviewEvidence reviewEvidence) {
+        public ProcessedAction {
+            if (sequence < 1 || sequence > MAX_PROCESSED_ACTION_HISTORY) {
+                throw new IllegalArgumentException(
+                        "Processed operator action sequence is outside its bounded range");
+            }
+            Objects.requireNonNull(action, "action");
+            if (reviewEvidence != null) {
+                sameProcessedBinding(action.tenantId(), reviewEvidence.tenantId(), "tenant");
+                sameProcessedBinding(
+                        action.operationId(), reviewEvidence.operationId(), "operation");
+                sameProcessedBinding(action.commandId(), reviewEvidence.commandId(), "command");
+                if (action.commandType() != reviewEvidence.commandType()) {
+                    throw new IllegalArgumentException(
+                            "Processed action review command type mismatch");
+                }
+                sameProcessedBinding(action.expectedTargetIdentity(),
+                        reviewEvidence.expectedTargetIdentity(), "target");
+            }
+            switch (action.actionType()) {
+                case MANUAL_REVIEW, RECONCILE -> {
+                    if (reviewEvidence != null) {
+                        throw new IllegalArgumentException(
+                                "Manual review and reconcile history must not carry review evidence");
+                    }
+                }
+                case RETRY_OVERRIDE -> requireDefinitiveOperatorAbsence(reviewEvidence);
+                case CANCEL -> {
+                    if (reviewEvidence != null) {
+                        requireDefinitiveOperatorAbsence(reviewEvidence);
+                    }
+                }
+            }
+        }
+    }
+
     public record Decision(
             EngineCommandStatus status,
             OffsetDateTime decidedAt,
@@ -556,10 +636,13 @@ public final class EngineCommandPolicy {
             boolean automaticBudgetReset,
             CommandDispatchOutcome.ConfirmationEvidence terminalConfirmation,
             CommandDispatchOutcome.ReviewEvidence decisionEvidence,
-            CommandDispatchOutcome.OperatorAction appliedOperatorAction) {
+            CommandDispatchOutcome.OperatorAction appliedOperatorAction,
+            List<ProcessedAction> processedActions) {
         public Decision {
             Objects.requireNonNull(status, "status");
             Objects.requireNonNull(decidedAt, "decidedAt");
+            processedActions = List.copyOf(
+                    Objects.requireNonNull(processedActions, "processedActions"));
             if (totalDispatchAttempts < 0) {
                 throw new IllegalArgumentException("totalDispatchAttempts must not be negative");
             }
@@ -571,6 +654,11 @@ public final class EngineCommandPolicy {
             if (automaticAttemptsInBudget > totalDispatchAttempts) {
                 throw new IllegalArgumentException(
                         "automaticAttemptsInBudget cannot exceed lifetime attempts");
+            }
+            if (status == EngineCommandStatus.DISPATCHING
+                    && (totalDispatchAttempts == 0 || automaticAttemptsInBudget == 0)) {
+                throw new IllegalArgumentException(
+                        "Dispatching decisions must include their current dispatch attempt");
             }
             if (budgetEpoch < 0) {
                 throw new IllegalArgumentException("budgetEpoch must not be negative");
@@ -591,13 +679,177 @@ public final class EngineCommandPolicy {
                 throw new IllegalArgumentException(
                         "Confirmed decisions must retain exactly one terminal confirmation");
             }
-            if (status == EngineCommandStatus.CANCELLED && appliedOperatorAction == null) {
+            if (processedActions.size() > MAX_PROCESSED_ACTION_HISTORY) {
                 throw new IllegalArgumentException(
-                        "Cancelled decisions must retain their operator action");
+                        "Processed operator action history exceeds its bounded capacity");
+            }
+            HashSet<String> actionIds = new HashSet<>();
+            int expectedSequence = 1;
+            for (ProcessedAction processed : processedActions) {
+                if (!actionIds.add(processed.action().actionId())) {
+                    throw new IllegalArgumentException(
+                            "Processed operator action history contains a duplicate action ID");
+                }
+                if (processed.sequence() != expectedSequence++) {
+                    throw new IllegalArgumentException(
+                            "Processed operator action history sequence must be contiguous");
+                }
+            }
+            if (appliedOperatorAction != null) {
+                if (processedActions.isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "Applied operator action must be retained in processed history");
+                }
+                ProcessedAction applied = new ProcessedAction(
+                        processedActions.size(), appliedOperatorAction, decisionEvidence);
+                if (!processedActions.get(processedActions.size() - 1).equals(applied)) {
+                    throw new IllegalArgumentException(
+                            "Applied operator action must be the last exact history entry");
+                }
+                validateAppliedAction(status, automaticBudgetReset,
+                        automaticAttemptsInBudget, budgetEpoch, applied);
+            } else if (automaticBudgetReset) {
+                throw new IllegalArgumentException(
+                        "An automatic budget reset requires its applied retry override action");
+            }
+            long cancellationCount = processedActions.stream()
+                    .filter(processed -> processed.action().actionType()
+                            == CommandDispatchOutcome.ActionType.CANCEL)
+                    .count();
+            if (cancellationCount > 1) {
+                throw new IllegalArgumentException(
+                        "Processed history may contain only one cancellation action");
+            }
+            if (cancellationCount == 1 && status != EngineCommandStatus.CANCELLED) {
+                throw new IllegalArgumentException(
+                        "A processed cancellation action requires terminal CANCELLED status");
+            }
+            if (status == EngineCommandStatus.CANCELLED
+                    && (appliedOperatorAction == null
+                    || appliedOperatorAction.actionType()
+                    != CommandDispatchOutcome.ActionType.CANCEL)) {
+                throw new IllegalArgumentException(
+                        "Cancelled decisions must retain their applied CANCEL action");
+            }
+            validateDecisionEvidence(status, decisionEvidence, appliedOperatorAction);
+            if (status == EngineCommandStatus.CONFIRMED
+                    && (decisionEvidence != null || appliedOperatorAction != null)) {
+                throw new IllegalArgumentException(
+                        "Confirmed decisions may only carry terminal confirmation provenance");
+            }
+            if ((status == EngineCommandStatus.CONFIRMED
+                    || status == EngineCommandStatus.CANCELLED)
+                    && (errorCode != null || safeSummary != null)) {
+                throw new IllegalArgumentException(
+                        "Terminal confirmed or cancelled decisions cannot carry diagnostics");
+            }
+            if (status == EngineCommandStatus.MANUAL_REVIEW
+                    && decisionEvidence == null && appliedOperatorAction == null) {
+                throw new IllegalArgumentException(
+                        "Manual review decisions require review or operator provenance");
             }
             if (safeSummary != null && safeSummary.length() > MAX_SAFE_SUMMARY_LENGTH) {
                 throw new IllegalArgumentException("Safe summary exceeds its storage bound");
             }
+        }
+
+        /** Compatibility constructor for callers without historical actions yet. */
+        public Decision(
+                EngineCommandStatus status,
+                OffsetDateTime decidedAt,
+                OffsetDateTime nextAttemptAt,
+                String errorCode,
+                String safeSummary,
+                long totalDispatchAttempts,
+                int automaticAttemptsInBudget,
+                long budgetEpoch,
+                boolean automaticBudgetReset,
+                CommandDispatchOutcome.ConfirmationEvidence terminalConfirmation,
+                CommandDispatchOutcome.ReviewEvidence decisionEvidence,
+                CommandDispatchOutcome.OperatorAction appliedOperatorAction) {
+            this(status, decidedAt, nextAttemptAt, errorCode, safeSummary,
+                    totalDispatchAttempts, automaticAttemptsInBudget, budgetEpoch,
+                    automaticBudgetReset, terminalConfirmation, decisionEvidence,
+                    appliedOperatorAction, appliedOperatorAction == null
+                            ? List.of()
+                            : List.of(new ProcessedAction(
+                                    1, appliedOperatorAction, decisionEvidence)));
+        }
+    }
+
+    private static void validateAppliedAction(
+            EngineCommandStatus status, boolean automaticBudgetReset,
+            int automaticAttemptsInBudget, long budgetEpoch, ProcessedAction applied) {
+        CommandDispatchOutcome.OperatorAction action = applied.action();
+        EngineCommandStatus requiredStatus = switch (action.actionType()) {
+            case MANUAL_REVIEW -> EngineCommandStatus.MANUAL_REVIEW;
+            case RECONCILE -> EngineCommandStatus.AWAITING_CONFIRMATION;
+            case RETRY_OVERRIDE -> EngineCommandStatus.RETRYABLE;
+            case CANCEL -> EngineCommandStatus.CANCELLED;
+        };
+        if (status != requiredStatus) {
+            throw new IllegalArgumentException(
+                    "Decision status does not match its applied operator action type");
+        }
+        if (action.actionType() == CommandDispatchOutcome.ActionType.RETRY_OVERRIDE) {
+            if (automaticBudgetReset != action.overrideAutomaticAttemptCap()) {
+                throw new IllegalArgumentException(
+                        "Retry override flag must match the automatic budget reset marker");
+            }
+            if (automaticBudgetReset && (automaticAttemptsInBudget != 0 || budgetEpoch == 0)) {
+                throw new IllegalArgumentException(
+                        "Budget reset requires zero automatic attempts and a nonzero epoch");
+            }
+        } else if (automaticBudgetReset || action.overrideAutomaticAttemptCap()) {
+            throw new IllegalArgumentException(
+                    "Only an applied retry override may reset the automatic budget");
+        }
+    }
+
+    private static void validateDecisionEvidence(
+            EngineCommandStatus status,
+            CommandDispatchOutcome.ReviewEvidence evidence,
+            CommandDispatchOutcome.OperatorAction action) {
+        if (evidence == null) {
+            return;
+        }
+        if (action != null) {
+            if (action.actionType() != CommandDispatchOutcome.ActionType.RETRY_OVERRIDE
+                    && action.actionType() != CommandDispatchOutcome.ActionType.CANCEL) {
+                throw new IllegalArgumentException(
+                        "Applied action type cannot carry decision review evidence");
+            }
+            requireDefinitiveOperatorAbsence(evidence);
+            return;
+        }
+        if (evidence.source() != CommandDispatchOutcome.ReviewSource.RECONCILIATION) {
+            throw new IllegalArgumentException(
+                    "Unapplied decision evidence must come from reconciliation");
+        }
+        boolean allowed = evidence.finding() == DEFINITIVE_ABSENCE
+                ? status == EngineCommandStatus.RETRYABLE || status == EngineCommandStatus.FAILED
+                : evidence.finding() == INCONCLUSIVE
+                && status == EngineCommandStatus.MANUAL_REVIEW;
+        if (!allowed) {
+            throw new IllegalArgumentException(
+                    "Decision status does not match its reconciliation evidence");
+        }
+    }
+
+    private static void requireDefinitiveOperatorAbsence(
+            CommandDispatchOutcome.ReviewEvidence evidence) {
+        if (evidence == null || evidence.finding() != DEFINITIVE_ABSENCE
+                || evidence.source() != CommandDispatchOutcome.ReviewSource.OPERATOR_REVIEW) {
+            throw new IllegalArgumentException(
+                    "Action history requires definitive operator-reviewed absence evidence");
+        }
+    }
+
+    private static void sameProcessedBinding(
+            String expected, String actual, String field) {
+        if (!expected.equals(actual)) {
+            throw new IllegalArgumentException(
+                    "Processed action review " + field + " mismatch");
         }
     }
 }

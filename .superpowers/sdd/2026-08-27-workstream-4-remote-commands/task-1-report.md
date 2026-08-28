@@ -265,3 +265,70 @@ the Oracle result is an environment limitation rather than policy-model verifica
 
 Result: all six reactor projects succeeded (root, core, embedded, remote, REST, and starter).
 `git diff --check` also completed cleanly.
+
+## Durable-state validation addendum
+
+The follow-up commit named `fix: validate durable command state` closes historical operator replay
+and forged-rehydration gaps without changing repositories, dispatchers, gateways, migrations,
+external APIs, or the workstream ledger.
+
+### Normalized processed-action history
+
+Every committed `Decision` now retains an immutable, ordered `List<ProcessedAction>`. Each entry is
+a persistence-ready normalized record containing:
+
+- a contiguous one-based sequence;
+- the complete typed `OperatorAction` (tenant, operation, command, command type, expected target,
+  action kind, action ID, audit reference, action time, and override flag);
+- optional typed `ReviewEvidence`, permitted only for reviewed retry/cancellation actions and bound
+  to the same command identity.
+
+The ledger is append-only and capped at 64 entries for the command lifetime. New operator actions
+fail closed when capacity is reached; the policy never evicts an old action and therefore never
+loses replay protection. Sequence gaps, duplicate action IDs, duplicate cancellation, unsafe
+review/action combinations are rejected, and input lists are defensively copied. This gives Task 2
+explicit rows and ordering rather than arbitrary JSON payloads.
+
+Before any operator transition, policy scans the full ledger. An exact action/evidence match
+returns the current committed `Decision` unchanged, including after intervening actions, terminal
+transitions, or persistence reconstruction. Reusing any historical action ID with a changed kind,
+binding, audit reference, time, override flag, or evidence fails closed. Cancellation remains
+irreversibly terminal; its exact replay survives preceding actions and reload, while no later new
+action is accepted.
+
+### Fail-closed rehydration invariants
+
+`Decision` validates structural provenance, and `CommandState` validates every retained record
+against its command identity and command-specific terminal state. In particular:
+
+- `CONFIRMED` requires exact terminal confirmation and no competing action/review provenance;
+- `CANCELLED` requires the one applied `CANCEL` action as the last exact history row;
+- an applied action kind must match its resulting status;
+- a budget reset requires an applied audited `RETRY_OVERRIDE`, definitive operator-reviewed
+  absence, zero automatic attempts in the new budget, and a nonzero incremented epoch;
+- reconciliation evidence is limited to retry/failed definitive absence or manual-review
+  inconclusive outcomes;
+- manual review requires review or operator provenance;
+- dispatching requires a started lifetime and automatic-budget attempt;
+- lifetime/budget/epoch counters, retry timestamps, terminal diagnostics, action history, and
+  terminal/nonterminal evidence combinations are checked during construction.
+
+### Round-three TDD evidence
+
+Tests were written before the history and invariant implementation. The first RED compile named
+the missing `ProcessedAction`, bounded history, expanded `Decision`, and replay API. Subsequent RED
+runs isolated missing sequence validation, bare manual-review provenance, terminal diagnostic
+rejection, action/review binding, dispatch counters, and duplicate cancellation.
+
+`./mvnw -pl case-management-core -Dtest=EngineCommandDurableStateTest,EngineCommandPolicyTest test`
+
+Result: 1,370 tests passed, 0 failures, 0 errors, 0 skipped. This includes the prior complete
+transition/equality matrix plus 85 durable-state tests covering A-to-B-to-A historical replay,
+all action-kind repackaging, terminal cancellation replay, bounded capacity, the full
+status-by-provenance family matrix, forged persisted records, and fresh-record action and
+confirmation roundtrips.
+
+`./mvnw -pl case-management-core,case-management-engine-remote,case-management-spring-boot-starter -am -DskipTests package`
+
+Result: all six affected/reactor-required modules succeeded. Final `git diff --check` completed
+cleanly, and the changed paths remain limited to the pure policy, its tests, and this report.

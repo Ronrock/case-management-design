@@ -378,7 +378,9 @@ class EngineCommandPolicyTest {
         var exhaustedReview = decision(EngineCommandStatus.MANUAL_REVIEW, PRIOR, null,
                 "prior.review", "Prior review", 10,
                 EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS, 3,
-                false, null, null, null);
+                false, null,
+                review(type, INCONCLUSIVE,
+                        CommandDispatchOutcome.ReviewSource.RECONCILIATION), null);
         var absence = review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW);
         var override = operator(type, RETRY_OVERRIDE,
                 "action:override", true, NOW_OFFSET);
@@ -396,9 +398,11 @@ class EngineCommandPolicyTest {
 
         var nextDispatch = POLICY.transition(new EngineCommandPolicy.CommandState(
                 command(type), overridden), CommandDispatchOutcome.dispatchRequested());
-        assertThat(nextDispatch).isEqualTo(decision(
+        assertThat(nextDispatch).isEqualTo(new EngineCommandPolicy.Decision(
                 EngineCommandStatus.DISPATCHING, NOW_OFFSET, null, null, null,
-                11, 1, 4, false, null, null, null));
+                11, 1, 4, false, null, null, null,
+                java.util.List.of(new EngineCommandPolicy.ProcessedAction(
+                        1, override, absence))));
     }
 
     @Test
@@ -415,7 +419,9 @@ class EngineCommandPolicyTest {
         var epochMax = decision(EngineCommandStatus.MANUAL_REVIEW, PRIOR, null,
                 "prior.review", "Prior review", 20,
                 EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS, Long.MAX_VALUE,
-                false, null, null, null);
+                false, null,
+                review(type, INCONCLUSIVE,
+                        CommandDispatchOutcome.ReviewSource.RECONCILIATION), null);
         var absence = review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW);
         var override = operator(type, RETRY_OVERRIDE,
                 "action:epoch-overflow", true, NOW_OFFSET);
@@ -647,7 +653,9 @@ class EngineCommandPolicyTest {
                     false, null, null, null);
             case MANUAL_REVIEW -> decision(status, PRIOR, null,
                     "prior.review", "Prior review", TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
-                    false, null, null, null);
+                    false, null,
+                    review(type, INCONCLUSIVE,
+                            CommandDispatchOutcome.ReviewSource.RECONCILIATION), null);
             case CANCELLED -> decision(status, PRIOR, null,
                     null, null, TOTAL, BUDGET_ATTEMPTS, BUDGET_EPOCH,
                     false, null, null,
