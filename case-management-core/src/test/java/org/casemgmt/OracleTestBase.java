@@ -218,13 +218,14 @@ public abstract class OracleTestBase {
     // without needing to fight referential-integrity ordering rules that TRUNCATE enforces
     // more strictly across a whole batch.
     //
-    // Runs all 26 deletes over ONE borrowed connection, as one JDBC batch, rather than one
+    // Runs all 27 deletes over ONE borrowed connection, as one JDBC batch, rather than one
     // connection per table: independent of pooling, this is strictly less load per call (one
     // borrow/return instead of 26) and faster, and it is what actually eliminates the bulk of
     // the connection churn this method used to cause on every single test method across every
     // extending class.
     private static void deleteAllCaseManagementData() {
         List<String> tablesChildToParent = List.of(
+                "CM_APPLIED_ENGINE_OBSERVATION",
                 "CM_CASE_DEF_BINDING",
                 "CM_CASE_DEF_RELEASE",
                 "CM_ENGINE_POLL_CHECKPOINT",

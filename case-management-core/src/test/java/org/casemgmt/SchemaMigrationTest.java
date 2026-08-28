@@ -26,8 +26,9 @@ class SchemaMigrationTest extends OracleTestBase {
                 .query(Integer.class).single();
         // 25 from db-design.sql + CM_ENGINE_COMMAND, CM_EVENT_APPEND_LOCK,
         // CM_CASE_DEF_RELEASE, CM_CASE_DEF_BINDING, and CM_ENGINE_POLL_CHECKPOINT from changesets.
+        // CM_APPLIED_ENGINE_OBSERVATION is the WS3 lifecycle-effect claim ledger.
         // DATABASECHANGELOG* do not match the CM_ prefix.
-        assertThat(tables).isEqualTo(30);
+        assertThat(tables).isEqualTo(31);
     }
 
     @Test

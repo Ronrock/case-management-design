@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+  <!-- One durable row per tenant authority and deterministic engine fact. This is additive so
+       a rolling application deployment can introduce lifecycle effects without rewriting history. -->
+  <changeSet id="cm-applied-engine-observation" author="casemgmt">
+    <createTable tableName="CM_APPLIED_ENGINE_OBSERVATION">
+      <column name="OBSERVATION_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
+      <column name="TENANT_ID_" type="VARCHAR2(64)"/>
+      <column name="FINGERPRINT_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="STATUS_" type="VARCHAR2(16)"><constraints nullable="false"/></column>
+      <column name="SOURCE_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
+      <column name="CASE_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
+      <column name="PROCESS_INSTANCE_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
+      <column name="ENTITY_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
+      <column name="ENTITY_REVISION_" type="NUMBER(19)"/>
+      <column name="EVENT_TYPE_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="ENGINE_OCCURRED_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="CLAIMED_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="APPLIED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="FAILED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="FAILURE_DETAIL_" type="VARCHAR2(2000)"/>
+    </createTable>
+
+    <sql>
+      ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS
+        CHECK (STATUS_ IN ('CLAIMED','APPLIED','FAILED'))
+    </sql>
+    <sql>
+      ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS_TS
+        CHECK ((STATUS_ != 'APPLIED' OR APPLIED_AT_ IS NOT NULL)
+           AND (STATUS_ != 'FAILED' OR FAILED_AT_ IS NOT NULL))
+    </sql>
+
+    <!-- Oracle's ordinary (TENANT_ID_, FINGERPRINT_) unique index accepts multiple NULL
+         tenants. The first expression is always 0 or 1, so tenant-less rows are indexed and
+         cannot collide with a named tenant; unlike a sentinel it cannot alias a legal tenant. -->
+    <sql>
+      CREATE UNIQUE INDEX UQ_CM_AEO_AUTH_FINGERPRINT ON CM_APPLIED_ENGINE_OBSERVATION (
+        CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END,
+        TENANT_ID_,
+        FINGERPRINT_)
+    </sql>
+    <createIndex tableName="CM_APPLIED_ENGINE_OBSERVATION" indexName="IX_CM_AEO_STATUS">
+      <column name="STATUS_"/>
+      <column name="CLAIMED_AT_"/>
+    </createIndex>
+  </changeSet>
+</databaseChangeLog>
