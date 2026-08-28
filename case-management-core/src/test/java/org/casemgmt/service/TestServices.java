@@ -32,7 +32,8 @@ public final class TestServices {
         var applier = new TransitionApplier(new PlanItemRepository(jdbc), new CaseTaskRepository(jdbc),
                 new LinkedProcessRepository(jdbc), new MilestoneRepository(jdbc), gateway,
                 publisher);
-        return new CaseService(new CaseRepository(jdbc), new CaseDefinitionRepository(dataSource),
+        return new CaseService(new CaseRepository(dataSource),
+                new CaseDefinitionRepository(dataSource),
                 new PlanItemRepository(jdbc), new MilestoneRepository(jdbc),
                 new ParticipantRepository(jdbc), evaluator, new PlanModelInstantiator(),
                 new StageCompletion(), applier, publisher, "eng-test");

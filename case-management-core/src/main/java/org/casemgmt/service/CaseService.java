@@ -318,6 +318,11 @@ public class CaseService {
 
     @Transactional
     public CaseInstance cancel(String caseId, long expectedVersion, String reason, Actor actor) {
+        // Serialize the API precondition and engine command with lifecycle observations. The
+        // synchronous embedded handler acquires this same row lock first and participates in
+        // this transaction, so no independently committed termination can be mistaken for this
+        // request's callback between the version check and engine cancellation.
+        cases.lockForObservation(caseId);
         CaseInstance current = cases.require(caseId);
         requireTransitionAllowed(current, CaseState.CANCELLED, "cancel");
         if (current.version() != expectedVersion) {

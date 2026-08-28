@@ -7,6 +7,8 @@ import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.repo.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
@@ -21,6 +23,7 @@ class CaseServiceTest extends OracleTestBase {
     private CaseService cases;
     private PlanItemRepository planItems;
     private RecordingGateway gateway;
+    private TransactionTemplate transactions;
     private final Actor alice = new Actor("alice", List.of("handlers"));
 
     // No manual DELETEs here: OracleTestBase already wipes every CM_ table before each test
@@ -34,6 +37,7 @@ class CaseServiceTest extends OracleTestBase {
         gateway = new RecordingGateway();
         cases = TestServices.caseService(dataSource(), gateway);
         planItems = new PlanItemRepository(jdbc());
+        transactions = new TransactionTemplate(new DataSourceTransactionManager(dataSource()));
     }
 
     @Test
@@ -220,7 +224,8 @@ class CaseServiceTest extends OracleTestBase {
         CaseInstance created = cases.create("widget-review", "t1", null, "T",
                 CasePriority.MEDIUM, Map.of(), alice);
 
-        CaseInstance cancelled = cases.cancel(created.id(), created.version(), "duplicate", alice);
+        CaseInstance cancelled = transactions.execute(status ->
+                cases.cancel(created.id(), created.version(), "duplicate", alice));
 
         assertThat(cancelled.state()).isEqualTo(CaseState.CANCELLED);
         assertThat(cancelled.closedAt()).isNotNull();
@@ -240,7 +245,8 @@ class CaseServiceTest extends OracleTestBase {
         CaseInstance created = cases.create("widget-review", "t1", null, "T",
                 CasePriority.MEDIUM, Map.of(), alice);
 
-        cases.cancel(created.id(), created.version(), "duplicate", alice);
+        transactions.executeWithoutResult(status ->
+                cases.cancel(created.id(), created.version(), "duplicate", alice));
 
         List<PlanItem> items = planItems.findByCase(created.id());
         assertThat(items).allMatch(i -> i.state().isEnded());
