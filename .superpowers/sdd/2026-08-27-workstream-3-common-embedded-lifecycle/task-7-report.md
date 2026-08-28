@@ -312,3 +312,39 @@ report intentionally does not claim a live database result.
   ArchUnit rule and all four negative mutation fixtures pass.
 - Remote reuse parity: all four JSON record contracts pass; complete database-outcome parity is
   executable in the Oracle integration fixture and is runtime-blocked only by Docker Desktop.
+
+## Final review fix: restartable observation-ledger migration
+
+The initial `CM_APPLIED_ENGINE_OBSERVATION` migration is now safe to resume after Oracle has
+auto-committed any DDL prefix. Table creation, each check constraint, the null-tenant authority
+index, and the status index are five ordered, one-change changeSets. Each uses an object-specific
+precondition, `MARK_RAN` only when that exact object already exists, and `HALT` on precondition
+errors. Constraint guards check the current owner, table, name, and check-constraint type.
+
+`AppliedObservationChangelogStaticValidationTest` now parses the full master changelog and proves
+that the initial five steps and every later observation schema mutation are granular and guarded.
+`AppliedObservationMigrationRestartIntegrationTest` creates an isolated Oracle schema, applies the
+real master only up to the observation include, then rehearses two auto-committed partial states:
+the table alone, and the table with one constraint plus the function-based unique index. It applies
+and reapplies the unchanged master and asserts every final ledger column, named constraint, index,
+ordered index column, and all 18 changelog rows.
+
+The parity fixture now orders applied observations by the same null-safe tenant authority and
+fingerprint tuple as the uniqueness rule, and scopes webhook deliveries by joining their event to
+`CM_EVENT.SUBJECT_ = caseId`. The stale numeric reset-count comment in `OracleTestBase` now describes
+the dynamically sized table list.
+
+### Final-fix verification
+
+- Initial static test was red against the bundled five-DDL changeSet (expected one change, found
+  five), then passed after the split: 3 tests, zero failures/errors.
+- Focused non-Oracle observation contracts: 54 tests passed, zero failures/errors.
+- Core reactor package/test compilation:
+  `./mvnw -pl case-management-core -am -DskipTests package` passed and built both main and test jars.
+- `git diff --check` passed.
+- The focused Oracle restart test compiled, but its execution was blocked before any assertion.
+  The sandboxed attempt could not access either Unix socket; the required escalated retry reached
+  Docker Desktop, but both Testcontainers strategies received HTTP 503 (`Docker Desktop is unable
+  to start`). No Oracle runtime result is claimed from this host.
+
+Commit: `fix: make observation migration restartable`.

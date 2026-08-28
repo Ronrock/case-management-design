@@ -44,15 +44,28 @@ class AppliedObservationChangelogStaticValidationTest {
     }
 
     @Test
-    void everyPostCreationSchemaMutationIsGranularAndRestartGuarded() throws Exception {
+    void everyObservationSchemaMutationIncludingInitialCreationIsGranularAndRestartGuarded()
+            throws Exception {
         var lifecycle = parsedChanges().stream()
-                .dropWhile(change -> !"cm-engine-observation-hardening-kind".equals(change.getId()))
+                .dropWhile(change -> !"cm-applied-engine-observation".equals(change.getId()))
                 .toList();
 
         assertThat(lifecycle).isNotEmpty();
         assertThat(lifecycle).allSatisfy(change -> {
             assertThat(change.getChanges()).hasSize(1);
             assertThat(change.getPreconditions()).isNotNull();
+        });
+        var initialCreation = lifecycle.stream().limit(5).toList();
+        assertThat(initialCreation).extracting(change -> change.getId())
+                .containsExactly(
+                        "cm-applied-engine-observation",
+                        "cm-applied-engine-observation-status-constraint",
+                        "cm-applied-engine-observation-status-timestamps-constraint",
+                        "cm-applied-engine-observation-authority-index",
+                        "cm-applied-engine-observation-status-index");
+        assertThat(initialCreation).allSatisfy(change -> {
+            assertThat(change.getPreconditions().getOnFail().toString()).isEqualTo("MARK_RAN");
+            assertThat(change.getPreconditions().getOnError().toString()).isEqualTo("HALT");
         });
     }
 
@@ -83,7 +96,11 @@ class AppliedObservationChangelogStaticValidationTest {
                     .orElseThrow();
             assertThat(table.getColumns()).extracting(column -> column.getName())
                     .contains("CLAIM_TOKEN_");
-            String sql = appliedObservation.getChanges().stream()
+            var authorityIndex = changes.stream()
+                    .filter(change -> "cm-applied-engine-observation-authority-index"
+                            .equals(change.getId()))
+                    .findFirst().orElseThrow();
+            String sql = authorityIndex.getChanges().stream()
                     .filter(RawSQLChange.class::isInstance)
                     .map(RawSQLChange.class::cast)
                     .map(RawSQLChange::getSql)

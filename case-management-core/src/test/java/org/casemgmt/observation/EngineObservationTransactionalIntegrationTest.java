@@ -338,10 +338,11 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                 tableRows("CM_LINKED_PROCESS", "CASE_ID_", CASE_ID, "ID_"),
                 tableRows("CM_SLA_RECORD", "CASE_ID_", CASE_ID, "ID_"),
                 tableRows("CM_APPLIED_ENGINE_OBSERVATION", "CASE_ID_", CASE_ID,
-                        "OBSERVATION_ID_"),
+                        "CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END, "
+                                + "TENANT_ID_, FINGERPRINT_"),
                 tableRows("CM_AUDIT_LOG", "CASE_ID_", CASE_ID, "ID_"),
                 tableRows("CM_EVENT", "SUBJECT_", CASE_ID, "SEQ_"),
-                tableRows("CM_WEBHOOK_DELIVERY", "WEBHOOK_ID_", "webhook-1", "EVENT_SEQ_"));
+                deliveryRowsForCase());
     }
 
     private static DatabaseState canonicalCommittedOutcome(DatabaseState state) {
@@ -429,6 +430,18 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
         return jdbc().sql("SELECT * FROM " + table + " WHERE " + filterColumn
                         + " = :filterValue ORDER BY " + orderBy)
                 .param("filterValue", filterValue)
+                .query((rs, row) -> completeRow(rs))
+                .list();
+    }
+
+    private List<Map<String, Object>> deliveryRowsForCase() {
+        return jdbc().sql("""
+                SELECT delivery.*
+                FROM CM_WEBHOOK_DELIVERY delivery
+                JOIN CM_EVENT event ON event.SEQ_ = delivery.EVENT_SEQ_
+                WHERE event.SUBJECT_ = :caseId
+                ORDER BY delivery.EVENT_SEQ_, delivery.ID_""")
+                .param("caseId", CASE_ID)
                 .query((rs, row) -> completeRow(rs))
                 .list();
     }

@@ -7,6 +7,9 @@
   <!-- One durable row per tenant authority and deterministic engine fact. This is additive so
        a rolling application deployment can introduce lifecycle effects without rewriting history. -->
   <changeSet id="cm-applied-engine-observation" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><tableExists tableName="CM_APPLIED_ENGINE_OBSERVATION"/></not>
+    </preConditions>
     <createTable tableName="CM_APPLIED_ENGINE_OBSERVATION">
       <column name="OBSERVATION_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
       <column name="TENANT_ID_" type="VARCHAR2(64)"/>
@@ -25,26 +28,58 @@
       <column name="FAILED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
       <column name="FAILURE_DETAIL_" type="VARCHAR2(2000)"/>
     </createTable>
+  </changeSet>
 
+  <changeSet id="cm-applied-engine-observation-status-constraint" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+          AND TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
+          AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS'
+          AND CONSTRAINT_TYPE = 'C'</sqlCheck>
+    </preConditions>
     <sql>
       ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS
         CHECK (STATUS_ IN ('CLAIMED','APPLIED','FAILED'))
     </sql>
+  </changeSet>
+
+  <changeSet id="cm-applied-engine-observation-status-timestamps-constraint" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+          AND TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
+          AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS_TS'
+          AND CONSTRAINT_TYPE = 'C'</sqlCheck>
+    </preConditions>
     <sql>
       ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS_TS
         CHECK ((STATUS_ != 'APPLIED' OR APPLIED_AT_ IS NOT NULL)
            AND (STATUS_ != 'FAILED' OR FAILED_AT_ IS NOT NULL))
     </sql>
+  </changeSet>
 
-    <!-- Oracle's ordinary (TENANT_ID_, FINGERPRINT_) unique index accepts multiple NULL
-         tenants. The first expression is always 0 or 1, so tenant-less rows are indexed and
-         cannot collide with a named tenant; unlike a sentinel it cannot alias a legal tenant. -->
+  <!-- Oracle's ordinary (TENANT_ID_, FINGERPRINT_) unique index accepts multiple NULL
+       tenants. The first expression is always 0 or 1, so tenant-less rows are indexed and
+       cannot collide with a named tenant; unlike a sentinel it cannot alias a legal tenant. -->
+  <changeSet id="cm-applied-engine-observation-authority-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_APPLIED_ENGINE_OBSERVATION"
+                        indexName="UQ_CM_AEO_AUTH_FINGERPRINT"/></not>
+    </preConditions>
     <sql>
       CREATE UNIQUE INDEX UQ_CM_AEO_AUTH_FINGERPRINT ON CM_APPLIED_ENGINE_OBSERVATION (
         CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END,
         TENANT_ID_,
         FINGERPRINT_)
     </sql>
+  </changeSet>
+
+  <changeSet id="cm-applied-engine-observation-status-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_APPLIED_ENGINE_OBSERVATION"
+                        indexName="IX_CM_AEO_STATUS"/></not>
+    </preConditions>
     <createIndex tableName="CM_APPLIED_ENGINE_OBSERVATION" indexName="IX_CM_AEO_STATUS">
       <column name="STATUS_"/>
       <column name="CLAIMED_AT_"/>
