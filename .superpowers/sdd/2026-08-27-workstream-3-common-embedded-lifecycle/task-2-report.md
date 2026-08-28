@@ -86,3 +86,69 @@ not available.
 Runtime Oracle/Liquibase verification remains pending a Docker-capable environment. The local
 offline Liquibase guard and complete package compilation provide non-Docker evidence, but cannot
 replace executing the Oracle function-based index and concurrent race test in CI.
+
+---
+
+## Fix round 1/5 — ownership capability and caller transactions
+
+### RED evidence
+
+Tests were extended before the fix with an opaque-claim API proof, token-column migration
+assertion, same-observation-ID stale-owner case, and explicit Spring transaction contention and
+rollback cases. The non-Docker RED command was:
+
+```text
+./mvnw -pl case-management-core -Dtest=AppliedObservationClaimApiTest,AppliedObservationChangelogStaticValidationTest test
+```
+
+It failed exactly as intended: `AppliedObservationClaimApiTest` found the public record
+constructor `Claim(String, String, String)`, and the static Liquibase test could not find
+`CLAIM_TOKEN_` in `CM_APPLIED_ENGINE_OBSERVATION`.
+
+### Changes
+
+- Replaced the public `Claim` record with a final nested class whose only constructor is private.
+  Coordinates remain readable for diagnostics, while the ownership token has no public accessor
+  and cannot be minted by callers.
+- Every insert and `FAILED` reclaim generates a new 32-byte `SecureRandom` token encoded as a
+  43-character URL-safe Base64 value. The token is bounded and format-validated both when
+  generated and when an internal capability is validated.
+- Added nullable-free `CLAIM_TOKEN_ VARCHAR2(43)` to the still-unapplied, additive changeset.
+  `markApplied` and `markFailed` now require it in their guarded update predicates.
+- The same envelope ID can now be reclaimed safely: its new claim capability differs from the
+  old one, so the stale capability affects zero rows while the new owner can finalise.
+
+### Tests and compile results
+
+- `AppliedObservationClaimApiTest.claimHasNoPublicConstructionPath` passes.
+- `AppliedObservationChangelogStaticValidationTest` passes, including `CLAIM_TOKEN_` presence,
+  master ordering, and null-tenant unique-index shape.
+- `AppliedObservationRepositoryTest.sameObservationIdReclaimInvalidatesTheStaleOwnershipToken`
+  proves stale/new ownership separation; `contenderWaitsForTheOwningCallerTransactionThenReturnsDuplicate`
+  holds the first `TransactionTemplate` transaction open with latches while a contender blocks;
+  `rollbackOfOwningCallerTransactionLetsTheContenderClaimTheFact` proves rollback releases the
+  fact to the contender. All waits have bounded timeouts and no sleep.
+- The non-Docker GREEN command above passes: 2 tests, 0 failures/errors.
+- `./mvnw -pl case-management-core -DskipTests package` passes, including complete production
+  and test compilation plus jar/test-jar creation.
+- The requested Oracle command was retried after the fix. It still compiles both source sets, but
+  Testcontainers stops before migration/test execution because `/var/run/docker.sock` is absent.
+
+### Self-review
+
+- The token is not a tenant sentinel or public coordinate: it is freshly random on every owning
+  insert/reclaim and is required by both final-state updates.
+- `Claim` has no public constructor; the public result can only return a repository-created
+  capability.
+- The transaction tests use Spring's `DataSourceTransactionManager` through `TransactionTemplate`,
+  hold/release ownership with latches, and check both committed and rolled-back contention paths.
+- No `REQUIRES_NEW`, common handler, remote inbox, or Task 4 behavior was added.
+
+### Fix commit
+
+`fix: guard applied observation ownership`
+
+### Remaining concern
+
+Oracle execution of the function-based index, claim-token predicates, and held-transaction race
+remains pending Docker-capable CI; the unchanged environmental block is the missing Docker socket.

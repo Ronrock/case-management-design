@@ -2,16 +2,22 @@ package org.casemgmt.repo;
 
 import org.casemgmt.OracleTestBase;
 import org.casemgmt.observation.ProcessObservation;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -20,10 +26,19 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class AppliedObservationRepositoryTest extends OracleTestBase {
 
     private AppliedObservationRepository observations;
+    private AnnotationConfigApplicationContext transactionContext;
+    private TransactionTemplate transactions;
 
     @BeforeEach
     void setUp() {
         observations = new AppliedObservationRepository(jdbc());
+    }
+
+    @AfterEach
+    void closeTransactionContext() {
+        if (transactionContext != null) {
+            transactionContext.close();
+        }
     }
 
     @Test
@@ -97,12 +112,12 @@ class AppliedObservationRepositoryTest extends OracleTestBase {
     }
 
     @Test
-    void failedObservationCanBeAtomicallyReclaimedByARedelivery() {
+    void sameObservationIdReclaimInvalidatesTheStaleOwnershipToken() {
         ProcessObservation original = observation("observation-1", null);
         AppliedObservationRepository.ClaimResult first = observations.claim(original);
         observations.markFailed(first.claim().orElseThrow(), "projection unavailable");
 
-        ProcessObservation retry = observation("observation-2", null);
+        ProcessObservation retry = observation("observation-1", null);
         AppliedObservationRepository.ClaimResult reclaimed = observations.claim(retry);
 
         assertThat(reclaimed.outcome()).isEqualTo(AppliedObservationRepository.ClaimOutcome.RECLAIMED);
@@ -117,38 +132,118 @@ class AppliedObservationRepositoryTest extends OracleTestBase {
                         rs.getString("FAILURE_DETAIL_")))
                 .single();
         assertThat(stored.status()).isEqualTo("CLAIMED");
-        assertThat(stored.observationId()).isEqualTo("observation-2");
+        assertThat(stored.observationId()).isEqualTo("observation-1");
         assertThat(stored.failedAt()).isNotNull();
         assertThat(stored.failureDetail()).isEqualTo("projection unavailable");
         assertThatThrownBy(() -> observations.markApplied(first.claim().orElseThrow()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("no longer owns");
+        observations.markApplied(reclaimed.claim().orElseThrow());
     }
 
     @Test
-    void concurrentClaimsHaveExactlyOneOwner() throws Exception {
-        CountDownLatch start = new CountDownLatch(1);
+    void contenderWaitsForTheOwningCallerTransactionThenReturnsDuplicate() throws Exception {
+        TransactionTemplate transaction = transactions();
+        CountDownLatch ownerClaimed = new CountDownLatch(1);
+        CountDownLatch contenderStarting = new CountDownLatch(1);
+        CountDownLatch releaseOwner = new CountDownLatch(1);
         ProcessObservation first = observation("observation-1", "tenant-a");
         ProcessObservation second = observation("observation-2", "tenant-a");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<AppliedObservationRepository.ClaimResult> owner = pool.submit(() -> transaction.execute(
+                    status -> {
+                        AppliedObservationRepository.ClaimResult result =
+                                new AppliedObservationRepository(jdbc()).claim(first);
+                        ownerClaimed.countDown();
+                        await(releaseOwner, "owner transaction release");
+                        return result;
+                    }));
+            await(ownerClaimed, "owner claim");
+            Future<AppliedObservationRepository.ClaimResult> contender = pool.submit(() -> transaction.execute(
+                    status -> {
+                        contenderStarting.countDown();
+                        return new AppliedObservationRepository(jdbc()).claim(second);
+                    }));
+            await(contenderStarting, "contender start");
 
-        try (var pool = Executors.newFixedThreadPool(2)) {
-            var firstResult = pool.submit(() -> claimAfter(start, first));
-            var secondResult = pool.submit(() -> claimAfter(start, second));
-            start.countDown();
+            assertThatThrownBy(() -> contender.get(250, TimeUnit.MILLISECONDS))
+                    .isInstanceOf(TimeoutException.class);
+            releaseOwner.countDown();
 
-            List<AppliedObservationRepository.ClaimResult> results = List.of(
-                    firstResult.get(30, TimeUnit.SECONDS), secondResult.get(30, TimeUnit.SECONDS));
-            assertThat(results).filteredOn(AppliedObservationRepository.ClaimResult::ownsClaim).hasSize(1);
-            assertThat(results).extracting(AppliedObservationRepository.ClaimResult::outcome)
-                    .containsExactlyInAnyOrder(AppliedObservationRepository.ClaimOutcome.CLAIMED,
-                            AppliedObservationRepository.ClaimOutcome.DUPLICATE);
+            assertThat(owner.get(10, TimeUnit.SECONDS).outcome())
+                    .isEqualTo(AppliedObservationRepository.ClaimOutcome.CLAIMED);
+            assertThat(contender.get(10, TimeUnit.SECONDS).outcome())
+                    .isEqualTo(AppliedObservationRepository.ClaimOutcome.DUPLICATE);
+        } finally {
+            releaseOwner.countDown();
+            pool.shutdownNow();
         }
     }
 
-    private AppliedObservationRepository.ClaimResult claimAfter(
-            CountDownLatch start, ProcessObservation observation) throws InterruptedException {
-        start.await();
-        return new AppliedObservationRepository(jdbc()).claim(observation);
+    @Test
+    void rollbackOfOwningCallerTransactionLetsTheContenderClaimTheFact() throws Exception {
+        TransactionTemplate transaction = transactions();
+        CountDownLatch ownerClaimed = new CountDownLatch(1);
+        CountDownLatch contenderStarting = new CountDownLatch(1);
+        CountDownLatch releaseOwner = new CountDownLatch(1);
+        ProcessObservation first = observation("observation-1", "tenant-a");
+        ProcessObservation second = observation("observation-2", "tenant-a");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<AppliedObservationRepository.ClaimResult> owner = pool.submit(() -> transaction.execute(
+                    status -> {
+                        AppliedObservationRepository.ClaimResult result =
+                                new AppliedObservationRepository(jdbc()).claim(first);
+                        ownerClaimed.countDown();
+                        await(releaseOwner, "owner transaction rollback");
+                        status.setRollbackOnly();
+                        return result;
+                    }));
+            await(ownerClaimed, "owner claim");
+            Future<AppliedObservationRepository.ClaimResult> contender = pool.submit(() -> transaction.execute(
+                    status -> {
+                        contenderStarting.countDown();
+                        return new AppliedObservationRepository(jdbc()).claim(second);
+                    }));
+            await(contenderStarting, "contender start");
+
+            assertThatThrownBy(() -> contender.get(250, TimeUnit.MILLISECONDS))
+                    .isInstanceOf(TimeoutException.class);
+            releaseOwner.countDown();
+
+            assertThat(owner.get(10, TimeUnit.SECONDS).outcome())
+                    .isEqualTo(AppliedObservationRepository.ClaimOutcome.CLAIMED);
+            assertThat(contender.get(10, TimeUnit.SECONDS).outcome())
+                    .isEqualTo(AppliedObservationRepository.ClaimOutcome.CLAIMED);
+            assertThat(jdbc().sql("""
+                    SELECT COUNT(*) FROM CM_APPLIED_ENGINE_OBSERVATION
+                    WHERE FINGERPRINT_ = :fingerprint""")
+                    .param("fingerprint", second.fingerprint()).query(Integer.class).single()).isEqualTo(1);
+        } finally {
+            releaseOwner.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    private TransactionTemplate transactions() {
+        if (transactions == null) {
+            transactionContext = springContext();
+            transactions = new TransactionTemplate(
+                    transactionContext.getBean(PlatformTransactionManager.class));
+        }
+        return transactions;
+    }
+
+    private static void await(CountDownLatch latch, String description) {
+        try {
+            if (!latch.await(10, TimeUnit.SECONDS)) {
+                throw new AssertionError("Timed out waiting for " + description);
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while waiting for " + description, exception);
+        }
     }
 
     private static ProcessObservation observation(String observationId, String tenantId) {

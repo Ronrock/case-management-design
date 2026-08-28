@@ -4,6 +4,8 @@ import org.casemgmt.observation.EngineObservation;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
@@ -19,8 +21,26 @@ public final class AppliedObservationRepository {
 
     public enum Status { CLAIMED, APPLIED, FAILED }
 
-    /** Opaque coordinates required to finalise a claim that this caller owns. */
-    public record Claim(String observationId, String tenantId, String fingerprint) {
+    /** Opaque ownership capability; callers can retain it but cannot mint one. */
+    public static final class Claim {
+        private final String observationId;
+        private final String tenantId;
+        private final String fingerprint;
+        private final String ownershipToken;
+
+        private Claim(String observationId, String tenantId, String fingerprint,
+                      String ownershipToken) {
+            this.observationId = requiredBounded(observationId, "observationId", OBSERVATION_ID_MAX);
+            this.tenantId = nullableBounded(tenantId, "tenantId", TENANT_ID_MAX);
+            this.fingerprint = validFingerprint(fingerprint);
+            this.ownershipToken = validOwnershipToken(ownershipToken);
+        }
+
+        public String observationId() { return observationId; }
+
+        public String tenantId() { return tenantId; }
+
+        public String fingerprint() { return fingerprint; }
     }
 
     /** A duplicate deliberately has no {@link Claim}; it cannot finalise another caller's work. */
@@ -47,7 +67,10 @@ public final class AppliedObservationRepository {
     private static final int ENTITY_ID_MAX = 128;
     private static final int EVENT_TYPE_MAX = 64;
     private static final int FAILURE_DETAIL_MAX = 2000;
+    private static final int OWNERSHIP_TOKEN_LENGTH = 43;
     private static final Pattern SHA_256 = Pattern.compile("[0-9a-f]{64}");
+    private static final Pattern OWNERSHIP_TOKEN = Pattern.compile("[A-Za-z0-9_-]{43}");
+    private static final SecureRandom OWNERSHIP_TOKEN_RANDOM = new SecureRandom();
 
     private final JdbcClient jdbc;
 
@@ -61,7 +84,7 @@ public final class AppliedObservationRepository {
      */
     public ClaimResult claim(EngineObservation observation) {
         ObservationValues values = valuesOf(observation);
-        Claim claim = new Claim(values.observationId(), values.tenantId(), values.fingerprint());
+        Claim claim = newClaim(values);
         try {
             insert(values);
             return ClaimResult.claimed(ClaimOutcome.CLAIMED, claim);
@@ -80,11 +103,13 @@ public final class AppliedObservationRepository {
                 UPDATE CM_APPLIED_ENGINE_OBSERVATION
                 SET STATUS_ = 'APPLIED', APPLIED_AT_ = SYSTIMESTAMP
                 WHERE OBSERVATION_ID_ = :observationId AND FINGERPRINT_ = :fingerprint
+                  AND CLAIM_TOKEN_ = :claimToken
                   AND (TENANT_ID_ = :tenantId
                     OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
                   AND STATUS_ = 'CLAIMED'""")
                 .param("observationId", coordinates.observationId())
                 .param("fingerprint", coordinates.fingerprint())
+                .param("claimToken", coordinates.ownershipToken)
                 .param("tenantId", coordinates.tenantId())
                 .update();
         requireOwnedTransition(updated, coordinates, Status.APPLIED);
@@ -98,12 +123,14 @@ public final class AppliedObservationRepository {
                 UPDATE CM_APPLIED_ENGINE_OBSERVATION
                 SET STATUS_ = 'FAILED', FAILED_AT_ = SYSTIMESTAMP, FAILURE_DETAIL_ = :failureDetail
                 WHERE OBSERVATION_ID_ = :observationId AND FINGERPRINT_ = :fingerprint
+                  AND CLAIM_TOKEN_ = :claimToken
                   AND (TENANT_ID_ = :tenantId
                     OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
                   AND STATUS_ = 'CLAIMED'""")
                 .param("failureDetail", detail)
                 .param("observationId", coordinates.observationId())
                 .param("fingerprint", coordinates.fingerprint())
+                .param("claimToken", coordinates.ownershipToken)
                 .param("tenantId", coordinates.tenantId())
                 .update();
         requireOwnedTransition(updated, coordinates, Status.FAILED);
@@ -113,10 +140,10 @@ public final class AppliedObservationRepository {
         jdbc.sql("""
                 INSERT INTO CM_APPLIED_ENGINE_OBSERVATION
                   (OBSERVATION_ID_, TENANT_ID_, FINGERPRINT_, STATUS_, SOURCE_, CASE_ID_,
-                   PROCESS_INSTANCE_ID_, ENTITY_ID_, ENTITY_REVISION_, EVENT_TYPE_,
+                   CLAIM_TOKEN_, PROCESS_INSTANCE_ID_, ENTITY_ID_, ENTITY_REVISION_, EVENT_TYPE_,
                    ENGINE_OCCURRED_AT_, CLAIMED_AT_)
                 VALUES
-                  (:observationId, :tenantId, :fingerprint, 'CLAIMED', :source, :caseId,
+                  (:observationId, :tenantId, :fingerprint, 'CLAIMED', :source, :caseId, :claimToken,
                    :processInstanceId, :entityId, :entityRevision, :eventType,
                    :engineOccurredAt, SYSTIMESTAMP)""")
                 .param("observationId", values.observationId())
@@ -124,6 +151,7 @@ public final class AppliedObservationRepository {
                 .param("fingerprint", values.fingerprint())
                 .param("source", values.source())
                 .param("caseId", values.caseId())
+                .param("claimToken", values.ownershipToken())
                 .param("processInstanceId", values.processInstanceId())
                 .param("entityId", values.entityId())
                 .param("entityRevision", values.entityRevision())
@@ -137,6 +165,7 @@ public final class AppliedObservationRepository {
                 UPDATE CM_APPLIED_ENGINE_OBSERVATION
                 SET OBSERVATION_ID_ = :observationId,
                     STATUS_ = 'CLAIMED',
+                    CLAIM_TOKEN_ = :claimToken,
                     SOURCE_ = :source,
                     CASE_ID_ = :caseId,
                     PROCESS_INSTANCE_ID_ = :processInstanceId,
@@ -151,6 +180,7 @@ public final class AppliedObservationRepository {
                     OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
                   AND STATUS_ = 'FAILED'""")
                 .param("observationId", values.observationId())
+                .param("claimToken", values.ownershipToken())
                 .param("source", values.source())
                 .param("caseId", values.caseId())
                 .param("processInstanceId", values.processInstanceId())
@@ -170,10 +200,7 @@ public final class AppliedObservationRepository {
         String observationId = requiredBounded(observation.observationId(), "observationId",
                 OBSERVATION_ID_MAX);
         String tenantId = nullableBounded(observation.tenantId(), "tenantId", TENANT_ID_MAX);
-        String fingerprint = requiredBounded(observation.fingerprint(), "fingerprint", FINGERPRINT_LENGTH);
-        if (!SHA_256.matcher(fingerprint).matches()) {
-            throw new IllegalArgumentException("fingerprint must be a lowercase SHA-256 hex digest");
-        }
+        String fingerprint = validFingerprint(observation.fingerprint());
         return new ObservationValues(observationId, tenantId, fingerprint,
                 requiredBounded(observation.source(), "source", SOURCE_MAX),
                 requiredBounded(observation.caseId(), "caseId", CASE_ID_MAX),
@@ -181,20 +208,42 @@ public final class AppliedObservationRepository {
                 requiredBounded(observation.entityId(), "entityId", ENTITY_ID_MAX),
                 observation.entityRevision(),
                 requiredBounded(observation.eventType().name(), "eventType", EVENT_TYPE_MAX),
-                observation.engineOccurredAt());
+                observation.engineOccurredAt(), newOwnershipToken());
     }
 
     private static Claim validateClaim(Claim claim) {
         if (claim == null) {
             throw new IllegalArgumentException("claim must not be null");
         }
-        String observationId = requiredBounded(claim.observationId(), "observationId", OBSERVATION_ID_MAX);
-        String tenantId = nullableBounded(claim.tenantId(), "tenantId", TENANT_ID_MAX);
-        String fingerprint = requiredBounded(claim.fingerprint(), "fingerprint", FINGERPRINT_LENGTH);
-        if (!SHA_256.matcher(fingerprint).matches()) {
+        return new Claim(claim.observationId, claim.tenantId, claim.fingerprint,
+                claim.ownershipToken);
+    }
+
+    private static Claim newClaim(ObservationValues values) {
+        return new Claim(values.observationId(), values.tenantId(), values.fingerprint(),
+                values.ownershipToken());
+    }
+
+    private static String validFingerprint(String fingerprint) {
+        String bounded = requiredBounded(fingerprint, "fingerprint", FINGERPRINT_LENGTH);
+        if (!SHA_256.matcher(bounded).matches()) {
             throw new IllegalArgumentException("fingerprint must be a lowercase SHA-256 hex digest");
         }
-        return new Claim(observationId, tenantId, fingerprint);
+        return bounded;
+    }
+
+    private static String newOwnershipToken() {
+        byte[] bytes = new byte[32];
+        OWNERSHIP_TOKEN_RANDOM.nextBytes(bytes);
+        return validOwnershipToken(Base64.getUrlEncoder().withoutPadding().encodeToString(bytes));
+    }
+
+    private static String validOwnershipToken(String token) {
+        String bounded = requiredBounded(token, "claimToken", OWNERSHIP_TOKEN_LENGTH);
+        if (!OWNERSHIP_TOKEN.matcher(bounded).matches()) {
+            throw new IllegalArgumentException("claimToken must be a 256-bit URL-safe token");
+        }
+        return bounded;
     }
 
     private static void requireOwnedTransition(int updated, Claim claim, Status target) {
@@ -221,6 +270,6 @@ public final class AppliedObservationRepository {
     private record ObservationValues(String observationId, String tenantId, String fingerprint,
                                      String source, String caseId, String processInstanceId,
                                      String entityId, Long entityRevision, String eventType,
-                                     java.time.Instant engineOccurredAt) {
+                                     java.time.Instant engineOccurredAt, String ownershipToken) {
     }
 }

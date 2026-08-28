@@ -1,6 +1,7 @@
 package org.casemgmt;
 
 import liquibase.Liquibase;
+import liquibase.change.core.CreateTableChange;
 import liquibase.change.core.RawSQLChange;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.OfflineConnection;
@@ -30,6 +31,13 @@ class AppliedObservationChangelogStaticValidationTest {
                     .endsWith("cm-applied-engine-observation");
 
             var appliedObservation = changes.getLast();
+            var table = appliedObservation.getChanges().stream()
+                    .filter(CreateTableChange.class::isInstance)
+                    .map(CreateTableChange.class::cast)
+                    .findFirst()
+                    .orElseThrow();
+            assertThat(table.getColumns()).extracting(column -> column.getName())
+                    .contains("CLAIM_TOKEN_");
             String sql = appliedObservation.getChanges().stream()
                     .filter(RawSQLChange.class::isInstance)
                     .map(RawSQLChange.class::cast)

@@ -11,6 +11,7 @@
       <column name="OBSERVATION_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
       <column name="TENANT_ID_" type="VARCHAR2(64)"/>
       <column name="FINGERPRINT_" type="VARCHAR2(64)"><constraints nullable="false"/></column>
+      <column name="CLAIM_TOKEN_" type="VARCHAR2(43)"><constraints nullable="false"/></column>
       <column name="STATUS_" type="VARCHAR2(16)"><constraints nullable="false"/></column>
       <column name="SOURCE_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
       <column name="CASE_ID_" type="VARCHAR2(128)"><constraints nullable="false"/></column>
