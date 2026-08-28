@@ -105,6 +105,20 @@ class LinkedProcessRootConfirmationTest extends OracleTestBase {
     }
 
     @Test
+    void confirmationPersistsExactChildDefinitionIdentity() {
+        processes.insert("linked-correlation", "case-1", null, null, "letter-process",
+                CaseTask.EngineSync.PENDING);
+
+        confirmations.confirmStarted("case-1", "linked-correlation", "engine-process-77",
+                "letter-process:9", "letter-process",
+                OffsetDateTime.parse("2026-08-28T07:00:00Z"));
+
+        LinkedProcessRepository.LinkedProcessRow child = processes.findByCase("case-1").getFirst();
+        assertThat(child.processDefinitionId()).isEqualTo("letter-process:9");
+        assertThat(child.processDefinitionKey()).isEqualTo("letter-process");
+    }
+
+    @Test
     void competingRootConfirmationRollsBackTheLinkUpdate() {
         processes.insertRoot("accepted-root", "case-1", null, "orders",
                 CaseTask.EngineSync.PENDING);

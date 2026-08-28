@@ -77,12 +77,28 @@ class DefaultEngineObservationAuthorityValidatorTest {
                 OrchestrationMode.BPMN)));
         when(processes.findByCase("case-1")).thenReturn(List.of(rootLink(), new LinkedProcessRepository.LinkedProcessRow(
                 "child-link", "case-1", null, "child-correlation", "child-process",
-                "child-work", "ACTIVE", CaseTask.EngineSync.SYNCED, false)));
+                "child-work:3", "child-work", "ACTIVE", CaseTask.EngineSync.SYNCED, false)));
 
         assertThatCode(() -> validator.validate(observation("child-process", "child-work",
                 "child-work:3", "engine-a"), caseInstance)).doesNotThrowAnyException();
         assertRejected(observation("child-process", "other-child", "child-work:3", "engine-a"),
                 caseInstance, ObservationRejectionReason.PROCESS_DEFINITION_MISMATCH);
+        assertRejected(observation("child-process", "child-work", "child-work:4", "engine-a"),
+                caseInstance, ObservationRejectionReason.PROCESS_DEFINITION_MISMATCH);
+    }
+
+    @Test
+    void rejectsLegacyChildWithoutExactDefinitionIdentityForReconciliation() {
+        CaseInstance caseInstance = activeCase();
+        when(bindings.find("claim:1")).thenReturn(Optional.of(binding(BindingStatus.ACTIVE,
+                OrchestrationMode.BPMN)));
+        when(processes.findByCase("case-1")).thenReturn(List.of(rootLink(),
+                new LinkedProcessRepository.LinkedProcessRow("child-link", "case-1", null,
+                        "child-correlation", "child-process", null, "child-work", "ACTIVE",
+                        CaseTask.EngineSync.SYNCED, false)));
+
+        assertRejected(observation("child-process", "child-work", "child-work:3", "engine-a"),
+                caseInstance, ObservationRejectionReason.RECONCILIATION_REQUIRED);
     }
 
     private void assertRejected(ProcessObservation observation, CaseInstance caseInstance,
@@ -96,9 +112,9 @@ class DefaultEngineObservationAuthorityValidatorTest {
     private static ProcessObservation observation(String processId, String definitionKey,
                                                   String definitionId, String engineId) {
         Instant at = Instant.parse("2026-08-28T08:30:00Z");
-        return new ProcessObservation("obs-1", 1, "adapter:embedded", "tenant-a", "case-1",
+        return new ProcessObservation("obs-1", 1, "adapter:embedded", engineId, "tenant-a", "case-1",
                 processId, processId, 1L, ProcessObservation.EventType.STARTED, at, at,
-                Map.of("engineId", engineId, "processDefinitionKey", definitionKey,
+                Map.of("processDefinitionKey", definitionKey,
                         "processDefinitionId", definitionId));
     }
 
@@ -116,7 +132,7 @@ class DefaultEngineObservationAuthorityValidatorTest {
 
     private static LinkedProcessRepository.LinkedProcessRow rootLink() {
         return new LinkedProcessRepository.LinkedProcessRow("root-link", "case-1", null,
-                "root-correlation", "root-process", "claim-process", "ACTIVE",
+                "root-correlation", "root-process", "claim-process:7", "claim-process", "ACTIVE",
                 CaseTask.EngineSync.SYNCED, true);
     }
 

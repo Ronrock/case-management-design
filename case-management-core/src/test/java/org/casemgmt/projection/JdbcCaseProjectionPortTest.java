@@ -15,11 +15,18 @@ import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.PlanItemRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -172,6 +179,101 @@ class JdbcCaseProjectionPortTest extends OracleTestBase {
     }
 
     @Test
+    void taskCannotBeReboundToAnotherActivityInTheSameCaseAndProcess() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        projections.observe(new TaskObservation("case-1", "root-process", "bound-task",
+                "bound-activity", "review", "Review", "create", null, List.of(), null,
+                50, null, now, now));
+
+        assertThatThrownBy(() -> projections.observe(new TaskObservation("case-1",
+                "root-process", "bound-task", "different-activity", "review", "Review",
+                "claim", "alice", List.of(), null, 50, null, now.plusSeconds(1),
+                now.plusSeconds(1))))
+                .isInstanceOf(ProjectionOwnershipException.class)
+                .extracting(error -> ((ProjectionOwnershipException) error).classification())
+                .isEqualTo(ProjectionOwnershipException.Classification.RELATIONSHIP_MISMATCH);
+    }
+
+    @Test
+    void taskProjectionExecutesInsertAndKnownProvenanceUpdateOnOracle() {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        projections.observe(new TaskObservation("case-1", "root-process", "task-insert-update",
+                "activity-insert-update", "review", "Review", "create", null, List.of(),
+                null, 50, null, now, now));
+
+        projections.observe(new TaskObservation("case-1", "root-process", "task-insert-update",
+                "activity-insert-update", "review", "Review claimed", "claim", "alice",
+                List.of(), null, 50, null, now.plusSeconds(1), now.plusSeconds(1)));
+
+        assertThat(tasks.findByCase("case-1")).filteredOn(task ->
+                        "task-insert-update".equals(task.engineTaskId()))
+                .singleElement()
+                .satisfies(task -> {
+                    assertThat(task.state()).isEqualTo(TaskState.CLAIMED);
+                    assertThat(task.assignee()).isEqualTo("alice");
+                });
+        assertThat(planItems.findByCase("case-1")).filteredOn(item ->
+                        "activity-insert-update".equals(item.engineActivityId()))
+                .singleElement()
+                .satisfies(item -> assertThat(item.name()).isEqualTo("Review claimed"));
+    }
+
+    @Test
+    void concurrentCrossCaseEntityCollisionHasOneOwnerAndOneBoundedRejection()
+            throws Exception {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        cases.insert(new CaseInstance("case-2", "eng-a", "t1", "sample-case:1",
+                "sample-case", 1, "C-2", "Second", CaseState.ACTIVE, CasePriority.MEDIUM,
+                null, null, "bob", null, null, null, Map.of(), 0, now, now, null));
+        processes.insertRoot("root-link-2", "case-2", "root-process-2", "sample-case",
+                CaseTask.EngineSync.SYNCED);
+        TaskObservation first = new TaskObservation("case-1", "root-process", "race-task",
+                "race-activity", "review", "First", "create", null, List.of(), null,
+                50, null, now, now);
+        TaskObservation second = new TaskObservation("case-2", "root-process-2", "race-task",
+                "race-activity", "review", "Second", "create", null, List.of(), null,
+                50, null, now, now);
+        TransactionTemplate transaction = new TransactionTemplate(
+                new DataSourceTransactionManager(dataSource()));
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        int applied = 0;
+        int rejected = 0;
+
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            var futures = List.of(
+                    pool.submit(() -> transaction.executeWithoutResult(status -> {
+                        ready.countDown();
+                        await(start);
+                        new JdbcCaseProjectionPort(JdbcClient.create(dataSource())).observe(first);
+                    })),
+                    pool.submit(() -> transaction.executeWithoutResult(status -> {
+                        ready.countDown();
+                        await(start);
+                        new JdbcCaseProjectionPort(JdbcClient.create(dataSource())).observe(second);
+                    })));
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            for (var future : futures) {
+                try {
+                    future.get(10, TimeUnit.SECONDS);
+                    applied++;
+                } catch (ExecutionException failure) {
+                    assertThat(failure.getCause()).isInstanceOf(ProjectionOwnershipException.class);
+                    rejected++;
+                }
+            }
+        } finally {
+            start.countDown();
+        }
+
+        assertThat(applied).isEqualTo(1);
+        assertThat(rejected).isEqualTo(1);
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = 'race-task'")
+                .query(Integer.class).single()).isEqualTo(1);
+    }
+
+    @Test
     void milestoneReachedReopenedAndCancelledHaveDistinctPersistentSemantics() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         projections.observe(milestone("end", now));
@@ -209,5 +311,14 @@ class JdbcCaseProjectionPortTest extends OracleTestBase {
                                                            OffsetDateTime observedAt) {
         return new ProcessCompletionObservation("case-1", processId, "sample-case", "completed",
                 observedAt, observedAt);
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            if (!latch.await(10, TimeUnit.SECONDS)) throw new AssertionError("Timed out");
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(exception);
+        }
     }
 }

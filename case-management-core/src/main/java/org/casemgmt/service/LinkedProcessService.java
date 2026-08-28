@@ -91,4 +91,14 @@ public class LinkedProcessService {
         cases.require(caseId);
         processes.confirmStarted(caseId, correlationId, engineProcessInstanceId, confirmedAt);
     }
+
+    /** Confirmation seam for adapters that can supply the exact deployed definition identity. */
+    @Transactional
+    public void confirmStarted(String caseId, String correlationId,
+                               String engineProcessInstanceId, String processDefinitionId,
+                               String processDefinitionKey, OffsetDateTime confirmedAt) {
+        cases.require(caseId);
+        processes.confirmStarted(caseId, correlationId, engineProcessInstanceId,
+                processDefinitionId, processDefinitionKey, confirmedAt);
+    }
 }

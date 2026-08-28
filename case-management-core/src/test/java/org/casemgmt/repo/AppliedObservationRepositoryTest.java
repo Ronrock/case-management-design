@@ -66,6 +66,11 @@ class AppliedObservationRepositoryTest extends OracleTestBase {
         assertThat(stored.status()).isEqualTo("CLAIMED");
         assertThat(stored.observationId()).isEqualTo("observation-1");
         assertThat(stored.source()).isEqualTo("operaton:embedded");
+        assertThat(jdbc().sql("""
+                SELECT ENGINE_ID_ FROM CM_APPLIED_ENGINE_OBSERVATION
+                WHERE FINGERPRINT_ = :fingerprint""")
+                .param("fingerprint", observation.fingerprint())
+                .query(String.class).single()).isEqualTo(observation.engineId());
         assertThat(stored.caseId()).isEqualTo("case-1");
         assertThat(stored.processInstanceId()).isEqualTo("process-1");
         assertThat(stored.entityId()).isEqualTo("process-1");
@@ -176,6 +181,53 @@ class AppliedObservationRepositoryTest extends OracleTestBase {
 
         assertThat(observations.latestAppliedPosition(process)).isPresent();
         assertThat(observations.latestAppliedPosition(task)).isEmpty();
+    }
+
+    @Test
+    void adapterChannelsShareFingerprintClaimsAndEngineWatermark() {
+        Instant occurred = Instant.parse("2026-08-28T08:30:00Z");
+        ProcessObservation embedded = new ProcessObservation("embedded", 1,
+                "operaton:embedded", "engine-a", "tenant-a", "case-1", "process-1",
+                "process-1", 5L, ProcessObservation.EventType.STARTED, occurred, occurred,
+                Map.of("caseDefinition", "claims"));
+        ProcessObservation reconciliation = new ProcessObservation("reconciliation", 1,
+                "reconciliation", "engine-a", "tenant-a", "case-1", "process-1",
+                "process-1", 5L, ProcessObservation.EventType.STARTED, occurred,
+                occurred.plusSeconds(30), Map.of("caseDefinition", "claims"));
+        observations.markApplied(observations.claim(embedded).claim().orElseThrow());
+
+        assertThat(observations.claim(reconciliation).outcome())
+                .isEqualTo(AppliedObservationRepository.ClaimOutcome.DUPLICATE);
+
+        ProcessObservation olderRemote = new ProcessObservation("remote-older", 1,
+                "operaton:remote", "engine-a", "tenant-a", "case-1", "process-1",
+                "process-1", 4L, ProcessObservation.EventType.STARTED,
+                occurred.plusSeconds(1), occurred.plusSeconds(2), Map.of());
+        assertThat(observations.latestAppliedPosition(olderRemote)).get()
+                .extracting(AppliedObservationRepository.AppliedPosition::entityRevision)
+                .isEqualTo(5L);
+    }
+
+    @Test
+    void legacyAppliedHistoryBlocksTypedOrderingInsteadOfGuessingIdentity() {
+        jdbc().sql("""
+                INSERT INTO CM_APPLIED_ENGINE_OBSERVATION
+                  (OBSERVATION_ID_, TENANT_ID_, FINGERPRINT_, CLAIM_TOKEN_, STATUS_, SOURCE_,
+                   CASE_ID_, PROCESS_INSTANCE_ID_, ENTITY_ID_, ENTITY_REVISION_, EVENT_TYPE_,
+                   ENGINE_OCCURRED_AT_, CLAIMED_AT_, APPLIED_AT_, OBSERVATION_KIND_)
+                VALUES ('legacy-10', 'tenant-a', RPAD('a', 64, 'a'), RPAD('b', 43, 'b'),
+                  'APPLIED', 'legacy-adapter', 'case-1', 'process-1', 'process-1', 10,
+                  'STARTED', SYSTIMESTAMP, SYSTIMESTAMP, SYSTIMESTAMP, 'LEGACY')""").update();
+        ProcessObservation typedRevisionNine = new ProcessObservation("typed-9", 1,
+                "operaton:embedded", "engine-a", "tenant-a", "case-1", "process-1",
+                "process-1", 9L, ProcessObservation.EventType.STARTED,
+                Instant.parse("2026-08-28T08:30:00Z"),
+                Instant.parse("2026-08-28T08:31:00Z"), Map.of());
+
+        assertThatThrownBy(() -> observations.latestAppliedPosition(typedRevisionNine))
+                .isInstanceOf(AppliedObservationRepository.LegacyObservationHistoryException.class)
+                .hasMessageContaining("reconciliation")
+                .hasMessageNotContaining("tenant-a");
     }
 
     @Test

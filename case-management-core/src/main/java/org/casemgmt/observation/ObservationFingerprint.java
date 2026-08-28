@@ -11,7 +11,7 @@ import java.util.Map;
 /** A stable SHA-256 identity for a single engine observation. */
 public record ObservationFingerprint(String value) {
 
-    private static final String FORMAT = "observation-fingerprint-v1";
+    private static final String FORMAT = "observation-fingerprint-v2";
 
     public ObservationFingerprint {
         if (value == null || !value.matches("[0-9a-f]{64}")) {
@@ -29,7 +29,7 @@ public record ObservationFingerprint(String value) {
         var canonical = new StringBuilder(FORMAT);
         appendField(canonical, "observationVersion", Integer.toString(observation.observationVersion()));
         appendField(canonical, "observationType", observationType(observation));
-        appendField(canonical, "source", observation.source());
+        appendField(canonical, "engineId", observation.engineId());
         appendField(canonical, "tenantId", observation.tenantId());
         appendField(canonical, "caseId", observation.caseId());
         appendField(canonical, "processInstanceId", observation.processInstanceId());

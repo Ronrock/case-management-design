@@ -8,6 +8,7 @@ public record ActivityLifecycleObservation(
         String observationId,
         int observationVersion,
         String source,
+        String engineId,
         String tenantId,
         String caseId,
         String processInstanceId,
@@ -19,9 +20,19 @@ public record ActivityLifecycleObservation(
         Map<String, Object> attributes) implements EngineObservation {
 
     public ActivityLifecycleObservation {
-        EngineObservation.validateIdentity(observationId, observationVersion, source, tenantId, caseId, processInstanceId, entityId,
+        EngineObservation.validateIdentity(observationId, observationVersion, source, engineId, tenantId, caseId, processInstanceId, entityId,
                 eventType, engineOccurredAt, receivedAt);
         attributes = EngineObservation.immutableAttributes(attributes);
+    }
+
+    public ActivityLifecycleObservation(String observationId, int observationVersion, String source,
+                                        String tenantId, String caseId, String processInstanceId,
+                                        String entityId, Long entityRevision, EventType eventType,
+                                        Instant engineOccurredAt, Instant receivedAt,
+                                        Map<String, Object> attributes) {
+        this(observationId, observationVersion, source, EngineObservation.legacyEngineId(attributes),
+                tenantId, caseId, processInstanceId, entityId, entityRevision, eventType,
+                engineOccurredAt, receivedAt, attributes);
     }
 
     public enum EventType { STARTED, COMPLETED, CANCELLED }

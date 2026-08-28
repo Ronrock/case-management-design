@@ -34,8 +34,7 @@ public final class DefaultEngineObservationAuthorityValidator
         if (!Objects.equals(observation.tenantId(), caseInstance.tenantId())) {
             reject(observation, ObservationRejectionReason.TENANT_MISMATCH);
         }
-        String observedEngineId = requiredAttribute(observation, "engineId",
-                ObservationRejectionReason.ENGINE_MISMATCH);
+        String observedEngineId = observation.engineId();
         if (!engineId.equals(observedEngineId) || !engineId.equals(caseInstance.engineId())) {
             reject(observation, ObservationRejectionReason.ENGINE_MISMATCH);
         }
@@ -77,11 +76,19 @@ public final class DefaultEngineObservationAuthorityValidator
             if (!identity.processDefinitionId().equals(observedDefinitionId)
                     || !identity.processDefinitionKey().equals(observedDefinitionKey)
                     || !linked.caseRoot()
+                    || (linked.processDefinitionId() != null
+                        && !identity.processDefinitionId().equals(linked.processDefinitionId()))
                     || !identity.processDefinitionKey().equals(linked.processDefinitionKey())) {
                 reject(observation, ObservationRejectionReason.PROCESS_DEFINITION_MISMATCH);
             }
-        } else if (!linked.processDefinitionKey().equals(observedDefinitionKey)) {
-            reject(observation, ObservationRejectionReason.PROCESS_DEFINITION_MISMATCH);
+        } else {
+            if (linked.processDefinitionId() == null) {
+                reject(observation, ObservationRejectionReason.RECONCILIATION_REQUIRED);
+            }
+            if (!linked.processDefinitionId().equals(observedDefinitionId)
+                    || !linked.processDefinitionKey().equals(observedDefinitionKey)) {
+                reject(observation, ObservationRejectionReason.PROCESS_DEFINITION_MISMATCH);
+            }
         }
     }
 

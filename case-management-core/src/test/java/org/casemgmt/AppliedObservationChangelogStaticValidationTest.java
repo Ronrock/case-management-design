@@ -29,9 +29,10 @@ class AppliedObservationChangelogStaticValidationTest {
 
             var changes = liquibase.getDatabaseChangeLog().getChangeSets();
             assertThat(changes).extracting(change -> change.getId())
-                    .endsWith("cm-applied-engine-observation", "cm-engine-observation-hardening");
+                    .endsWith("cm-applied-engine-observation", "cm-engine-observation-hardening",
+                            "cm-engine-observation-channel-identity");
 
-            var appliedObservation = changes.get(changes.size() - 2);
+            var appliedObservation = changes.get(changes.size() - 3);
             var table = appliedObservation.getChanges().stream()
                     .filter(CreateTableChange.class::isInstance)
                     .map(CreateTableChange.class::cast)
@@ -49,7 +50,7 @@ class AppliedObservationChangelogStaticValidationTest {
                     .contains("CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END")
                     .contains("FINGERPRINT_");
 
-            var hardening = changes.getLast();
+            var hardening = changes.get(changes.size() - 2);
             assertThat(hardening.getChanges().stream()
                     .filter(AddColumnChange.class::isInstance)
                     .map(AddColumnChange.class::cast)
@@ -66,6 +67,20 @@ class AppliedObservationChangelogStaticValidationTest {
                     .contains("IGNORED_AT_")
                     .doesNotContain("UPDATE CM_PLAN_ITEM")
                     .doesNotContain("UPDATE CM_TASK");
+
+            var channelIdentity = changes.getLast();
+            assertThat(channelIdentity.getChanges().stream()
+                    .filter(AddColumnChange.class::isInstance)
+                    .map(AddColumnChange.class::cast)
+                    .flatMap(change -> change.getColumns().stream())
+                    .map(column -> column.getName()))
+                    .containsExactly("ENGINE_ID_", "PROC_DEF_ID_");
+            assertThat(channelIdentity.getChanges().stream()
+                    .filter(RawSQLChange.class::isInstance)
+                    .map(RawSQLChange.class::cast)
+                    .map(RawSQLChange::getSql)
+                    .collect(Collectors.joining("\n")))
+                    .doesNotContain("UPDATE CM_APPLIED_ENGINE_OBSERVATION");
         }
     }
 }

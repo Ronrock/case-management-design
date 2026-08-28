@@ -2,6 +2,7 @@ package org.casemgmt.projection;
 
 import org.casemgmt.domain.CaseIds;
 import org.casemgmt.repo.JsonCodec;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 import java.util.Locale;
@@ -24,31 +25,73 @@ public class JdbcCaseProjectionPort implements CaseProjectionPort {
     @Override
     public void assertEntityOwnership(ProjectionEntityIdentity identity) {
         if (identity.kind() == ProjectionEntityIdentity.Kind.USER_TASK) {
-            assertOwner("CM_TASK", "CAMUNDA_TASK_ID_", identity.entityId(), identity);
-            assertOwner("CM_PLAN_ITEM", "ENGINE_ACTIVITY_ID_",
-                    identity.relatedActivityInstanceId(), identity);
+            assertTaskOwner(identity);
+            assertPlanItemOwner(identity.relatedActivityInstanceId(), identity, "HUMAN_TASK");
             return;
         }
-        assertOwner("CM_PLAN_ITEM", "ENGINE_ACTIVITY_ID_", identity.entityId(), identity);
+        assertPlanItemOwner(identity.entityId(), identity,
+                identity.kind() == ProjectionEntityIdentity.Kind.MILESTONE
+                        ? "MILESTONE" : "STAGE");
     }
 
-    private void assertOwner(String table, String idColumn, String engineEntityId,
-                             ProjectionEntityIdentity expected) {
+    private void assertTaskOwner(ProjectionEntityIdentity expected) {
+        java.util.List<TaskOwner> owners = jdbc.sql("""
+                SELECT task.CASE_ID_ TASK_CASE_ID, task.PROC_INST_ID_ TASK_PROC_INST_ID,
+                       task.PLAN_ITEM_ID_, item.CASE_ID_ ITEM_CASE_ID,
+                       item.PROC_INST_ID_ ITEM_PROC_INST_ID, item.ENGINE_ACTIVITY_ID_, item.TYPE_
+                FROM CM_TASK task LEFT JOIN CM_PLAN_ITEM item ON item.ID_ = task.PLAN_ITEM_ID_
+                WHERE task.CAMUNDA_TASK_ID_ = :entityId""")
+                .param("entityId", expected.entityId())
+                .query((rs, row) -> new TaskOwner(rs.getString("TASK_CASE_ID"),
+                        rs.getString("TASK_PROC_INST_ID"), rs.getString("PLAN_ITEM_ID_"),
+                        rs.getString("ITEM_CASE_ID"), rs.getString("ITEM_PROC_INST_ID"),
+                        rs.getString("ENGINE_ACTIVITY_ID_"), rs.getString("TYPE_")))
+                .list();
+        for (TaskOwner owner : owners) {
+            if (!java.util.Objects.equals(owner.taskCaseId(), expected.caseId())
+                    || processOwnershipMismatch(owner.taskProcessInstanceId(),
+                    expected.processInstanceId())) {
+                throw ownership(ProjectionOwnershipException.Classification.CROSS_OWNER);
+            }
+            if (owner.planItemId() == null || owner.itemCaseId() == null
+                    || !java.util.Objects.equals(owner.itemCaseId(), expected.caseId())
+                    || processOwnershipMismatch(owner.itemProcessInstanceId(),
+                    expected.processInstanceId())
+                    || !java.util.Objects.equals(owner.activityInstanceId(),
+                    expected.relatedActivityInstanceId())) {
+                throw ownership(ProjectionOwnershipException.Classification.RELATIONSHIP_MISMATCH);
+            }
+            if (!"HUMAN_TASK".equals(owner.type())) {
+                throw ownership(ProjectionOwnershipException.Classification.ENTITY_KIND_MISMATCH);
+            }
+        }
+    }
+
+    private void assertPlanItemOwner(String engineEntityId,
+                                     ProjectionEntityIdentity expected, String expectedType) {
         if (engineEntityId == null) return;
-        java.util.List<EntityOwner> owners = jdbc.sql("SELECT CASE_ID_, PROC_INST_ID_ FROM "
-                        + table + " WHERE " + idColumn + " = :entityId")
+        java.util.List<PlanItemOwner> owners = jdbc.sql("""
+                        SELECT CASE_ID_, PROC_INST_ID_, TYPE_ FROM CM_PLAN_ITEM
+                        WHERE ENGINE_ACTIVITY_ID_ = :entityId""")
                 .param("entityId", engineEntityId)
-                .query((rs, row) -> new EntityOwner(
-                        rs.getString("CASE_ID_"), rs.getString("PROC_INST_ID_")))
+                .query((rs, row) -> new PlanItemOwner(rs.getString("CASE_ID_"),
+                        rs.getString("PROC_INST_ID_"), rs.getString("TYPE_")))
                 .list();
         boolean mismatch = owners.stream().anyMatch(owner ->
                 !java.util.Objects.equals(owner.caseId(), expected.caseId())
                         || processOwnershipMismatch(owner.processInstanceId(),
                                 expected.processInstanceId()));
         if (mismatch) {
-            throw new SecurityException("Engine entity '" + engineEntityId
-                    + "' is owned by another case or process");
+            throw ownership(ProjectionOwnershipException.Classification.CROSS_OWNER);
         }
+        if (owners.stream().anyMatch(owner -> !expectedType.equals(owner.type()))) {
+            throw ownership(ProjectionOwnershipException.Classification.ENTITY_KIND_MISMATCH);
+        }
+    }
+
+    private static ProjectionOwnershipException ownership(
+            ProjectionOwnershipException.Classification classification) {
+        return new ProjectionOwnershipException(classification);
     }
 
     private static boolean processOwnershipMismatch(String actual, String expected) {
@@ -67,79 +110,10 @@ public class JdbcCaseProjectionPort implements CaseProjectionPort {
         String taskState = event.equals("complete") ? "COMPLETED"
                 : event.equals("delete") ? "TERMINATED"
                 : observation.assignee() == null ? "OPEN" : "CLAIMED";
-        jdbc.sql("""
-                MERGE INTO CM_PLAN_ITEM target
-                USING (SELECT :activityInstanceId AS ENGINE_ACTIVITY_ID_ FROM dual
-                       WHERE EXISTS (
-                           SELECT 1 FROM CM_CASE c
-                           JOIN CM_CASE_DEF d ON d.ID_ = c.CASE_DEF_ID_
-                           WHERE c.ID_ = :caseId AND d.ORCHESTRATION_MODE_ = 'BPMN')) source
-                ON (target.ENGINE_ACTIVITY_ID_ = source.ENGINE_ACTIVITY_ID_
-                    AND target.CASE_ID_ = :caseId
-                    AND (:processInstanceId IS NULL
-                      OR target.PROC_INST_ID_ IS NULL
-                      OR target.PROC_INST_ID_ = :processInstanceId))
-                WHEN MATCHED THEN UPDATE SET target.STATE_ = :state, target.NAME_ = :name,
-                    target.PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
-                    target.UPDATED_AT_ = :projectedAt, target.LAST_ENGINE_UPDATE_AT_ = :engineAt,
-                    target.LAST_PROJECTED_AT_ = :projectedAt, target.PROJECTION_STATUS_ = 'CURRENT',
-                    target.ENDED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
-                                           THEN :projectedAt ELSE target.ENDED_AT_ END
-                WHEN NOT MATCHED THEN INSERT
-                    (ID_, CASE_ID_, PI_DEF_ID_, TYPE_, NAME_, STATE_, AD_HOC_, REPETITION_NO_,
-                     ENGINE_ACTIVITY_ID_, PROC_INST_ID_, VERSION_, CREATED_AT_, UPDATED_AT_,
-                     PROJECTION_STATUS_, LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_)
-                VALUES (:id, :caseId, NULL, 'HUMAN_TASK', :name, :state, 0, 1,
-                        :activityInstanceId, :processInstanceId, 0, :projectedAt, :projectedAt,
-                        'CURRENT', :engineAt, :projectedAt)""")
-                .param("activityInstanceId", observation.activityInstanceId())
-                .param("processInstanceId", observation.processInstanceId())
-                .param("state", planState).param("name", observation.name())
-                .param("projectedAt", observation.observedAt())
-                .param("engineAt", observation.engineUpdatedAt())
-                .param("id", CaseIds.newId()).param("caseId", observation.caseId()).update();
-
-        jdbc.sql("""
-                MERGE INTO CM_TASK target
-                USING (SELECT :engineTaskId AS CAMUNDA_TASK_ID_ FROM dual
-                       WHERE EXISTS (
-                           SELECT 1 FROM CM_CASE c
-                           JOIN CM_CASE_DEF d ON d.ID_ = c.CASE_DEF_ID_
-                           WHERE c.ID_ = :caseId AND d.ORCHESTRATION_MODE_ = 'BPMN')) source
-                ON (target.CAMUNDA_TASK_ID_ = source.CAMUNDA_TASK_ID_
-                    AND target.CASE_ID_ = :caseId
-                    AND (:processInstanceId IS NULL
-                      OR target.PROC_INST_ID_ IS NULL
-                      OR target.PROC_INST_ID_ = :processInstanceId))
-                WHEN MATCHED THEN UPDATE SET target.STATE_ = :state, target.ASSIGNEE_ = :assignee,
-                    target.PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
-                    target.UPDATED_AT_ = :projectedAt, target.LAST_ENGINE_UPDATE_AT_ = :engineAt,
-                    target.LAST_PROJECTED_AT_ = :projectedAt, target.PROJECTION_STATUS_ = 'CURRENT',
-                    target.COMPLETED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
-                                               THEN :projectedAt ELSE target.COMPLETED_AT_ END
-                WHEN NOT MATCHED THEN INSERT
-                    (ID_, CASE_ID_, PLAN_ITEM_ID_, CAMUNDA_TASK_ID_, NAME_, STATE_, ASSIGNEE_,
-                     CAND_GROUPS_JSON_, FORM_KEY_, PRIORITY_, DUE_AT_, ENGINE_SYNC_, PROC_INST_ID_, VERSION_,
-                     CREATED_AT_, UPDATED_AT_, PROJECTION_STATUS_, LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_)
-                VALUES (:id, :caseId,
-                        (SELECT ID_ FROM CM_PLAN_ITEM WHERE ENGINE_ACTIVITY_ID_ = :activityInstanceId
-                           AND CASE_ID_ = :caseId
-                           AND (:processInstanceId IS NULL OR PROC_INST_ID_ = :processInstanceId)),
-                        :engineTaskId, :name, :state, :assignee, :groups, :formKey, :priority,
-                        :dueAt, 'SYNCED', :processInstanceId, 0, :projectedAt, :projectedAt, 'CURRENT', :engineAt,
-                        :projectedAt)""")
-                .param("engineTaskId", observation.engineTaskId())
-                .param("processInstanceId", observation.processInstanceId())
-                .param("activityInstanceId", observation.activityInstanceId())
-                .param("state", taskState).param("assignee", observation.assignee())
-                .param("projectedAt", observation.observedAt())
-                .param("engineAt", observation.engineUpdatedAt())
-                .param("id", CaseIds.newId()).param("caseId", observation.caseId())
-                .param("name", observation.name())
-                .param("groups", JsonCodec.toJson(observation.candidateGroups() == null
-                        ? java.util.List.of() : observation.candidateGroups()))
-                .param("formKey", observation.formKey()).param("priority", observation.priority())
-                .param("dueAt", observation.dueAt()).update();
+        if (!upsertTaskPlanItem(observation, planState)) {
+            return;
+        }
+        upsertTask(observation, taskState);
     }
 
     @Override
@@ -155,39 +129,9 @@ public class JdbcCaseProjectionPort implements CaseProjectionPort {
         String state = event.equals("end") ? "COMPLETED"
                 : event.equals("delete") ? "TERMINATED" : "ACTIVE";
         String type = observation.kind() == ActivityObservation.Kind.MILESTONE ? "MILESTONE" : "STAGE";
-        jdbc.sql("""
-                MERGE INTO CM_PLAN_ITEM target
-                USING (SELECT :activityInstanceId AS ENGINE_ACTIVITY_ID_ FROM dual
-                       WHERE EXISTS (
-                           SELECT 1 FROM CM_CASE c
-                           JOIN CM_CASE_DEF d ON d.ID_ = c.CASE_DEF_ID_
-                           WHERE c.ID_ = :caseId AND d.ORCHESTRATION_MODE_ = 'BPMN')) source
-                ON (target.ENGINE_ACTIVITY_ID_ = source.ENGINE_ACTIVITY_ID_
-                    AND target.CASE_ID_ = :caseId
-                    AND (:processInstanceId IS NULL
-                      OR target.PROC_INST_ID_ IS NULL
-                      OR target.PROC_INST_ID_ = :processInstanceId))
-                WHEN MATCHED THEN UPDATE SET target.STATE_ = :state, target.NAME_ = :name,
-                    target.PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
-                    target.UPDATED_AT_ = :projectedAt, target.LAST_ENGINE_UPDATE_AT_ = :engineAt,
-                    target.LAST_PROJECTED_AT_ = :projectedAt, target.PROJECTION_STATUS_ = 'CURRENT',
-                    target.ENDED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
-                                           THEN :projectedAt ELSE NULL END
-                WHEN NOT MATCHED THEN INSERT
-                    (ID_, CASE_ID_, PI_DEF_ID_, TYPE_, NAME_, STATE_, AD_HOC_, REPETITION_NO_,
-                     ENGINE_ACTIVITY_ID_, PROC_INST_ID_, VERSION_, CREATED_AT_, UPDATED_AT_, ENDED_AT_,
-                     PROJECTION_STATUS_, LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_)
-                VALUES (:id, :caseId, :activityId, :type, :name, :state, 0, 1,
-                        :activityInstanceId, :processInstanceId, 0, :projectedAt, :projectedAt,
-                        CASE WHEN :state IN ('COMPLETED','TERMINATED') THEN :projectedAt END,
-                        'CURRENT', :engineAt, :projectedAt)""")
-                .param("activityInstanceId", observation.activityInstanceId())
-                .param("processInstanceId", observation.processInstanceId())
-                .param("activityId", observation.activityId()).param("type", type)
-                .param("state", state).param("name", observation.name())
-                .param("projectedAt", observation.observedAt())
-                .param("engineAt", observation.engineUpdatedAt())
-                .param("id", CaseIds.newId()).param("caseId", observation.caseId()).update();
+        if (!upsertActivityPlanItem(observation, state, type)) {
+            return;
+        }
 
         if (observation.kind() == ActivityObservation.Kind.MILESTONE) {
             int achieved = event.equals("end") ? 1 : 0;
@@ -216,6 +160,190 @@ public class JdbcCaseProjectionPort implements CaseProjectionPort {
                     .param("projectedAt", observation.observedAt())
                     .param("id", CaseIds.newId()).update();
         }
+    }
+
+    private boolean upsertTaskPlanItem(TaskObservation observation, String state) {
+        if (updateTaskPlanItem(observation, state) == 1) return true;
+        try {
+            return insertTaskPlanItem(observation, state) == 1;
+        } catch (DuplicateKeyException collision) {
+            assertEntityOwnership(new ProjectionEntityIdentity(observation.caseId(),
+                    observation.processInstanceId(), ProjectionEntityIdentity.Kind.USER_TASK,
+                    observation.engineTaskId(), observation.activityInstanceId()));
+            if (updateTaskPlanItem(observation, state) == 1) return true;
+            throw ownership(ProjectionOwnershipException.Classification.INSERT_COLLISION);
+        }
+    }
+
+    private int updateTaskPlanItem(TaskObservation observation, String state) {
+        return jdbc.sql("""
+                UPDATE CM_PLAN_ITEM target SET target.STATE_ = :state, target.NAME_ = :name,
+                    target.PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
+                    target.UPDATED_AT_ = :projectedAt, target.LAST_ENGINE_UPDATE_AT_ = :engineAt,
+                    target.LAST_PROJECTED_AT_ = :projectedAt, target.PROJECTION_STATUS_ = 'CURRENT',
+                    target.ENDED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
+                                           THEN :projectedAt ELSE target.ENDED_AT_ END
+                WHERE target.ENGINE_ACTIVITY_ID_ = :activityInstanceId
+                  AND target.CASE_ID_ = :caseId
+                  AND (:processInstanceId IS NULL OR target.PROC_INST_ID_ IS NULL
+                    OR target.PROC_INST_ID_ = :processInstanceId)
+                  AND EXISTS (SELECT 1 FROM CM_CASE c JOIN CM_CASE_DEF d
+                    ON d.ID_ = c.CASE_DEF_ID_ WHERE c.ID_ = :caseId
+                    AND d.ORCHESTRATION_MODE_ = 'BPMN')""")
+                .param("activityInstanceId", observation.activityInstanceId())
+                .param("processInstanceId", observation.processInstanceId())
+                .param("state", state).param("name", observation.name())
+                .param("projectedAt", observation.observedAt())
+                .param("engineAt", observation.engineUpdatedAt())
+                .param("caseId", observation.caseId()).update();
+    }
+
+    private int insertTaskPlanItem(TaskObservation observation, String state) {
+        return jdbc.sql("""
+                INSERT INTO CM_PLAN_ITEM
+                    (ID_, CASE_ID_, PI_DEF_ID_, TYPE_, NAME_, STATE_, AD_HOC_, REPETITION_NO_,
+                     ENGINE_ACTIVITY_ID_, PROC_INST_ID_, VERSION_, CREATED_AT_, UPDATED_AT_,
+                     PROJECTION_STATUS_, LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_)
+                SELECT :id, :caseId, NULL, 'HUMAN_TASK', :name, :state, 0, 1,
+                       :activityInstanceId, :processInstanceId, 0, :projectedAt, :projectedAt,
+                       'CURRENT', :engineAt, :projectedAt
+                FROM dual WHERE EXISTS (SELECT 1 FROM CM_CASE c JOIN CM_CASE_DEF d
+                    ON d.ID_ = c.CASE_DEF_ID_ WHERE c.ID_ = :caseId
+                    AND d.ORCHESTRATION_MODE_ = 'BPMN')""")
+                .param("id", CaseIds.newId()).param("caseId", observation.caseId())
+                .param("name", observation.name()).param("state", state)
+                .param("activityInstanceId", observation.activityInstanceId())
+                .param("processInstanceId", observation.processInstanceId())
+                .param("projectedAt", observation.observedAt())
+                .param("engineAt", observation.engineUpdatedAt()).update();
+    }
+
+    private void upsertTask(TaskObservation observation, String state) {
+        if (updateTask(observation, state) == 1) return;
+        try {
+            if (insertTask(observation, state) == 1) return;
+        } catch (DuplicateKeyException collision) {
+            assertEntityOwnership(new ProjectionEntityIdentity(observation.caseId(),
+                    observation.processInstanceId(), ProjectionEntityIdentity.Kind.USER_TASK,
+                    observation.engineTaskId(), observation.activityInstanceId()));
+            if (updateTask(observation, state) == 1) return;
+            throw ownership(ProjectionOwnershipException.Classification.INSERT_COLLISION);
+        }
+    }
+
+    private int updateTask(TaskObservation observation, String state) {
+        return jdbc.sql("""
+                UPDATE CM_TASK target SET target.STATE_ = :state, target.ASSIGNEE_ = :assignee,
+                    target.PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
+                    target.UPDATED_AT_ = :projectedAt, target.LAST_ENGINE_UPDATE_AT_ = :engineAt,
+                    target.LAST_PROJECTED_AT_ = :projectedAt, target.PROJECTION_STATUS_ = 'CURRENT',
+                    target.COMPLETED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
+                                               THEN :projectedAt ELSE target.COMPLETED_AT_ END
+                WHERE target.CAMUNDA_TASK_ID_ = :engineTaskId AND target.CASE_ID_ = :caseId
+                  AND (:processInstanceId IS NULL OR target.PROC_INST_ID_ IS NULL
+                    OR target.PROC_INST_ID_ = :processInstanceId)
+                  AND EXISTS (SELECT 1 FROM CM_CASE c JOIN CM_CASE_DEF d
+                    ON d.ID_ = c.CASE_DEF_ID_ WHERE c.ID_ = :caseId
+                    AND d.ORCHESTRATION_MODE_ = 'BPMN')""")
+                .param("engineTaskId", observation.engineTaskId())
+                .param("processInstanceId", observation.processInstanceId())
+                .param("state", state).param("assignee", observation.assignee())
+                .param("projectedAt", observation.observedAt())
+                .param("engineAt", observation.engineUpdatedAt())
+                .param("caseId", observation.caseId()).update();
+    }
+
+    private int insertTask(TaskObservation observation, String state) {
+        return jdbc.sql("""
+                INSERT INTO CM_TASK
+                    (ID_, CASE_ID_, PLAN_ITEM_ID_, CAMUNDA_TASK_ID_, NAME_, STATE_, ASSIGNEE_,
+                     CAND_GROUPS_JSON_, FORM_KEY_, PRIORITY_, DUE_AT_, ENGINE_SYNC_, PROC_INST_ID_,
+                     VERSION_, CREATED_AT_, UPDATED_AT_, PROJECTION_STATUS_, LAST_ENGINE_UPDATE_AT_,
+                     LAST_PROJECTED_AT_)
+                SELECT :id, :caseId,
+                       (SELECT ID_ FROM CM_PLAN_ITEM WHERE ENGINE_ACTIVITY_ID_ = :activityInstanceId
+                          AND CASE_ID_ = :caseId
+                          AND (:processInstanceId IS NULL OR PROC_INST_ID_ = :processInstanceId)),
+                       :engineTaskId, :name, :state, :assignee, :groups, :formKey, :priority,
+                       :dueAt, 'SYNCED', :processInstanceId, 0, :projectedAt, :projectedAt,
+                       'CURRENT', :engineAt, :projectedAt
+                FROM dual WHERE EXISTS (SELECT 1 FROM CM_CASE c JOIN CM_CASE_DEF d
+                    ON d.ID_ = c.CASE_DEF_ID_ WHERE c.ID_ = :caseId
+                    AND d.ORCHESTRATION_MODE_ = 'BPMN')""")
+                .param("engineTaskId", observation.engineTaskId())
+                .param("processInstanceId", observation.processInstanceId())
+                .param("activityInstanceId", observation.activityInstanceId())
+                .param("state", state).param("assignee", observation.assignee())
+                .param("projectedAt", observation.observedAt())
+                .param("engineAt", observation.engineUpdatedAt())
+                .param("id", CaseIds.newId()).param("caseId", observation.caseId())
+                .param("name", observation.name())
+                .param("groups", JsonCodec.toJson(observation.candidateGroups() == null
+                        ? java.util.List.of() : observation.candidateGroups()))
+                .param("formKey", observation.formKey()).param("priority", observation.priority())
+                .param("dueAt", observation.dueAt()).update();
+    }
+
+    private boolean upsertActivityPlanItem(ActivityObservation observation, String state,
+                                           String type) {
+        if (updateActivityPlanItem(observation, state) == 1) return true;
+        try {
+            return insertActivityPlanItem(observation, state, type) == 1;
+        } catch (DuplicateKeyException collision) {
+            assertEntityOwnership(new ProjectionEntityIdentity(observation.caseId(),
+                    observation.processInstanceId(),
+                    observation.kind() == ActivityObservation.Kind.MILESTONE
+                            ? ProjectionEntityIdentity.Kind.MILESTONE
+                            : ProjectionEntityIdentity.Kind.ACTIVITY,
+                    observation.activityInstanceId(), null));
+            if (updateActivityPlanItem(observation, state) == 1) return true;
+            throw ownership(ProjectionOwnershipException.Classification.INSERT_COLLISION);
+        }
+    }
+
+    private int updateActivityPlanItem(ActivityObservation observation, String state) {
+        return jdbc.sql("""
+                UPDATE CM_PLAN_ITEM target SET target.STATE_ = :state, target.NAME_ = :name,
+                    target.PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
+                    target.UPDATED_AT_ = :projectedAt, target.LAST_ENGINE_UPDATE_AT_ = :engineAt,
+                    target.LAST_PROJECTED_AT_ = :projectedAt, target.PROJECTION_STATUS_ = 'CURRENT',
+                    target.ENDED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
+                                           THEN :projectedAt ELSE NULL END
+                WHERE target.ENGINE_ACTIVITY_ID_ = :activityInstanceId
+                  AND target.CASE_ID_ = :caseId
+                  AND (:processInstanceId IS NULL OR target.PROC_INST_ID_ IS NULL
+                    OR target.PROC_INST_ID_ = :processInstanceId)
+                  AND EXISTS (SELECT 1 FROM CM_CASE c JOIN CM_CASE_DEF d
+                    ON d.ID_ = c.CASE_DEF_ID_ WHERE c.ID_ = :caseId
+                    AND d.ORCHESTRATION_MODE_ = 'BPMN')""")
+                .param("activityInstanceId", observation.activityInstanceId())
+                .param("processInstanceId", observation.processInstanceId())
+                .param("state", state).param("name", observation.name())
+                .param("projectedAt", observation.observedAt())
+                .param("engineAt", observation.engineUpdatedAt())
+                .param("caseId", observation.caseId()).update();
+    }
+
+    private int insertActivityPlanItem(ActivityObservation observation, String state, String type) {
+        return jdbc.sql("""
+                INSERT INTO CM_PLAN_ITEM
+                    (ID_, CASE_ID_, PI_DEF_ID_, TYPE_, NAME_, STATE_, AD_HOC_, REPETITION_NO_,
+                     ENGINE_ACTIVITY_ID_, PROC_INST_ID_, VERSION_, CREATED_AT_, UPDATED_AT_, ENDED_AT_,
+                     PROJECTION_STATUS_, LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_)
+                SELECT :id, :caseId, :activityId, :type, :name, :state, 0, 1,
+                       :activityInstanceId, :processInstanceId, 0, :projectedAt, :projectedAt,
+                       CASE WHEN :state IN ('COMPLETED','TERMINATED') THEN :projectedAt END,
+                       'CURRENT', :engineAt, :projectedAt
+                FROM dual WHERE EXISTS (SELECT 1 FROM CM_CASE c JOIN CM_CASE_DEF d
+                    ON d.ID_ = c.CASE_DEF_ID_ WHERE c.ID_ = :caseId
+                    AND d.ORCHESTRATION_MODE_ = 'BPMN')""")
+                .param("activityInstanceId", observation.activityInstanceId())
+                .param("processInstanceId", observation.processInstanceId())
+                .param("activityId", observation.activityId()).param("type", type)
+                .param("state", state).param("name", observation.name())
+                .param("projectedAt", observation.observedAt())
+                .param("engineAt", observation.engineUpdatedAt())
+                .param("id", CaseIds.newId()).param("caseId", observation.caseId()).update();
     }
 
     @Override
@@ -304,5 +432,9 @@ public class JdbcCaseProjectionPort implements CaseProjectionPort {
         return new ProcessProjectionResult(closed == 1, caseVersion);
     }
 
-    private record EntityOwner(String caseId, String processInstanceId) { }
+    private record PlanItemOwner(String caseId, String processInstanceId, String type) { }
+
+    private record TaskOwner(String taskCaseId, String taskProcessInstanceId, String planItemId,
+                             String itemCaseId, String itemProcessInstanceId,
+                             String activityInstanceId, String type) { }
 }

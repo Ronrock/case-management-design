@@ -32,6 +32,12 @@ public final class AppliedObservationRepository {
         }
     }
 
+    public static final class LegacyObservationHistoryException extends RuntimeException {
+        public LegacyObservationHistoryException(String message) {
+            super(message);
+        }
+    }
+
     /** Audit-safe ordering coordinates of the newest applied fact for one engine entity. */
     public record AppliedPosition(String observationId, Long entityRevision,
                                   java.time.Instant engineOccurredAt, String eventType) { }
@@ -77,6 +83,7 @@ public final class AppliedObservationRepository {
     private static final int TENANT_ID_MAX = 64;
     private static final int FINGERPRINT_LENGTH = 64;
     private static final int SOURCE_MAX = 128;
+    private static final int ENGINE_ID_MAX = 128;
     private static final int CASE_ID_MAX = 128;
     private static final int PROCESS_INSTANCE_ID_MAX = 128;
     private static final int ENTITY_ID_MAX = 128;
@@ -119,10 +126,29 @@ public final class AppliedObservationRepository {
      */
     public Optional<AppliedPosition> latestAppliedPosition(EngineObservation observation) {
         ObservationValues values = valuesOf(observation);
+        int legacy = jdbc.sql("""
+                SELECT COUNT(*) FROM CM_APPLIED_ENGINE_OBSERVATION
+                WHERE CASE_ID_ = :caseId AND PROCESS_INSTANCE_ID_ = :processInstanceId
+                  AND ENTITY_ID_ = :entityId
+                  AND (TENANT_ID_ = :tenantId
+                    OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
+                  AND STATUS_ = 'APPLIED'
+                  AND (OBSERVATION_KIND_ = 'LEGACY' OR ENGINE_ID_ IS NULL)""")
+                .param("caseId", values.caseId())
+                .param("processInstanceId", values.processInstanceId())
+                .param("entityId", values.entityId())
+                .param("tenantId", values.tenantId())
+                .query(Integer.class)
+                .single();
+        if (legacy > 0) {
+            throw new LegacyObservationHistoryException("Engine observation history requires "
+                    + "reconciliation for case " + values.caseId() + ", process "
+                    + values.processInstanceId() + ", entity " + values.entityId());
+        }
         int revisioned = observation.entityRevision() == null ? 0 : 1;
         int mixed = jdbc.sql("""
                 SELECT COUNT(*) FROM CM_APPLIED_ENGINE_OBSERVATION
-                WHERE SOURCE_ = :source AND CASE_ID_ = :caseId
+                WHERE ENGINE_ID_ = :engineId AND CASE_ID_ = :caseId
                   AND PROCESS_INSTANCE_ID_ = :processInstanceId AND ENTITY_ID_ = :entityId
                   AND OBSERVATION_KIND_ = :observationKind
                   AND (TENANT_ID_ = :tenantId
@@ -130,7 +156,7 @@ public final class AppliedObservationRepository {
                   AND STATUS_ = 'APPLIED'
                   AND ((:revisioned = 1 AND ENTITY_REVISION_ IS NULL)
                     OR (:revisioned = 0 AND ENTITY_REVISION_ IS NOT NULL))""")
-                .param("source", values.source())
+                .param("engineId", values.engineId())
                 .param("caseId", values.caseId())
                 .param("processInstanceId", values.processInstanceId())
                 .param("entityId", values.entityId())
@@ -151,14 +177,14 @@ public final class AppliedObservationRepository {
         return jdbc.sql("""
                 SELECT OBSERVATION_ID_, ENTITY_REVISION_, ENGINE_OCCURRED_AT_, EVENT_TYPE_
                 FROM CM_APPLIED_ENGINE_OBSERVATION
-                WHERE SOURCE_ = :source AND CASE_ID_ = :caseId
+                WHERE ENGINE_ID_ = :engineId AND CASE_ID_ = :caseId
                   AND PROCESS_INSTANCE_ID_ = :processInstanceId AND ENTITY_ID_ = :entityId
                   AND OBSERVATION_KIND_ = :observationKind
                   AND (TENANT_ID_ = :tenantId
                     OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
                   AND STATUS_ = 'APPLIED'
                 ORDER BY """ + ordering + " FETCH FIRST 1 ROW ONLY")
-                .param("source", values.source())
+                .param("engineId", values.engineId())
                 .param("caseId", values.caseId())
                 .param("processInstanceId", values.processInstanceId())
                 .param("entityId", values.entityId())
@@ -237,12 +263,12 @@ public final class AppliedObservationRepository {
     private void insert(ObservationValues values) {
         jdbc.sql("""
                 INSERT INTO CM_APPLIED_ENGINE_OBSERVATION
-                  (OBSERVATION_ID_, TENANT_ID_, FINGERPRINT_, STATUS_, SOURCE_, CASE_ID_,
+                  (OBSERVATION_ID_, TENANT_ID_, FINGERPRINT_, STATUS_, SOURCE_, ENGINE_ID_, CASE_ID_,
                    OBSERVATION_KIND_,
                    CLAIM_TOKEN_, PROCESS_INSTANCE_ID_, ENTITY_ID_, ENTITY_REVISION_, EVENT_TYPE_,
                    ENGINE_OCCURRED_AT_, CLAIMED_AT_)
                 VALUES
-                  (:observationId, :tenantId, :fingerprint, 'CLAIMED', :source, :caseId,
+                  (:observationId, :tenantId, :fingerprint, 'CLAIMED', :source, :engineId, :caseId,
                    :observationKind, :claimToken,
                    :processInstanceId, :entityId, :entityRevision, :eventType,
                    :engineOccurredAt, SYSTIMESTAMP)""")
@@ -250,6 +276,7 @@ public final class AppliedObservationRepository {
                 .param("tenantId", values.tenantId())
                 .param("fingerprint", values.fingerprint())
                 .param("source", values.source())
+                .param("engineId", values.engineId())
                 .param("caseId", values.caseId())
                 .param("observationKind", values.observationKind())
                 .param("claimToken", values.ownershipToken())
@@ -268,6 +295,7 @@ public final class AppliedObservationRepository {
                     STATUS_ = 'CLAIMED',
                     CLAIM_TOKEN_ = :claimToken,
                     SOURCE_ = :source,
+                    ENGINE_ID_ = :engineId,
                     CASE_ID_ = :caseId,
                     OBSERVATION_KIND_ = :observationKind,
                     PROCESS_INSTANCE_ID_ = :processInstanceId,
@@ -284,6 +312,7 @@ public final class AppliedObservationRepository {
                 .param("observationId", values.observationId())
                 .param("claimToken", values.ownershipToken())
                 .param("source", values.source())
+                .param("engineId", values.engineId())
                 .param("caseId", values.caseId())
                 .param("observationKind", values.observationKind())
                 .param("processInstanceId", values.processInstanceId())
@@ -306,6 +335,7 @@ public final class AppliedObservationRepository {
         String fingerprint = validFingerprint(observation.fingerprint());
         return new ObservationValues(observationId, tenantId, fingerprint,
                 requiredBounded(observation.source(), "source", SOURCE_MAX),
+                requiredBounded(observation.engineId(), "engineId", ENGINE_ID_MAX),
                 requiredBounded(observation.caseId(), "caseId", CASE_ID_MAX),
                 requiredBounded(observation.processInstanceId(), "processInstanceId", PROCESS_INSTANCE_ID_MAX),
                 observationKind(observation),
@@ -381,7 +411,7 @@ public final class AppliedObservationRepository {
     }
 
     private record ObservationValues(String observationId, String tenantId, String fingerprint,
-                                     String source, String caseId, String processInstanceId,
+                                     String source, String engineId, String caseId, String processInstanceId,
                                      String observationKind, String entityId, Long entityRevision,
                                      String eventType,
                                      java.time.Instant engineOccurredAt, String ownershipToken) {

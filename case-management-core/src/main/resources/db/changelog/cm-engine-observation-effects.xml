@@ -85,4 +85,21 @@
       <column name="CASE_ID_"/><column name="PROC_INST_ID_"/>
     </createIndex>
   </changeSet>
+
+  <changeSet id="cm-engine-observation-channel-identity" author="casemgmt">
+    <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
+      <!-- Historical rows cannot be assigned an engine identity from SOURCE_: source names an
+           adapter channel. Null therefore remains a deliberate reconciliation barrier. -->
+      <column name="ENGINE_ID_" type="VARCHAR2(128)"/>
+    </addColumn>
+    <addColumn tableName="CM_LINKED_PROCESS">
+      <!-- Exact deployed identity is unknown for historical links and must be reconciled. -->
+      <column name="PROC_DEF_ID_" type="VARCHAR2(128)"/>
+    </addColumn>
+    <createIndex tableName="CM_APPLIED_ENGINE_OBSERVATION" indexName="IX_CM_AEO_ENGINE_ENTITY">
+      <column name="TENANT_ID_"/><column name="ENGINE_ID_"/><column name="CASE_ID_"/>
+      <column name="PROCESS_INSTANCE_ID_"/><column name="OBSERVATION_KIND_"/>
+      <column name="ENTITY_ID_"/><column name="STATUS_"/>
+    </createIndex>
+  </changeSet>
 </databaseChangeLog>

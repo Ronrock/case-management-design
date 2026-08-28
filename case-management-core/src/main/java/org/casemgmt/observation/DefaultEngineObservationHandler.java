@@ -9,6 +9,7 @@ import org.casemgmt.projection.ActivityObservation;
 import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.projection.ProcessCompletionObservation;
 import org.casemgmt.projection.ProjectionEntityIdentity;
+import org.casemgmt.projection.ProjectionOwnershipException;
 import org.casemgmt.projection.ProcessProjectionResult;
 import org.casemgmt.projection.TaskObservation;
 import org.casemgmt.repo.AppliedObservationRepository;
@@ -72,6 +73,7 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
     @Transactional
     public ApplyResult apply(EngineObservation observation) {
         Objects.requireNonNull(observation, "observation");
+        cases.lockForObservation(observation.caseId());
         AppliedObservationRepository.ClaimResult claimed = claims.claim(observation);
         if (!claimed.ownsClaim()) {
             return new ApplyResult(observation.observationId(), ApplyStatus.DUPLICATE,
@@ -79,7 +81,6 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
         }
         AppliedObservationRepository.Claim ownership = claimed.claim().orElseThrow();
 
-        cases.lockForObservation(observation.caseId());
         CaseInstance caseInstance = cases.require(observation.caseId());
         java.util.Optional<AppliedObservationRepository.AppliedPosition> current;
         try {
@@ -97,8 +98,12 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
             recordSecurityRejection(observation,
                     ObservationRejectionReason.ORDERING_MODE_MISMATCH);
             throw rejected;
-        } catch (SecurityException rejected) {
-            recordSecurityRejection(observation, ObservationRejectionReason.ENTITY_OWNERSHIP);
+        } catch (AppliedObservationRepository.LegacyObservationHistoryException rejected) {
+            recordSecurityRejection(observation,
+                    ObservationRejectionReason.RECONCILIATION_REQUIRED);
+            throw rejected;
+        } catch (ProjectionOwnershipException rejected) {
+            recordProjectionRejection(observation, rejected);
             throw rejected;
         }
         if (current.filter(position -> stale(observation, position)).isPresent()) {
@@ -108,7 +113,13 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
                     caseInstance.version(), List.of());
         }
 
-        ProjectionOutcome projection = project(observation, caseInstance);
+        ProjectionOutcome projection;
+        try {
+            projection = project(observation, caseInstance);
+        } catch (ProjectionOwnershipException rejected) {
+            recordProjectionRejection(observation, rejected);
+            throw rejected;
+        }
         long caseVersion = projection.caseVersion();
         List<CanonicalPatch.AuditChange> canonicalChanges = List.of();
         if (observation instanceof UserTaskObservation task
@@ -162,6 +173,14 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
         securityTelemetry.rejected(new ObservationSecurityTelemetry.Rejection(
                 observation.caseId(), observation.processInstanceId(),
                 observation.entityId(), reason));
+    }
+
+    private void recordProjectionRejection(EngineObservation observation,
+                                           ProjectionOwnershipException rejected) {
+        recordSecurityRejection(observation,
+                rejected.classification() == ProjectionOwnershipException.Classification.INSERT_COLLISION
+                        ? ObservationRejectionReason.PROJECTION_COLLISION
+                        : ObservationRejectionReason.ENTITY_OWNERSHIP);
     }
 
     private ProjectionOutcome project(EngineObservation observation, CaseInstance caseInstance) {

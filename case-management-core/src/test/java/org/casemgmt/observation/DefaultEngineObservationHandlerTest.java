@@ -12,6 +12,7 @@ import org.casemgmt.projection.ProcessCompletionObservation;
 import org.casemgmt.projection.ProcessProjectionResult;
 import org.casemgmt.projection.ProjectionStatus;
 import org.casemgmt.projection.ProjectionEntityIdentity;
+import org.casemgmt.projection.ProjectionOwnershipException;
 import org.casemgmt.projection.TaskObservation;
 import org.casemgmt.repo.AppliedObservationRepository;
 import org.casemgmt.repo.CaseRepository;
@@ -46,6 +47,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -100,8 +102,8 @@ class DefaultEngineObservationHandlerTest {
 
         ArgumentCaptor<CaseEvent> event = ArgumentCaptor.forClass(CaseEvent.class);
         InOrder order = inOrder(claims, cases, processes, authority, projections, sla, events);
-        order.verify(claims).claim(observation);
         order.verify(cases).lockForObservation("case-1");
+        order.verify(claims).claim(observation);
         order.verify(cases).require("case-1");
         order.verify(processes).findByCase("case-1");
         order.verify(authority).validate(observation, activeCase("tenant-a", "process-1", 7));
@@ -149,8 +151,8 @@ class DefaultEngineObservationHandlerTest {
 
         ArgumentCaptor<CaseEvent> event = ArgumentCaptor.forClass(CaseEvent.class);
         InOrder order = inOrder(claims, cases, processes, authority, projections, mappings, sla, events);
-        order.verify(claims).claim(observation);
         order.verify(cases).lockForObservation("case-1");
+        order.verify(claims).claim(observation);
         order.verify(cases).require("case-1");
         order.verify(processes).findByCase("case-1");
         order.verify(authority).validate(observation, activeCase("tenant-a", "process-1", 7));
@@ -287,7 +289,7 @@ class DefaultEngineObservationHandlerTest {
     }
 
     @Test
-    void duplicateShortCircuitsWithoutReadingOrChangingAnyBusinessState() {
+    void duplicateLocksTheCaseBeforeClaimButDoesNotReadOrChangeBusinessState() {
         ProcessObservation observation = processObservation("obs-duplicate", 11L, OCCURRED);
         when(claims.claim(observation)).thenReturn(AppliedObservationRepository.ClaimResult.duplicate());
 
@@ -295,7 +297,9 @@ class DefaultEngineObservationHandlerTest {
 
         assertThat(result).isEqualTo(new ApplyResult("obs-duplicate", ApplyStatus.DUPLICATE,
                 ApplyResult.UNCHANGED_CASE_VERSION, List.of()));
-        verifyNoInteractions(cases, processes, projections, mappings, events, sla,
+        verify(cases).lockForObservation("case-1");
+        verify(cases, never()).require(any());
+        verifyNoInteractions(processes, projections, mappings, events, sla,
                 authority, securityTelemetry);
         verify(claims, never()).latestAppliedPosition(any());
         verify(claims, never()).markApplied(any());
@@ -340,12 +344,12 @@ class DefaultEngineObservationHandlerTest {
         owningClaim(observation, activeCase("tenant-a", "process-1", 7));
         ProjectionEntityIdentity identity = new ProjectionEntityIdentity("case-1", "process-1",
                 ProjectionEntityIdentity.Kind.USER_TASK, "task-owned-by-b", "activity-owned-by-b");
-        org.mockito.Mockito.doThrow(new SecurityException("entity belongs to another case"))
+        org.mockito.Mockito.doThrow(new ProjectionOwnershipException(
+                        ProjectionOwnershipException.Classification.CROSS_OWNER))
                 .when(projections).assertEntityOwnership(identity);
 
         assertThatThrownBy(() -> handler.apply(observation))
-                .isInstanceOf(SecurityException.class)
-                .hasMessageContaining("another case");
+                .isInstanceOf(ProjectionOwnershipException.class);
 
         verify(projections).assertEntityOwnership(identity);
         verify(securityTelemetry).rejected(new ObservationSecurityTelemetry.Rejection(
@@ -355,6 +359,38 @@ class DefaultEngineObservationHandlerTest {
         verify(projections, never()).observe(any(TaskObservation.class));
         verifyNoInteractions(mappings, events, sla);
         verify(claims, never()).markApplied(any());
+    }
+
+    @Test
+    void projectionRaceCollisionIsTelemeteredButDatabaseOutageIsNotSecurity() {
+        UserTaskObservation collision = new UserTaskObservation("obs-collision", 1,
+                "operaton:embedded", "tenant-a", "case-1", "process-1", "task-1", 3L,
+                UserTaskObservation.EventType.CREATED, OCCURRED, RECEIVED,
+                authorityAttributes("taskDefinitionKey", "review", "activityInstanceId", "activity-1"));
+        owningClaim(collision, activeCase("tenant-a", "process-1", 7));
+        org.mockito.Mockito.doThrow(new ProjectionOwnershipException(
+                        ProjectionOwnershipException.Classification.INSERT_COLLISION))
+                .when(projections).observe(any(TaskObservation.class));
+
+        assertThatThrownBy(() -> handler.apply(collision))
+                .isInstanceOf(ProjectionOwnershipException.class);
+        verify(securityTelemetry).rejected(new ObservationSecurityTelemetry.Rejection(
+                "case-1", "process-1", "task-1",
+                ObservationRejectionReason.PROJECTION_COLLISION));
+
+        reset(securityTelemetry, projections);
+        UserTaskObservation outage = new UserTaskObservation("obs-outage", 1,
+                "operaton:embedded", "tenant-a", "case-1", "process-1", "task-2", 3L,
+                UserTaskObservation.EventType.CREATED, OCCURRED, RECEIVED,
+                authorityAttributes("taskDefinitionKey", "review", "activityInstanceId", "activity-2"));
+        owningClaim(outage, activeCase("tenant-a", "process-1", 7));
+        var unavailable = new org.springframework.dao.DataAccessResourceFailureException(
+                "database unavailable");
+        org.mockito.Mockito.doThrow(unavailable).when(projections)
+                .assertEntityOwnership(any(ProjectionEntityIdentity.class));
+
+        assertThatThrownBy(() -> handler.apply(outage)).isSameAs(unavailable);
+        verifyNoInteractions(securityTelemetry);
     }
 
     @Test
@@ -515,8 +551,8 @@ class DefaultEngineObservationHandlerTest {
 
     private InOrder normalOrder(EngineObservation observation) {
         InOrder order = inOrder(claims, cases, processes, authority, projections, mappings, sla, events);
-        order.verify(claims).claim(observation);
         order.verify(cases).lockForObservation("case-1");
+        order.verify(claims).claim(observation);
         order.verify(cases).require("case-1");
         order.verify(processes).findByCase("case-1");
         order.verify(authority).validate(observation, activeCase("tenant-a", "process-1", 7));

@@ -12,13 +12,23 @@ public class LinkedProcessRepository {
 
     public record LinkedProcessRow(String id, String caseId, String planItemId,
                                    String correlationId, String processInstanceId,
+                                   String processDefinitionId,
                                    String processDefinitionKey, String state,
                                    CaseTask.EngineSync engineSync, boolean caseRoot) {
+        /** Source-compatible row with unknown exact definition identity. */
+        public LinkedProcessRow(String id, String caseId, String planItemId,
+                                String correlationId, String processInstanceId,
+                                String processDefinitionKey, String state,
+                                CaseTask.EngineSync engineSync, boolean caseRoot) {
+            this(id, caseId, planItemId, correlationId, processInstanceId, null,
+                    processDefinitionKey, state, engineSync, caseRoot);
+        }
+
         /** Source-compatible constructor for callers compiled against the pre-correlation row. */
         public LinkedProcessRow(String id, String caseId, String planItemId,
                                 String processInstanceId, String processDefinitionKey, String state,
                                 CaseTask.EngineSync engineSync) {
-            this(id, caseId, planItemId, id, processInstanceId, processDefinitionKey, state,
+            this(id, caseId, planItemId, id, processInstanceId, null, processDefinitionKey, state,
                     engineSync, false);
         }
     }
@@ -89,6 +99,14 @@ public class LinkedProcessRepository {
     @Transactional
     public void confirmStarted(String caseId, String correlationId,
                                String engineProcessInstanceId, OffsetDateTime confirmedAt) {
+        confirmStarted(caseId, correlationId, engineProcessInstanceId, null, null, confirmedAt);
+    }
+
+    /** Confirms both runtime instance and exact deployed definition identity atomically. */
+    @Transactional
+    public void confirmStarted(String caseId, String correlationId,
+                               String engineProcessInstanceId, String processDefinitionId,
+                               String processDefinitionKey, OffsetDateTime confirmedAt) {
         requireNonBlank(caseId, "caseId");
         requireNonBlank(correlationId, "correlationId");
         requireNonBlank(engineProcessInstanceId, "engineProcessInstanceId");
@@ -99,6 +117,8 @@ public class LinkedProcessRepository {
         int updated = jdbc.sql("""
                 UPDATE CM_LINKED_PROCESS
                 SET PROC_INST_ID_ = :processInstanceId,
+                    PROC_DEF_ID_ = COALESCE(:processDefinitionId, PROC_DEF_ID_),
+                    PROC_DEF_KEY_ = COALESCE(:processDefinitionKey, PROC_DEF_KEY_),
                     ENGINE_SYNC_ = 'SYNCED',
                     LAST_ENGINE_UPDATE_AT_ = :confirmedAt,
                     LAST_PROJECTED_AT_ = :confirmedAt
@@ -107,6 +127,8 @@ public class LinkedProcessRepository {
                   AND PROC_INST_ID_ IS NULL
                   AND ENGINE_SYNC_ = 'PENDING'""")
                 .param("processInstanceId", engineProcessInstanceId)
+                .param("processDefinitionId", processDefinitionId)
+                .param("processDefinitionKey", processDefinitionKey)
                 .param("confirmedAt", confirmedAt)
                 .param("caseId", caseId)
                 .param("correlationId", correlationId)
@@ -116,7 +138,8 @@ public class LinkedProcessRepository {
                 new IllegalStateException("No pending linked process for case " + caseId
                         + " and correlation " + correlationId));
         if (updated == 0) {
-            assertSameConfirmation(link, engineProcessInstanceId);
+            assertSameConfirmation(link, engineProcessInstanceId, processDefinitionId,
+                    processDefinitionKey);
             if (link.caseRoot()) {
                 assertRootConfirmation(caseId, correlationId, engineProcessInstanceId);
             }
@@ -152,7 +175,7 @@ public class LinkedProcessRepository {
     public Optional<LinkedProcessRow> findByCorrelation(String caseId, String correlationId) {
         return jdbc.sql("""
                 SELECT ID_, CASE_ID_, PLAN_ITEM_ID_, CORRELATION_ID_, PROC_INST_ID_,
-                       PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_
+                       PROC_DEF_ID_, PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_
                 FROM CM_LINKED_PROCESS
                 WHERE CASE_ID_ = :caseId AND CORRELATION_ID_ = :correlationId""")
                 .param("caseId", caseId)
@@ -164,7 +187,7 @@ public class LinkedProcessRepository {
     private Optional<LinkedProcessRow> findByCorrelation(String correlationId) {
         return jdbc.sql("""
                 SELECT ID_, CASE_ID_, PLAN_ITEM_ID_, CORRELATION_ID_, PROC_INST_ID_,
-                       PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_
+                       PROC_DEF_ID_, PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_
                 FROM CM_LINKED_PROCESS
                 WHERE CORRELATION_ID_ = :correlationId""")
                 .param("correlationId", correlationId)
@@ -190,9 +213,15 @@ public class LinkedProcessRepository {
     }
 
     private static void assertSameConfirmation(LinkedProcessRow link,
-                                               String engineProcessInstanceId) {
+                                               String engineProcessInstanceId,
+                                               String processDefinitionId,
+                                               String processDefinitionKey) {
         if (link.engineSync() != CaseTask.EngineSync.SYNCED
-                || !engineProcessInstanceId.equals(link.processInstanceId())) {
+                || !engineProcessInstanceId.equals(link.processInstanceId())
+                || (processDefinitionId != null
+                    && !processDefinitionId.equals(link.processDefinitionId()))
+                || (processDefinitionKey != null
+                    && !processDefinitionKey.equals(link.processDefinitionKey()))) {
             throw new IllegalStateException("Linked process correlation " + link.correlationId()
                     + " is already associated with a different state or engine identity");
         }
@@ -230,7 +259,7 @@ public class LinkedProcessRepository {
     public List<LinkedProcessRow> findByCase(String caseId) {
         return jdbc.sql("""
                 SELECT ID_, CASE_ID_, PLAN_ITEM_ID_, CORRELATION_ID_, PROC_INST_ID_,
-                       PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_
+                       PROC_DEF_ID_, PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_
                 FROM CM_LINKED_PROCESS WHERE CASE_ID_ = :caseId ORDER BY STARTED_AT_""")
             .param("caseId", caseId)
             .query(LinkedProcessRepository::map)
@@ -241,7 +270,8 @@ public class LinkedProcessRepository {
             throws java.sql.SQLException {
         return new LinkedProcessRow(rs.getString("ID_"), rs.getString("CASE_ID_"),
                 rs.getString("PLAN_ITEM_ID_"), rs.getString("CORRELATION_ID_"),
-                rs.getString("PROC_INST_ID_"), rs.getString("PROC_DEF_KEY_"),
+                rs.getString("PROC_INST_ID_"), rs.getString("PROC_DEF_ID_"),
+                rs.getString("PROC_DEF_KEY_"),
                 rs.getString("STATE_"),
                 CaseTask.EngineSync.valueOf(rs.getString("ENGINE_SYNC_")),
                 rs.getInt("IS_CASE_ROOT_") == 1);

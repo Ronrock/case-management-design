@@ -24,6 +24,9 @@ public sealed interface EngineObservation permits ProcessObservation, UserTaskOb
 
     String source();
 
+    /** Stable engine-instance identity; unlike {@link #source()}, this is channel independent. */
+    String engineId();
+
     String tenantId();
 
     String caseId();
@@ -52,6 +55,7 @@ public sealed interface EngineObservation permits ProcessObservation, UserTaskOb
             String observationId,
             int observationVersion,
             String source,
+            String engineId,
             String tenantId,
             String caseId,
             String processInstanceId,
@@ -64,6 +68,7 @@ public sealed interface EngineObservation permits ProcessObservation, UserTaskOb
             throw new IllegalArgumentException("observationVersion must be positive");
         }
         requireNonBlank(source, "source");
+        requireNonBlank(engineId, "engineId");
         if (tenantId != null) {
             requireNonBlank(tenantId, "tenantId");
         }
@@ -79,6 +84,18 @@ public sealed interface EngineObservation permits ProcessObservation, UserTaskOb
         if (receivedAt == null) {
             throw new IllegalArgumentException("receivedAt must not be null");
         }
+    }
+
+    /**
+     * Compatibility bridge for callers compiled against the pre-engine-id records. Such callers
+     * must carry the exact engine identity in their authority attributes; absent identity remains
+     * deliberately unresolved and will be rejected by the handler authority validator.
+     */
+    static String legacyEngineId(Map<String, Object> attributes) {
+        Object value = attributes == null ? null : attributes.get("engineId");
+        return value instanceof String engineId && !engineId.isBlank()
+                ? engineId
+                : "unresolved-engine";
     }
 
     /**
