@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.casemgmt.rules.PlanModelFixtures.caseInstance;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -22,6 +23,51 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class LinkedProcessServiceTest {
+
+    @Test
+    void exactConfirmationRejectsMissingDefinitionIdentityBeforePersistence() {
+        LinkedProcessRepository processes = mock(LinkedProcessRepository.class);
+        CaseRepository cases = mock(CaseRepository.class);
+        when(cases.require("eng-a:1")).thenReturn(caseInstance(Map.of()));
+        LinkedProcessService service = new LinkedProcessService(
+                processes, cases, mock(EngineGateway.class), mock(EventPublisher.class));
+
+        assertThatThrownBy(() -> service.confirmStarted(
+                "eng-a:1", "correlation-1", "process-42", " ", "letter-process",
+                java.time.OffsetDateTime.parse("2026-08-28T07:00:00Z")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("processDefinitionId");
+
+        org.mockito.Mockito.verifyNoInteractions(processes);
+    }
+
+    @Test
+    void synchronousStartPersistsExactDefinitionIdentity() {
+        LinkedProcessRepository processes = mock(LinkedProcessRepository.class);
+        CaseRepository cases = mock(CaseRepository.class);
+        EngineGateway engine = mock(EngineGateway.class);
+        EventPublisher events = mock(EventPublisher.class);
+        AtomicReference<String> insertedId = new AtomicReference<>();
+        when(cases.require("eng-a:1")).thenReturn(caseInstance(Map.of()));
+        when(engine.startProcessByKey(any())).thenReturn(new EngineProcessRef(
+                "process-42", "letter-process:9", "letter-process", "eng-a:1"));
+        doAnswer(invocation -> { insertedId.set(invocation.getArgument(0)); return null; })
+                .when(processes).insert(any(), eq("eng-a:1"), eq(null), eq("process-42"),
+                        eq("letter-process:9"), eq("letter-process"),
+                        eq(CaseTask.EngineSync.SYNCED));
+        when(processes.findByCase("eng-a:1")).thenAnswer(invocation -> List.of(
+                new LinkedProcessRepository.LinkedProcessRow(insertedId.get(), "eng-a:1", null,
+                        insertedId.get(), "process-42", "letter-process:9", "letter-process",
+                        "ACTIVE", CaseTask.EngineSync.SYNCED, false)));
+
+        var result = new LinkedProcessService(processes, cases, engine, events).start(
+                "eng-a:1", null, "letter-process", Map.of(),
+                new Actor("alice", List.of()));
+
+        assertThat(result.processDefinitionId()).isEqualTo("letter-process:9");
+        verify(processes).insert(result.id(), "eng-a:1", null, "process-42",
+                "letter-process:9", "letter-process", CaseTask.EngineSync.SYNCED);
+    }
 
     @Test
     void asynchronousStartPersistsOnlyCorrelationUntilEngineConfirms() {
@@ -36,7 +82,7 @@ class LinkedProcessServiceTest {
         doAnswer(invocation -> {
             insertedId.set(invocation.getArgument(0));
             return null;
-        }).when(processes).insert(any(), eq("eng-a:1"), eq(null), eq(null),
+        }).when(processes).insert(any(), eq("eng-a:1"), eq(null), eq(null), eq(null),
                 eq("letter-process"), eq(CaseTask.EngineSync.PENDING));
         when(processes.findByCase("eng-a:1")).thenAnswer(invocation -> List.of(
                 new LinkedProcessRepository.LinkedProcessRow(insertedId.get(), "eng-a:1", null,
@@ -49,7 +95,7 @@ class LinkedProcessServiceTest {
 
         assertThat(result.correlationId()).isEqualTo(result.id());
         assertThat(result.processInstanceId()).isNull();
-        verify(processes).insert(result.id(), "eng-a:1", null, null,
+        verify(processes).insert(result.id(), "eng-a:1", null, null, null,
                 "letter-process", CaseTask.EngineSync.PENDING);
     }
 }

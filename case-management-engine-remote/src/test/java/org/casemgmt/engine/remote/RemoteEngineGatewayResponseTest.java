@@ -12,6 +12,7 @@ import org.springframework.web.client.RestClient;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.client.ExpectedCount.once;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -20,6 +21,22 @@ import static org.springframework.http.HttpMethod.GET;
 import static org.springframework.http.HttpMethod.POST;
 
 class RemoteEngineGatewayResponseTest {
+
+    @Test
+    void legacyKeyStartReturnsTheRemoteExactDefinitionIdentity() {
+        server.expect(once(), requestTo("http://engine.test/process-definition/key/orders/start"))
+                .andExpect(method(POST))
+                .andRespond(withSuccess(
+                        "{\"id\":\"process-42\",\"definitionId\":\"orders:9:exact\"}",
+                        MediaType.APPLICATION_JSON));
+
+        var ref = gateway.startProcessByKey(new StartProcessByKeyRequest(
+                "case-1", null, "orders", Map.of(), null));
+
+        assertThat(ref.processDefinitionId()).isEqualTo("orders:9:exact");
+        assertThat(ref.processDefinitionKey()).isEqualTo("orders");
+        server.verify();
+    }
 
     private MockRestServiceServer server;
     private RemoteEngineGateway gateway;

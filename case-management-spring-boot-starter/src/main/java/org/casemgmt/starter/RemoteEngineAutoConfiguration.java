@@ -207,9 +207,12 @@ public class RemoteEngineAutoConfiguration {
             @Override
             public void confirmProcessStarted(String caseId, String correlationId,
                                               String engineProcessInstanceId,
+                                              String processDefinitionId,
+                                              String processDefinitionKey,
                                               OffsetDateTime confirmedAt) {
                 linkedProcessService.confirmStarted(caseId, correlationId,
-                        engineProcessInstanceId, confirmedAt);
+                        engineProcessInstanceId, processDefinitionId,
+                        processDefinitionKey, confirmedAt);
             }
         },
                 deployments::report);

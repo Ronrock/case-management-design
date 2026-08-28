@@ -25,7 +25,8 @@ class BpmnOrchestrationTest {
     void startsAndRecordsTheRootProcessAndDisablesExplicitClose() {
         EngineGateway engine = mock(EngineGateway.class);
         LinkedProcessRepository processes = mock(LinkedProcessRepository.class);
-        when(engine.startProcess(any())).thenReturn(new EngineProcessRef("proc-1", "d", "eng-a:1"));
+        when(engine.startProcess(any())).thenReturn(new EngineProcessRef(
+                "proc-1", "orders:1:exact", "orders", "eng-a:1"));
         EngineDeploymentIdentity identity = new EngineDeploymentIdentity(
                 "deployment-1", "orders:1:exact", "orders", 1, null);
         EngineDeploymentIdentityResolver identities = (caseDefinitionId, tenantId) -> identity;
@@ -35,8 +36,8 @@ class BpmnOrchestrationTest {
 
         assertThat(orchestration.mode()).isEqualTo(OrchestrationMode.BPMN);
         assertThat(orchestration.allowsExplicitClose()).isFalse();
-        verify(processes).insertRoot(any(), eq("eng-a:1"), eq("proc-1"), eq("orders"),
-                eq(CaseTask.EngineSync.SYNCED));
+        verify(processes).insertRoot(any(), eq("eng-a:1"), eq("proc-1"),
+                eq("orders:1:exact"), eq("orders"), eq(CaseTask.EngineSync.SYNCED));
         ArgumentCaptor<StartProcessRequest> request = ArgumentCaptor.forClass(StartProcessRequest.class);
         verify(engine).startProcess(request.capture());
         assertThat(request.getValue().processDefinitionId()).isEqualTo("orders:1:exact");
@@ -48,7 +49,8 @@ class BpmnOrchestrationTest {
     void pendingRemoteRootStoresCorrelationWithoutInventingAnEngineInstanceId() {
         EngineGateway engine = mock(EngineGateway.class);
         LinkedProcessRepository processes = mock(LinkedProcessRepository.class);
-        when(engine.startProcess(any())).thenReturn(new EngineProcessRef(null, "orders", "eng-a:1"));
+        when(engine.startProcess(any())).thenReturn(new EngineProcessRef(
+                null, "orders:1:exact", "orders", "eng-a:1"));
         EngineDeploymentIdentity identity = new EngineDeploymentIdentity(
                 "deployment-1", "orders:1:exact", "orders", 1, null);
         BpmnOrchestration orchestration = new BpmnOrchestration(
@@ -56,7 +58,7 @@ class BpmnOrchestrationTest {
 
         orchestration.onCaseCreated(caseInstance(Map.of()), definition());
 
-        verify(processes).insertRoot(any(), eq("eng-a:1"), eq(null), eq("orders"),
-                eq(CaseTask.EngineSync.PENDING));
+        verify(processes).insertRoot(any(), eq("eng-a:1"), eq(null),
+                eq("orders:1:exact"), eq("orders"), eq(CaseTask.EngineSync.PENDING));
     }
 }

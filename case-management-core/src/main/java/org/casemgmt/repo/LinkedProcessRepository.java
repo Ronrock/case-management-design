@@ -45,26 +45,39 @@ public class LinkedProcessRepository {
      */
     public void insert(String id, String caseId, String planItemId, String procInstId,
                        String procDefKey, CaseTask.EngineSync engineSync) {
+        insert(id, caseId, planItemId, procInstId, null, procDefKey, engineSync);
+    }
+
+    public void insert(String id, String caseId, String planItemId, String procInstId,
+                       String procDefId, String procDefKey, CaseTask.EngineSync engineSync) {
         jdbc.sql("""
                 INSERT INTO CM_LINKED_PROCESS (ID_, CASE_ID_, PLAN_ITEM_ID_, CORRELATION_ID_,
-                    PROC_INST_ID_, PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_)
-                VALUES (:id, :caseId, :planItemId, :id, :procInstId, :procDefKey,
+                    PROC_INST_ID_, PROC_DEF_ID_, PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_)
+                VALUES (:id, :caseId, :planItemId, :id, :procInstId, :procDefId, :procDefKey,
                     'ACTIVE', :engineSync, 0)""")
             .param("id", id).param("caseId", caseId).param("planItemId", planItemId)
-            .param("procInstId", procInstId).param("procDefKey", procDefKey)
+            .param("procInstId", procInstId).param("procDefId", procDefId)
+            .param("procDefKey", procDefKey)
             .param("engineSync", engineSync.name()).update();
     }
 
     @Transactional
     public void insertRoot(String id, String caseId, String procInstId, String procDefKey,
                            CaseTask.EngineSync engineSync) {
+        insertRoot(id, caseId, procInstId, null, procDefKey, engineSync);
+    }
+
+    @Transactional
+    public void insertRoot(String id, String caseId, String procInstId, String procDefId,
+                           String procDefKey, CaseTask.EngineSync engineSync) {
         jdbc.sql("""
                 INSERT INTO CM_LINKED_PROCESS (ID_, CASE_ID_, PLAN_ITEM_ID_, CORRELATION_ID_,
-                    PROC_INST_ID_, PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_)
-                VALUES (:id, :caseId, NULL, :id, :procInstId, :procDefKey,
+                    PROC_INST_ID_, PROC_DEF_ID_, PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_)
+                VALUES (:id, :caseId, NULL, :id, :procInstId, :procDefId, :procDefKey,
                     'ACTIVE', :engineSync, 1)""")
                 .param("id", id).param("caseId", caseId).param("procInstId", procInstId)
-                .param("procDefKey", procDefKey).param("engineSync", engineSync.name()).update();
+                .param("procDefId", procDefId).param("procDefKey", procDefKey)
+                .param("engineSync", engineSync.name()).update();
         int updated = jdbc.sql("""
                 UPDATE CM_CASE SET ROOT_CORRELATION_ID_ = :correlationId,
                     ROOT_PROC_INST_ID_ = :processInstanceId,
@@ -125,6 +138,8 @@ public class LinkedProcessRepository {
                 WHERE CASE_ID_ = :caseId
                   AND CORRELATION_ID_ = :correlationId
                   AND PROC_INST_ID_ IS NULL
+                  AND (PROC_DEF_ID_ IS NULL OR PROC_DEF_ID_ = :processDefinitionId)
+                  AND (PROC_DEF_KEY_ IS NULL OR PROC_DEF_KEY_ = :processDefinitionKey)
                   AND ENGINE_SYNC_ = 'PENDING'""")
                 .param("processInstanceId", engineProcessInstanceId)
                 .param("processDefinitionId", processDefinitionId)

@@ -22,7 +22,7 @@ public record ProcessObservation(
     public ProcessObservation {
         EngineObservation.validateIdentity(observationId, observationVersion, source, engineId, tenantId, caseId, processInstanceId, entityId,
                 eventType, engineOccurredAt, receivedAt);
-        attributes = EngineObservation.immutableAttributes(attributes);
+        attributes = EngineObservation.normalizedAttributes(engineId, attributes);
     }
 
     public ProcessObservation(String observationId, int observationVersion, String source,

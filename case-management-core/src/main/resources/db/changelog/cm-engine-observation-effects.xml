@@ -51,51 +51,130 @@
     </createIndex>
   </changeSet>
 
-  <changeSet id="cm-engine-observation-hardening" author="casemgmt">
+  <!-- These schema mutations are intentionally granular and guarded. Oracle DDL commits before a
+       later statement can fail, so each step must be independently resumable after a partially
+       attempted deployment. -->
+  <changeSet id="cm-engine-observation-hardening-kind" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_APPLIED_ENGINE_OBSERVATION" columnName="OBSERVATION_KIND_"/></not>
+    </preConditions>
     <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
       <column name="OBSERVATION_KIND_" type="VARCHAR2(32)" defaultValue="LEGACY">
         <constraints nullable="false"/>
       </column>
+    </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-ignored-at" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_APPLIED_ENGINE_OBSERVATION" columnName="IGNORED_AT_"/></not>
+    </preConditions>
+    <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
       <column name="IGNORED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
     </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-drop-status" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <sqlCheck expectedResult="1">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION' AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS'</sqlCheck>
+    </preConditions>
     <sql>ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS</sql>
-    <sql>ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS_TS</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-add-status" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION' AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS'</sqlCheck>
+    </preConditions>
     <sql>
       ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS
         CHECK (STATUS_ IN ('CLAIMED','APPLIED','IGNORED_STALE','FAILED'))
     </sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-drop-status-ts" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <sqlCheck expectedResult="1">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION' AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS_TS'</sqlCheck>
+    </preConditions>
+    <sql>ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS_TS</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-add-status-ts" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION' AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS_TS'</sqlCheck>
+    </preConditions>
     <sql>
       ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS_TS
         CHECK ((STATUS_ != 'APPLIED' OR APPLIED_AT_ IS NOT NULL)
            AND (STATUS_ != 'IGNORED_STALE' OR IGNORED_AT_ IS NOT NULL)
            AND (STATUS_ != 'FAILED' OR FAILED_AT_ IS NOT NULL))
     </sql>
-    <addColumn tableName="CM_PLAN_ITEM">
-      <column name="PROC_INST_ID_" type="VARCHAR2(128)"/>
-    </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-plan-process-width" author="casemgmt">
+    <preConditions onFail="HALT">
+      <columnExists tableName="CM_PLAN_ITEM" columnName="PROC_INST_ID_"/>
+    </preConditions>
+    <modifyDataType tableName="CM_PLAN_ITEM" columnName="PROC_INST_ID_"
+                    newDataType="VARCHAR2(128)"/>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-task-process" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_TASK" columnName="PROC_INST_ID_"/></not>
+    </preConditions>
     <addColumn tableName="CM_TASK">
       <column name="PROC_INST_ID_" type="VARCHAR2(128)"/>
     </addColumn>
-    <!-- Existing projections predate process ownership. Keep them unknown: assigning the
-         current root process would invent provenance and may misattribute child-process rows. -->
+  </changeSet>
+
+  <!-- Existing projections keep unknown provenance; no root-process backfill is guessed. -->
+  <changeSet id="cm-engine-observation-hardening-plan-process-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><indexExists indexName="IX_CM_PI_PROC_INST"/></not>
+    </preConditions>
     <createIndex tableName="CM_PLAN_ITEM" indexName="IX_CM_PI_PROC_INST">
       <column name="CASE_ID_"/><column name="PROC_INST_ID_"/>
     </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-task-process-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><indexExists indexName="IX_CM_TASK_PROC_INST"/></not>
+    </preConditions>
     <createIndex tableName="CM_TASK" indexName="IX_CM_TASK_PROC_INST">
       <column name="CASE_ID_"/><column name="PROC_INST_ID_"/>
     </createIndex>
   </changeSet>
 
-  <changeSet id="cm-engine-observation-channel-identity" author="casemgmt">
+  <changeSet id="cm-engine-observation-channel-engine-id" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_APPLIED_ENGINE_OBSERVATION" columnName="ENGINE_ID_"/></not>
+    </preConditions>
     <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
       <!-- Historical rows cannot be assigned an engine identity from SOURCE_: source names an
            adapter channel. Null therefore remains a deliberate reconciliation barrier. -->
       <column name="ENGINE_ID_" type="VARCHAR2(128)"/>
     </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-channel-child-definition" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_LINKED_PROCESS" columnName="PROC_DEF_ID_"/></not>
+    </preConditions>
     <addColumn tableName="CM_LINKED_PROCESS">
       <!-- Exact deployed identity is unknown for historical links and must be reconciled. -->
       <column name="PROC_DEF_ID_" type="VARCHAR2(128)"/>
     </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-channel-engine-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><indexExists indexName="IX_CM_AEO_ENGINE_ENTITY"/></not>
+    </preConditions>
     <createIndex tableName="CM_APPLIED_ENGINE_OBSERVATION" indexName="IX_CM_AEO_ENGINE_ENTITY">
       <column name="TENANT_ID_"/><column name="ENGINE_ID_"/><column name="CASE_ID_"/>
       <column name="PROCESS_INSTANCE_ID_"/><column name="OBSERVATION_KIND_"/>

@@ -50,6 +50,14 @@ public class EngineCommandDispatcher {
                                            OffsetDateTime confirmedAt) {
             report(correlationId, CaseTask.EngineSync.SYNCED, engineProcessInstanceId);
         }
+
+        default void confirmProcessStarted(String caseId, String correlationId,
+                                           String engineProcessInstanceId,
+                                           String processDefinitionId,
+                                           String processDefinitionKey,
+                                           OffsetDateTime confirmedAt) {
+            confirmProcessStarted(caseId, correlationId, engineProcessInstanceId, confirmedAt);
+        }
     }
 
     public interface DeploymentReporter {
@@ -125,8 +133,9 @@ public class EngineCommandDispatcher {
                             blankToNull(str(p, "correlationId"))));
                 }
                 String processInstanceId = requireProcessInstanceId(ref);
+                DefinitionIdentity definition = definitionIdentity(p, ref);
                 syncReporter.confirmProcessStarted(command.caseId(), str(p, "correlationId"),
-                        processInstanceId, OffsetDateTime.now());
+                        processInstanceId, definition.id(), definition.key(), OffsetDateTime.now());
             }
             case CANCEL_PROCESS -> delegate.cancelProcess(str(p, "processInstanceId"), str(p, "reason"));
             case DEPLOY_ORCHESTRATION -> {
@@ -193,6 +202,29 @@ public class EngineCommandDispatcher {
         }
         return processInstanceId;
     }
+
+    private static DefinitionIdentity definitionIdentity(Map<String, Object> payload,
+                                                         EngineProcessRef ref) {
+        String requestedKey = blankToNull(str(payload, "processDefinitionKey"));
+        String returnedKey = ref == null ? null : blankToNull(ref.processDefinitionKey());
+        if (requestedKey == null || returnedKey == null || !requestedKey.equals(returnedKey)) {
+            throw new EngineException("Engine start returned an inconsistent process-definition key");
+        }
+        String returnedId = ref == null ? null : blankToNull(ref.processDefinitionId());
+        if ("ID".equals(str(payload, "selectionType"))) {
+            String requestedId = blankToNull(str(payload, "processDefinitionId"));
+            if (requestedId == null || (returnedId != null && !requestedId.equals(returnedId))) {
+                throw new EngineException("Engine start returned an inconsistent process-definition id");
+            }
+            return new DefinitionIdentity(requestedId, requestedKey);
+        }
+        if (returnedId == null) {
+            throw new EngineException("Engine start returned no process-definition id");
+        }
+        return new DefinitionIdentity(returnedId, returnedKey);
+    }
+
+    private record DefinitionIdentity(String id, String key) { }
 
     @SuppressWarnings("unchecked")
     private static Map<String, Object> map(Object o) {

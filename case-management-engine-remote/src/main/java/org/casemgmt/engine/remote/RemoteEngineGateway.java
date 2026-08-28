@@ -341,7 +341,8 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         Map<String, Object> response = postExactStart(request.processDefinitionId(),
                 Map.of("businessKey", request.caseId(), "variables", typed(variables)));
 
-        return processRef(response, request.processDefinitionKey(), request.caseId());
+        return processRef(response, request.processDefinitionId(),
+                string(definition.get("key")), request.caseId(), false);
     }
 
     @Override
@@ -355,7 +356,7 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
                 "/process-definition/key/" + encodedKey + "/start",
                 Map.of("businessKey", request.caseId(), "variables", typed(variables)));
 
-        return processRef(response, request.processDefinitionKey(), request.caseId());
+        return processRef(response, null, request.processDefinitionKey(), request.caseId(), true);
     }
 
     @Override
@@ -566,12 +567,27 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
     }
 
     private static EngineProcessRef processRef(
-            Map<String, Object> response, String processDefinitionKey, String caseId) {
+            Map<String, Object> response, String expectedProcessDefinitionId,
+            String processDefinitionKey, String caseId, boolean requireResponseDefinitionId) {
         String processInstanceId = response == null ? null : string(response.get("id"));
         if (processInstanceId == null || processInstanceId.isBlank()) {
             throw new EngineException("Engine start returned no process-instance id");
         }
-        return new EngineProcessRef(processInstanceId, processDefinitionKey, caseId);
+        String responseDefinitionId = response == null ? null : string(response.get("definitionId"));
+        if (responseDefinitionId != null && responseDefinitionId.isBlank()) {
+            responseDefinitionId = null;
+        }
+        if (expectedProcessDefinitionId != null && responseDefinitionId != null
+                && !expectedProcessDefinitionId.equals(responseDefinitionId)) {
+            throw new EngineException("Engine start returned an inconsistent process-definition id");
+        }
+        String processDefinitionId = expectedProcessDefinitionId == null
+                ? responseDefinitionId : expectedProcessDefinitionId;
+        if (requireResponseDefinitionId && processDefinitionId == null) {
+            throw new EngineException("Engine start returned no process-definition id");
+        }
+        return new EngineProcessRef(processInstanceId, processDefinitionId,
+                processDefinitionKey, caseId);
     }
 
     /** engine-rest wants {"name": {"value": v, "type": "String"}} rather than plain values. */

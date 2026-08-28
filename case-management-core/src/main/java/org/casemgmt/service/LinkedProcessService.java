@@ -4,6 +4,7 @@ import org.casemgmt.domain.CaseIds;
 import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CaseTask;
 import org.casemgmt.engine.EngineGateway;
+import org.casemgmt.engine.EngineException;
 import org.casemgmt.engine.EngineProcessRef;
 import org.casemgmt.engine.StartProcessByKeyRequest;
 import org.casemgmt.event.CaseEvent;
@@ -59,11 +60,18 @@ public class LinkedProcessService {
         EngineProcessRef ref = engine.startProcessByKey(
                 new StartProcessByKeyRequest(caseId, planItemId, processDefinitionKey, variables, id));
 
+        if (ref == null || !processDefinitionKey.equals(ref.processDefinitionKey())) {
+            throw new EngineException("Engine start returned an inconsistent process-definition key");
+        }
         String instanceId = ref.processInstanceId();
-        CaseTask.EngineSync sync = ref.processInstanceId() == null
+        CaseTask.EngineSync sync = instanceId == null
                 ? CaseTask.EngineSync.PENDING      // remote mode: the dispatcher confirms later
                 : CaseTask.EngineSync.SYNCED;
-        processes.insert(id, caseId, planItemId, instanceId, processDefinitionKey, sync);
+        if (sync == CaseTask.EngineSync.SYNCED && ref.processDefinitionId() == null) {
+            throw new EngineException("Engine start returned no process-definition id");
+        }
+        processes.insert(id, caseId, planItemId, instanceId, ref.processDefinitionId(),
+                processDefinitionKey, sync);
 
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("correlationId", id);
@@ -97,8 +105,16 @@ public class LinkedProcessService {
     public void confirmStarted(String caseId, String correlationId,
                                String engineProcessInstanceId, String processDefinitionId,
                                String processDefinitionKey, OffsetDateTime confirmedAt) {
+        requireNonBlank(processDefinitionId, "processDefinitionId");
+        requireNonBlank(processDefinitionKey, "processDefinitionKey");
         cases.require(caseId);
         processes.confirmStarted(caseId, correlationId, engineProcessInstanceId,
                 processDefinitionId, processDefinitionKey, confirmedAt);
+    }
+
+    private static void requireNonBlank(String value, String name) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(name + " must not be blank");
+        }
     }
 }

@@ -80,7 +80,8 @@ public class OutboxEngineGateway implements EngineGateway {
                         "tenantId", request.tenantId() == null ? "" : request.tenantId(),
                         "variables", request.variables() == null ? Map.of() : request.variables(),
                         "correlationId", request.correlationId() == null ? "" : request.correlationId()));
-        return new EngineProcessRef(null, request.processDefinitionKey(), request.caseId());
+        return new EngineProcessRef(null, request.processDefinitionId(),
+                request.processDefinitionKey(), request.caseId());
     }
 
     @Override

@@ -22,7 +22,7 @@ public record MilestoneObservation(
     public MilestoneObservation {
         EngineObservation.validateIdentity(observationId, observationVersion, source, engineId, tenantId, caseId, processInstanceId, entityId,
                 eventType, engineOccurredAt, receivedAt);
-        attributes = EngineObservation.immutableAttributes(attributes);
+        attributes = EngineObservation.normalizedAttributes(engineId, attributes);
     }
 
     public MilestoneObservation(String observationId, int observationVersion, String source,

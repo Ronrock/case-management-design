@@ -98,6 +98,23 @@ public sealed interface EngineObservation permits ProcessObservation, UserTaskOb
                 : "unresolved-engine";
     }
 
+    /** Removes the legacy authority duplicate after proving it agrees with the first-class ID. */
+    static Map<String, Object> normalizedAttributes(
+            String engineId, Map<String, Object> attributes) {
+        if (attributes == null || attributes.isEmpty()) {
+            return Map.of();
+        }
+        Object legacy = attributes.get("engineId");
+        if (attributes.containsKey("engineId")
+                && (!(legacy instanceof String legacyId) || !engineId.equals(legacyId))) {
+            throw new IllegalArgumentException(
+                    "attributes.engineId must match the first-class engineId");
+        }
+        var normalized = new LinkedHashMap<String, Object>(attributes);
+        normalized.remove("engineId");
+        return immutableAttributes(normalized);
+    }
+
     /**
      * Returns a recursively immutable copy containing only values that can be represented in JSON.
      */

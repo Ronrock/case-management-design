@@ -24,7 +24,7 @@ class ExactStartOutboxTest {
         EngineCommandRepository commands = mock(EngineCommandRepository.class);
         OutboxEngineGateway outbox = new OutboxEngineGateway(commands, ignored -> { });
 
-        outbox.startProcess(new StartProcessRequest(
+        EngineProcessRef pending = outbox.startProcess(new StartProcessRequest(
                 "case-1", null, "orders:1:exact", "orders", "tenant-a",
                 Map.of("amount", 10), "root-link-1"));
 
@@ -36,6 +36,7 @@ class ExactStartOutboxTest {
                 .containsEntry("processDefinitionKey", "orders")
                 .containsEntry("tenantId", "tenant-a")
                 .containsEntry("correlationId", "root-link-1");
+        assertThat(pending.processDefinitionId()).isEqualTo("orders:1:exact");
     }
 
     @Test

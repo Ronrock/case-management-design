@@ -109,6 +109,56 @@ class ObservationFingerprintTest {
     }
 
     @Test
+    void legacyAndCanonicalConstructorsNormalizeEngineAuthorityForEveryVariant() {
+        Map<String, Object> canonicalAttributes = Map.of("activityId", "review");
+        Map<String, Object> legacyAttributes = Map.of(
+                "engineId", "engine-west", "activityId", "review");
+
+        assertConstructorParity(
+                new ProcessObservation("canonical-process", 1, "embedded", "engine-west",
+                        "tenant-a", "case-1", "process-1", "process-1", 1L,
+                        ProcessObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT,
+                        canonicalAttributes),
+                new ProcessObservation("legacy-process", 1, "embedded", "tenant-a", "case-1",
+                        "process-1", "process-1", 1L, ProcessObservation.EventType.STARTED,
+                        OCCURRED_AT, RECEIVED_AT, legacyAttributes), canonicalAttributes);
+        assertConstructorParity(
+                new UserTaskObservation("canonical-task", 1, "embedded", "engine-west",
+                        "tenant-a", "case-1", "process-1", "task-1", 1L,
+                        UserTaskObservation.EventType.CREATED, OCCURRED_AT, RECEIVED_AT,
+                        canonicalAttributes),
+                new UserTaskObservation("legacy-task", 1, "embedded", "tenant-a", "case-1",
+                        "process-1", "task-1", 1L, UserTaskObservation.EventType.CREATED,
+                        OCCURRED_AT, RECEIVED_AT, legacyAttributes), canonicalAttributes);
+        assertConstructorParity(
+                new ActivityLifecycleObservation("canonical-activity", 1, "embedded",
+                        "engine-west", "tenant-a", "case-1", "process-1", "activity-1", 1L,
+                        ActivityLifecycleObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT,
+                        canonicalAttributes),
+                new ActivityLifecycleObservation("legacy-activity", 1, "embedded", "tenant-a",
+                        "case-1", "process-1", "activity-1", 1L,
+                        ActivityLifecycleObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT,
+                        legacyAttributes), canonicalAttributes);
+        assertConstructorParity(
+                new MilestoneObservation("canonical-milestone", 1, "embedded", "engine-west",
+                        "tenant-a", "case-1", "process-1", "milestone-1", 1L,
+                        MilestoneObservation.EventType.REACHED, OCCURRED_AT, RECEIVED_AT,
+                        canonicalAttributes),
+                new MilestoneObservation("legacy-milestone", 1, "embedded", "tenant-a",
+                        "case-1", "process-1", "milestone-1", 1L,
+                        MilestoneObservation.EventType.REACHED, OCCURRED_AT, RECEIVED_AT,
+                        legacyAttributes), canonicalAttributes);
+    }
+
+    @Test
+    void canonicalConstructorRejectsConflictingLegacyEngineAuthority() {
+        assertThrows(IllegalArgumentException.class, () -> new ProcessObservation(
+                "conflict", 1, "embedded", "engine-west", "tenant-a", "case-1", "process-1",
+                "process-1", 1L, ProcessObservation.EventType.STARTED, OCCURRED_AT, RECEIVED_AT,
+                Map.of("engineId", "engine-east")));
+    }
+
+    @Test
     void defensivelyCopiesJsonFriendlyAttributes() {
         var labels = new ArrayList<>(List.of("urgent"));
         var nested = new LinkedHashMap<String, Object>();
@@ -199,5 +249,13 @@ class ObservationFingerprintTest {
         @Override public long longValue() { return 1; }
         @Override public float floatValue() { return 1; }
         @Override public double doubleValue() { return 1; }
+    }
+
+    private static void assertConstructorParity(EngineObservation canonical,
+                                                EngineObservation legacy,
+                                                Map<String, Object> expectedAttributes) {
+        assertEquals(expectedAttributes, canonical.attributes());
+        assertEquals(expectedAttributes, legacy.attributes());
+        assertEquals(canonical.fingerprint(), legacy.fingerprint());
     }
 }

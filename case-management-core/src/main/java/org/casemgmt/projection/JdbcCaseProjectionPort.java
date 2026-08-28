@@ -177,11 +177,11 @@ public class JdbcCaseProjectionPort implements CaseProjectionPort {
 
     private int updateTaskPlanItem(TaskObservation observation, String state) {
         return jdbc.sql("""
-                UPDATE CM_PLAN_ITEM target SET target.STATE_ = :state, target.NAME_ = :name,
-                    target.PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
-                    target.UPDATED_AT_ = :projectedAt, target.LAST_ENGINE_UPDATE_AT_ = :engineAt,
-                    target.LAST_PROJECTED_AT_ = :projectedAt, target.PROJECTION_STATUS_ = 'CURRENT',
-                    target.ENDED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
+                UPDATE CM_PLAN_ITEM target SET STATE_ = :state, NAME_ = :name,
+                    PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
+                    UPDATED_AT_ = :projectedAt, LAST_ENGINE_UPDATE_AT_ = :engineAt,
+                    LAST_PROJECTED_AT_ = :projectedAt, PROJECTION_STATUS_ = 'CURRENT',
+                    ENDED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
                                            THEN :projectedAt ELSE target.ENDED_AT_ END
                 WHERE target.ENGINE_ACTIVITY_ID_ = :activityInstanceId
                   AND target.CASE_ID_ = :caseId
@@ -233,11 +233,11 @@ public class JdbcCaseProjectionPort implements CaseProjectionPort {
 
     private int updateTask(TaskObservation observation, String state) {
         return jdbc.sql("""
-                UPDATE CM_TASK target SET target.STATE_ = :state, target.ASSIGNEE_ = :assignee,
-                    target.PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
-                    target.UPDATED_AT_ = :projectedAt, target.LAST_ENGINE_UPDATE_AT_ = :engineAt,
-                    target.LAST_PROJECTED_AT_ = :projectedAt, target.PROJECTION_STATUS_ = 'CURRENT',
-                    target.COMPLETED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
+                UPDATE CM_TASK target SET STATE_ = :state, ASSIGNEE_ = :assignee,
+                    PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
+                    UPDATED_AT_ = :projectedAt, LAST_ENGINE_UPDATE_AT_ = :engineAt,
+                    LAST_PROJECTED_AT_ = :projectedAt, PROJECTION_STATUS_ = 'CURRENT',
+                    COMPLETED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
                                                THEN :projectedAt ELSE target.COMPLETED_AT_ END
                 WHERE target.CAMUNDA_TASK_ID_ = :engineTaskId AND target.CASE_ID_ = :caseId
                   AND (:processInstanceId IS NULL OR target.PROC_INST_ID_ IS NULL
@@ -303,11 +303,11 @@ public class JdbcCaseProjectionPort implements CaseProjectionPort {
 
     private int updateActivityPlanItem(ActivityObservation observation, String state) {
         return jdbc.sql("""
-                UPDATE CM_PLAN_ITEM target SET target.STATE_ = :state, target.NAME_ = :name,
-                    target.PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
-                    target.UPDATED_AT_ = :projectedAt, target.LAST_ENGINE_UPDATE_AT_ = :engineAt,
-                    target.LAST_PROJECTED_AT_ = :projectedAt, target.PROJECTION_STATUS_ = 'CURRENT',
-                    target.ENDED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
+                UPDATE CM_PLAN_ITEM target SET STATE_ = :state, NAME_ = :name,
+                    PROC_INST_ID_ = COALESCE(target.PROC_INST_ID_, :processInstanceId),
+                    UPDATED_AT_ = :projectedAt, LAST_ENGINE_UPDATE_AT_ = :engineAt,
+                    LAST_PROJECTED_AT_ = :projectedAt, PROJECTION_STATUS_ = 'CURRENT',
+                    ENDED_AT_ = CASE WHEN :state IN ('COMPLETED','TERMINATED')
                                            THEN :projectedAt ELSE NULL END
                 WHERE target.ENGINE_ACTIVITY_ID_ = :activityInstanceId
                   AND target.CASE_ID_ = :caseId

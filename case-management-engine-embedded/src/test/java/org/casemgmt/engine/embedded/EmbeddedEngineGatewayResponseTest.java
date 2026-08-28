@@ -14,12 +14,31 @@ import org.operaton.bpm.engine.runtime.ProcessInstance;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class EmbeddedEngineGatewayResponseTest {
+
+    @Test
+    void legacyKeyStartReturnsTheRuntimeExactDefinitionIdentity() {
+        RuntimeService runtime = mock(RuntimeService.class);
+        ProcessInstance instance = mock(ProcessInstance.class);
+        when(runtime.startProcessInstanceByKey(eq("orders"), eq("case-1"), anyMap()))
+                .thenReturn(instance);
+        when(instance.getId()).thenReturn("process-42");
+        when(instance.getProcessDefinitionId()).thenReturn("orders:9:exact");
+        EmbeddedEngineGateway gateway = new EmbeddedEngineGateway(
+                mock(TaskService.class), runtime, mock(RepositoryService.class));
+
+        var ref = gateway.startProcessByKey(new StartProcessByKeyRequest(
+                "case-1", null, "orders", Map.of(), null));
+
+        assertThat(ref.processDefinitionId()).isEqualTo("orders:9:exact");
+        assertThat(ref.processDefinitionKey()).isEqualTo("orders");
+    }
 
     @Test
     void exactStartRejectsAMissingProcessInstanceId() {

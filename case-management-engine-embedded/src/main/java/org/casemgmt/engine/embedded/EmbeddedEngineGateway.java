@@ -117,8 +117,13 @@ public class EmbeddedEngineGateway implements EngineGateway {
         try {
             var instance = runtimeService.startProcessInstanceById(
                     request.processDefinitionId(), request.caseId(), variables);
+            String actualDefinitionId = instance == null ? null : instance.getProcessDefinitionId();
+            if (actualDefinitionId != null
+                    && !request.processDefinitionId().equals(actualDefinitionId)) {
+                throw new EngineException("Engine start returned an inconsistent process-definition id");
+            }
             return processRef(instance == null ? null : instance.getId(),
-                    request.processDefinitionKey(), request.caseId());
+                    request.processDefinitionId(), definition.getKey(), request.caseId());
         } catch (ProcessEngineException e) {
             throw new EngineException(
                     "Could not start process " + request.processDefinitionId(), e);
@@ -134,6 +139,7 @@ public class EmbeddedEngineGateway implements EngineGateway {
             var instance = runtimeService.startProcessInstanceByKey(
                     request.processDefinitionKey(), request.caseId(), variables);
             return processRef(instance == null ? null : instance.getId(),
+                    instance == null ? null : instance.getProcessDefinitionId(),
                     request.processDefinitionKey(), request.caseId());
         } catch (ProcessEngineException e) {
             throw new EngineException(
@@ -142,11 +148,16 @@ public class EmbeddedEngineGateway implements EngineGateway {
     }
 
     private static EngineProcessRef processRef(
-            String processInstanceId, String processDefinitionKey, String caseId) {
+            String processInstanceId, String processDefinitionId,
+            String processDefinitionKey, String caseId) {
         if (processInstanceId == null || processInstanceId.isBlank()) {
             throw new EngineException("Engine start returned no process-instance id");
         }
-        return new EngineProcessRef(processInstanceId, processDefinitionKey, caseId);
+        if (processDefinitionId == null || processDefinitionId.isBlank()) {
+            throw new EngineException("Engine start returned no process-definition id");
+        }
+        return new EngineProcessRef(processInstanceId, processDefinitionId,
+                processDefinitionKey, caseId);
     }
 
     @Override

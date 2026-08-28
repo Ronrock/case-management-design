@@ -48,10 +48,16 @@ public final class BpmnOrchestration implements CaseOrchestration {
                 caseInstance.id(), null, identity.processDefinitionId(),
                 identity.processDefinitionKey(), identity.tenantId(), caseInstance.variables(),
                 projectionId));
+        if (process == null
+                || !identity.processDefinitionId().equals(process.processDefinitionId())
+                || !identity.processDefinitionKey().equals(process.processDefinitionKey())) {
+            throw new IllegalStateException(
+                    "Engine start returned an inconsistent process-definition identity");
+        }
         CaseTask.EngineSync sync = process.processInstanceId() == null
                 ? CaseTask.EngineSync.PENDING : CaseTask.EngineSync.SYNCED;
         processes.insertRoot(projectionId, caseInstance.id(), process.processInstanceId(),
-                identity.processDefinitionKey(), sync);
+                identity.processDefinitionId(), identity.processDefinitionKey(), sync);
     }
 
     @Override
