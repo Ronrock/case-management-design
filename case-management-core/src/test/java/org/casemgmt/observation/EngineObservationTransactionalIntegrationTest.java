@@ -48,9 +48,14 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -85,7 +90,9 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
 
     @AfterEach
     void tearDown() {
-        context.close();
+        if (context != null) {
+            context.close();
+        }
     }
 
     @ParameterizedTest(name = "failure {0} rolls back every lifecycle table")
@@ -100,7 +107,7 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                 .hasMessageContaining(point.name());
 
         assertThat(state()).isEqualTo(before);
-        assertThat(count("CM_APPLIED_ENGINE_OBSERVATION")).isZero();
+        assertThat(state().appliedRows()).isEmpty();
     }
 
     @Test
@@ -117,17 +124,49 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                 ApplyStatus.DUPLICATE, ApplyResult.UNCHANGED_CASE_VERSION, List.of()));
         assertThat(state()).isEqualTo(afterFirst);
         assertThat(afterFirst).satisfies(committed -> {
-            assertThat(committed.caseRow().variablesJson()).contains("approved");
-            assertThat(committed.caseRow().version()).isEqualTo(8);
-            assertThat(committed.planItem().state()).isEqualTo("COMPLETED");
-            assertThat(committed.task().state()).isEqualTo("COMPLETED");
-            assertThat(committed.sla().status()).isEqualTo("RUNNING");
-            assertThat(committed.sla().version()).isEqualTo(1);
-            assertThat(committed.appliedCount()).isEqualTo(1);
-            assertThat(committed.appliedStatus()).isEqualTo("APPLIED");
-            assertThat(committed.auditCount()).isEqualTo(1);
-            assertThat(committed.eventCount()).isEqualTo(1);
-            assertThat(committed.deliveryCount()).isEqualTo(1);
+            assertThat(committed.caseRows()).singleElement().satisfies(row -> {
+                assertThat(row.get("VARIABLES_JSON_").toString()).contains("approved");
+                assertThat(row.get("VERSION_")).isEqualTo("8");
+            });
+            assertThat(committed.planItemRows()).singleElement()
+                    .extracting(row -> row.get("STATE_")).isEqualTo("COMPLETED");
+            assertThat(committed.taskRows()).singleElement()
+                    .extracting(row -> row.get("STATE_")).isEqualTo("COMPLETED");
+            assertThat(committed.slaRows()).singleElement().satisfies(row -> {
+                assertThat(row.get("STATUS_")).isEqualTo("RUNNING");
+                assertThat(row.get("VERSION_")).isEqualTo("1");
+            });
+            assertThat(committed.appliedRows()).singleElement().satisfies(row -> {
+                assertThat(row.keySet()).containsExactlyInAnyOrder(
+                        "OBSERVATION_ID_", "TENANT_ID_", "FINGERPRINT_", "CLAIM_TOKEN_",
+                        "STATUS_", "SOURCE_", "ENGINE_ID_", "CASE_ID_",
+                        "PROCESS_INSTANCE_ID_", "ENTITY_ID_", "ENTITY_REVISION_",
+                        "EVENT_TYPE_", "ENGINE_OCCURRED_AT_", "CLAIMED_AT_", "APPLIED_AT_",
+                        "FAILED_AT_", "FAILURE_DETAIL_", "OBSERVATION_KIND_", "IGNORED_AT_");
+                assertThat(row.get("OBSERVATION_ID_")).isEqualTo("observation-1");
+                assertThat(row.get("FINGERPRINT_")).isEqualTo(observation.fingerprint());
+                assertThat(row.get("CLAIM_TOKEN_").toString())
+                        .matches("[A-Za-z0-9_-]{43}");
+                assertThat(row.get("STATUS_")).isEqualTo("APPLIED");
+                assertThat(row.get("OBSERVATION_KIND_")).isEqualTo("USER_TASK");
+                assertThat(row.get("ENTITY_REVISION_")).isEqualTo("5");
+                assertThat(row.get("ENGINE_OCCURRED_AT_")).isEqualTo(OCCURRED.toString());
+                assertThat(row.get("ENGINE_ID_")).isEqualTo(ENGINE_ID);
+                assertThat(row.get("SOURCE_")).isEqualTo("operaton:embedded");
+                assertThat(row.get("TENANT_ID_")).isEqualTo(TENANT_ID);
+                assertThat(row.get("CASE_ID_")).isEqualTo(CASE_ID);
+                assertThat(row.get("PROCESS_INSTANCE_ID_")).isEqualTo(PROCESS_INSTANCE_ID);
+                assertThat(row.get("ENTITY_ID_")).isEqualTo("task-1");
+                assertThat(row.get("EVENT_TYPE_")).isEqualTo("COMPLETED");
+                assertThat(row.get("CLAIMED_AT_")).isNotEqualTo(NullValue.INSTANCE);
+                assertThat(row.get("APPLIED_AT_")).isNotEqualTo(NullValue.INSTANCE);
+                assertThat(row.get("FAILED_AT_")).isEqualTo(NullValue.INSTANCE);
+                assertThat(row.get("FAILURE_DETAIL_")).isEqualTo(NullValue.INSTANCE);
+                assertThat(row.get("IGNORED_AT_")).isEqualTo(NullValue.INSTANCE);
+            });
+            assertThat(committed.auditRows()).hasSize(1);
+            assertThat(committed.eventRows()).hasSize(1);
+            assertThat(committed.deliveryRows()).hasSize(1);
         });
     }
 
@@ -141,7 +180,7 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                 .hasMessageContaining(FailurePoint.AFTER_ROOT_TERMINAL.name());
 
         assertThat(state()).isEqualTo(before);
-        assertThat(count("CM_APPLIED_ENGINE_OBSERVATION")).isZero();
+        assertThat(state().appliedRows()).isEmpty();
     }
 
     private void seedPublishedBpmnCase() {
@@ -237,49 +276,60 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
     }
 
     private DatabaseState state() {
-        CaseRow caseRow = jdbc().sql("""
-                SELECT VARIABLES_JSON_, STATE_, VERSION_, UPDATED_AT_, CLOSED_AT_,
-                       LAST_ENGINE_UPDATE_AT_
-                FROM CM_CASE WHERE ID_ = :caseId""").param("caseId", CASE_ID)
-                .query((rs, row) -> new CaseRow(rs.getString("VARIABLES_JSON_"),
-                        rs.getString("STATE_"), rs.getLong("VERSION_"),
-                        rs.getObject("UPDATED_AT_", OffsetDateTime.class),
-                        rs.getObject("CLOSED_AT_", OffsetDateTime.class),
-                        rs.getObject("LAST_ENGINE_UPDATE_AT_", OffsetDateTime.class))).single();
-        ProjectionRow planItem = jdbc().sql("""
-                SELECT STATE_, VERSION_, UPDATED_AT_, ENDED_AT_, LAST_ENGINE_UPDATE_AT_
-                FROM CM_PLAN_ITEM WHERE ID_ = 'plan-task-1'""")
-                .query((rs, row) -> new ProjectionRow(rs.getString("STATE_"),
-                        rs.getLong("VERSION_"), rs.getObject("UPDATED_AT_", OffsetDateTime.class),
-                        rs.getObject("ENDED_AT_", OffsetDateTime.class),
-                        rs.getObject("LAST_ENGINE_UPDATE_AT_", OffsetDateTime.class))).single();
-        ProjectionRow task = jdbc().sql("""
-                SELECT STATE_, VERSION_, UPDATED_AT_, COMPLETED_AT_, LAST_ENGINE_UPDATE_AT_
-                FROM CM_TASK WHERE ID_ = 'task-row-1'""")
-                .query((rs, row) -> new ProjectionRow(rs.getString("STATE_"),
-                        rs.getLong("VERSION_"), rs.getObject("UPDATED_AT_", OffsetDateTime.class),
-                        rs.getObject("COMPLETED_AT_", OffsetDateTime.class),
-                        rs.getObject("LAST_ENGINE_UPDATE_AT_", OffsetDateTime.class))).single();
-        SlaRow sla = jdbc().sql("SELECT STATUS_, VERSION_ FROM CM_SLA_RECORD WHERE ID_ = 'sla-1'")
-                .query((rs, row) -> new SlaRow(rs.getString("STATUS_"), rs.getLong("VERSION_")))
-                .single();
-        LinkedProcessRow linkedProcess = jdbc().sql("""
-                SELECT STATE_, ENDED_AT_, LAST_ENGINE_UPDATE_AT_
-                FROM CM_LINKED_PROCESS WHERE ID_ = 'root-link'""")
-                .query((rs, row) -> new LinkedProcessRow(rs.getString("STATE_"),
-                        rs.getObject("ENDED_AT_", OffsetDateTime.class),
-                        rs.getObject("LAST_ENGINE_UPDATE_AT_", OffsetDateTime.class))).single();
-        String appliedStatus = jdbc().sql("""
-                SELECT STATUS_ FROM CM_APPLIED_ENGINE_OBSERVATION
-                WHERE CASE_ID_ = :caseId""").param("caseId", CASE_ID)
-                .query(String.class).optional().orElse(null);
-        return new DatabaseState(caseRow, planItem, task, sla, linkedProcess,
-                count("CM_APPLIED_ENGINE_OBSERVATION"), appliedStatus,
-                count("CM_AUDIT_LOG"), count("CM_EVENT"), count("CM_WEBHOOK_DELIVERY"));
+        return new DatabaseState(
+                tableRows("CM_CASE", "ID_", CASE_ID, "ID_"),
+                tableRows("CM_PLAN_ITEM", "CASE_ID_", CASE_ID, "ID_"),
+                tableRows("CM_TASK", "CASE_ID_", CASE_ID, "ID_"),
+                tableRows("CM_LINKED_PROCESS", "CASE_ID_", CASE_ID, "ID_"),
+                tableRows("CM_SLA_RECORD", "CASE_ID_", CASE_ID, "ID_"),
+                tableRows("CM_APPLIED_ENGINE_OBSERVATION", "CASE_ID_", CASE_ID,
+                        "OBSERVATION_ID_"),
+                tableRows("CM_AUDIT_LOG", "CASE_ID_", CASE_ID, "ID_"),
+                tableRows("CM_EVENT", "SUBJECT_", CASE_ID, "SEQ_"),
+                tableRows("CM_WEBHOOK_DELIVERY", "WEBHOOK_ID_", "webhook-1", "ID_"));
     }
 
-    private int count(String table) {
-        return jdbc().sql("SELECT COUNT(*) FROM " + table).query(Integer.class).single();
+    private List<Map<String, Object>> tableRows(String table, String filterColumn,
+                                                String filterValue, String orderBy) {
+        return jdbc().sql("SELECT * FROM " + table + " WHERE " + filterColumn
+                        + " = :filterValue ORDER BY " + orderBy)
+                .param("filterValue", filterValue)
+                .query((rs, row) -> completeRow(rs))
+                .list();
+    }
+
+    /** Converts every Oracle column to a stable, content-based value for exact snapshots. */
+    private static Map<String, Object> completeRow(ResultSet rs) throws SQLException {
+        var metadata = rs.getMetaData();
+        Map<String, Object> row = new LinkedHashMap<>();
+        for (int index = 1; index <= metadata.getColumnCount(); index++) {
+            row.put(metadata.getColumnLabel(index), stableValue(rs, index,
+                    metadata.getColumnType(index)));
+        }
+        return Map.copyOf(row);
+    }
+
+    private static Object stableValue(ResultSet rs, int index, int jdbcType) throws SQLException {
+        Object value = rs.getObject(index);
+        if (value == null) return NullValue.INSTANCE;
+        if (jdbcType == Types.CLOB || jdbcType == Types.NCLOB) {
+            return rs.getString(index);
+        }
+        if (jdbcType == Types.BLOB || value instanceof byte[]) {
+            byte[] bytes = value instanceof byte[] raw ? raw : rs.getBytes(index);
+            return Base64.getEncoder().encodeToString(bytes);
+        }
+        if (jdbcType == Types.NUMERIC || jdbcType == Types.DECIMAL) {
+            return rs.getBigDecimal(index).stripTrailingZeros().toPlainString();
+        }
+        // Oracle exposes TIMESTAMP WITH TIME ZONE as -101; JDBC 4.2 standardises it as 2014.
+        if (jdbcType == Types.TIMESTAMP_WITH_TIMEZONE || jdbcType == -101) {
+            return rs.getObject(index, OffsetDateTime.class).toInstant().toString();
+        }
+        if (jdbcType == Types.TIMESTAMP) {
+            return rs.getTimestamp(index).toInstant().toString();
+        }
+        return value;
     }
 
     private static String contract() {
@@ -327,20 +377,17 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
         }
     }
 
-    record CaseRow(String variablesJson, String state, long version, OffsetDateTime updatedAt,
-                   OffsetDateTime closedAt, OffsetDateTime lastEngineUpdateAt) { }
+    enum NullValue { INSTANCE }
 
-    record ProjectionRow(String state, long version, OffsetDateTime updatedAt,
-                         OffsetDateTime terminalAt, OffsetDateTime lastEngineUpdateAt) { }
-
-    record SlaRow(String status, long version) { }
-
-    record LinkedProcessRow(String state, OffsetDateTime endedAt,
-                            OffsetDateTime lastEngineUpdateAt) { }
-
-    record DatabaseState(CaseRow caseRow, ProjectionRow planItem, ProjectionRow task, SlaRow sla,
-                         LinkedProcessRow linkedProcess, int appliedCount, String appliedStatus,
-                         int auditCount, int eventCount, int deliveryCount) { }
+    record DatabaseState(List<Map<String, Object>> caseRows,
+                         List<Map<String, Object>> planItemRows,
+                         List<Map<String, Object>> taskRows,
+                         List<Map<String, Object>> linkedProcessRows,
+                         List<Map<String, Object>> slaRows,
+                         List<Map<String, Object>> appliedRows,
+                         List<Map<String, Object>> auditRows,
+                         List<Map<String, Object>> eventRows,
+                         List<Map<String, Object>> deliveryRows) { }
 
     @Configuration
     static class AtomicityTestConfig {
