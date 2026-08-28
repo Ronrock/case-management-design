@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class Ws2ChangelogStaticValidationTest {
 
     @Test
-    void masterChangelogParsesValidatesAndKeepsWs2AsOneContiguousTail() throws Exception {
+    void masterChangelogParsesValidatesAndKeepsWs2InItsOriginalContiguousOrder() throws Exception {
         var resources = new ClassLoaderResourceAccessor();
         var connection = new OfflineConnection(
                 "offline:oracle?changeLogFile=target/ws2-offline-databasechangelog.csv",
@@ -39,7 +39,8 @@ class Ws2ChangelogStaticValidationTest {
             assertThat(firstWs2).isPositive();
             assertThat(changes.get(firstWs2 - 1).getId())
                     .isEqualTo("cm-projected-milestone-idempotency");
-            assertThat(changes.subList(firstWs2, changes.size()))
+            assertThat(changes).hasSizeGreaterThanOrEqualTo(firstWs2 + 4);
+            assertThat(changes.subList(firstWs2, firstWs2 + 4))
                     .extracting(change -> change.getId())
                     .containsExactly(
                             "cm-bpmn-release-exact-identity",

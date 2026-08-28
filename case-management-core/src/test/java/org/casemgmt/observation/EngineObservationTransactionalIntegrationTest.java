@@ -1,5 +1,7 @@
 package org.casemgmt.observation;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.casemgmt.OracleTestBase;
 import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CasePriority;
@@ -45,6 +47,8 @@ import org.springframework.context.annotation.AnnotationConfigApplicationContext
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
@@ -58,6 +62,7 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -73,6 +78,8 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
     private static final String PROCESS_DEFINITION_KEY = "claim-process";
     private static final Instant OCCURRED = Instant.parse("2026-08-28T08:30:00Z");
     private static final Instant RECEIVED = Instant.parse("2026-08-28T08:30:05Z");
+    private static final ObjectMapper STORED_JSON = new ObjectMapper()
+            .registerModule(new JavaTimeModule());
 
     private AnnotationConfigApplicationContext context;
     private EngineObservationHandler handler;
@@ -168,6 +175,28 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
             assertThat(committed.eventRows()).hasSize(1);
             assertThat(committed.deliveryRows()).hasSize(1);
         });
+    }
+
+    @Test
+    void directAndStoredObservationProduceTheSameCommittedDatabaseOutcome() throws Exception {
+        DatabaseState baseline = state();
+        TransactionTemplate transaction = new TransactionTemplate(
+                context.getBean(PlatformTransactionManager.class));
+        DatabaseState direct = transaction.execute(status -> {
+            handler.apply(observation);
+            DatabaseState outcome = stableBusinessOutcome(state());
+            status.setRollbackOnly();
+            return outcome;
+        });
+        assertThat(state()).isEqualTo(baseline);
+
+        byte[] stored = STORED_JSON.writeValueAsBytes(observation);
+        UserTaskObservation restored = STORED_JSON.readValue(stored,
+                UserTaskObservation.class);
+        handler.apply(restored);
+
+        assertThat(restored).isEqualTo(observation);
+        assertThat(stableBusinessOutcome(state())).isEqualTo(direct);
     }
 
     @Test
@@ -287,6 +316,29 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                 tableRows("CM_AUDIT_LOG", "CASE_ID_", CASE_ID, "ID_"),
                 tableRows("CM_EVENT", "SUBJECT_", CASE_ID, "SEQ_"),
                 tableRows("CM_WEBHOOK_DELIVERY", "WEBHOOK_ID_", "webhook-1", "ID_"));
+    }
+
+    private static DatabaseState stableBusinessOutcome(DatabaseState state) {
+        return new DatabaseState(
+                without(state.caseRows(), "UPDATED_AT_"),
+                without(state.planItemRows(), "UPDATED_AT_"),
+                without(state.taskRows(), "UPDATED_AT_"),
+                state.linkedProcessRows(),
+                state.slaRows(),
+                without(state.appliedRows(), "CLAIM_TOKEN_", "CLAIMED_AT_", "APPLIED_AT_"),
+                without(state.auditRows(), "ID_", "TS_"),
+                without(state.eventRows(), "SEQ_", "ID_", "TIME_"),
+                without(state.deliveryRows(), "ID_", "EVENT_SEQ_", "NEXT_ATTEMPT_AT_"));
+    }
+
+    private static List<Map<String, Object>> without(
+            List<Map<String, Object>> rows, String... volatileColumns) {
+        Set<String> excluded = Set.of(volatileColumns);
+        return rows.stream().map(row -> {
+            Map<String, Object> stable = new LinkedHashMap<>(row);
+            excluded.forEach(stable::remove);
+            return Map.copyOf(stable);
+        }).toList();
     }
 
     private List<Map<String, Object>> tableRows(String table, String filterColumn,
