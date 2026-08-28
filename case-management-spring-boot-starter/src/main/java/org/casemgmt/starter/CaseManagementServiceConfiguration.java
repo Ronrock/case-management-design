@@ -12,6 +12,7 @@ import org.casemgmt.observation.DefaultEngineObservationHandler;
 import org.casemgmt.observation.EngineObservationAuthorityValidator;
 import org.casemgmt.observation.EngineObservationHandler;
 import org.casemgmt.observation.LoggingObservationSecurityTelemetry;
+import org.casemgmt.observation.LegacyPlanModelObservationHandler;
 import org.casemgmt.observation.ObservationSecurityTelemetry;
 import org.casemgmt.observation.SlaLifecyclePort;
 import org.casemgmt.projection.CaseProjectionPort;
@@ -107,6 +108,12 @@ public class CaseManagementServiceConfiguration {
             ObservationSecurityTelemetry securityTelemetry) {
         return new DefaultEngineObservationHandler(claims, cases, processes, projections,
                 mappings, events, sla, authority, securityTelemetry);
+    }
+
+    @Bean
+    public LegacyPlanModelObservationHandler legacyPlanModelObservationHandler(
+            CaseProjectionPort projections, EventPublisher events) {
+        return new LegacyPlanModelObservationHandler(projections, events);
     }
 
     @Bean

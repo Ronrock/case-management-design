@@ -39,6 +39,11 @@ public class EmbeddedEngineGateway implements EngineGateway {
     }
 
     @Override
+    public boolean emitsSynchronousLifecycleObservations() {
+        return true;
+    }
+
+    @Override
     public EngineTaskRef createHumanTask(HumanTaskRequest request) {
         try {
             Task task = taskService.newTask();

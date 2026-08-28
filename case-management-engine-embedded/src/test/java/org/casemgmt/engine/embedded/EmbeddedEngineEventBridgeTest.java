@@ -4,6 +4,7 @@ import org.casemgmt.observation.ActivityLifecycleObservation;
 import org.casemgmt.observation.EngineObservation;
 import org.casemgmt.observation.EngineObservationHandler;
 import org.casemgmt.observation.MilestoneObservation;
+import org.casemgmt.observation.LegacyPlanModelObservationHandler;
 import org.casemgmt.observation.ProcessObservation;
 import org.casemgmt.observation.UserTaskObservation;
 import org.casemgmt.projection.ActivityObservation;
@@ -242,6 +243,34 @@ class EmbeddedEngineEventBridgeTest {
         bridge.onTask(unknown);
         bridge.onTask(task("update", "alice"));
 
+        verify(handler, never()).apply(any());
+    }
+
+    @Test
+    void routesPersistedPlanModelAuthorityOnlyToTheLegacyCompatibilityHandler() {
+        LegacyPlanModelObservationHandler legacy = mock(LegacyPlanModelObservationHandler.class);
+        ProcessCaseCorrelation planModel = new ProcessCaseCorrelation() {
+            @Override
+            public String caseId(String processInstanceId) {
+                return "case-1";
+            }
+
+            @Override
+            public Optional<Authority> authority(
+                    String processInstanceId, String processDefinitionId) {
+                return Optional.of(new Authority(
+                        "case-1", org.casemgmt.orchestration.OrchestrationMode.PLAN_MODEL));
+            }
+        };
+        EmbeddedEngineEventBridge compatibilityBridge = new EmbeddedEngineEventBridge(
+                handler, legacy, planModel, classifier, repository, tasks, "engine-a",
+                Clock.fixed(RECEIVED_AT, ZoneOffset.UTC));
+
+        compatibilityBridge.onTask(task("complete", "alice"));
+        compatibilityBridge.onHistory(processHistory("process-1", "definition-1",
+                "complaint-process", "tenant-a", null, 42));
+
+        verify(legacy, org.mockito.Mockito.times(2)).apply(any());
         verify(handler, never()).apply(any());
     }
 

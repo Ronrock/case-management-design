@@ -58,6 +58,34 @@ class ExactStartOutboxTest {
     }
 
     @Test
+    void dispatcherPreservesTenantForAKeySelectedStart() {
+        EngineCommandRepository commands = mock(EngineCommandRepository.class);
+        EngineGateway delegate = mock(EngineGateway.class);
+        EngineCommand command = new EngineCommand(
+                "command-key-tenant", "case-1", EngineCommand.Type.START_PROCESS,
+                Map.of("selectionType", "KEY",
+                        "planItemId", "plan-item-1",
+                        "processDefinitionKey", "child-orders",
+                        "tenantId", "tenant-a",
+                        "variables", Map.of(),
+                        "correlationId", "linked-1"),
+                "CLAIMED", 0, OffsetDateTime.now(), null);
+        when(commands.claimDue(50)).thenReturn(List.of(command));
+        when(delegate.startProcessByKey(org.mockito.ArgumentMatchers.any()))
+                .thenReturn(new EngineProcessRef(
+                        "engine-instance-1", "child-orders:7", "child-orders", "case-1"));
+
+        new EngineCommandDispatcher(commands, delegate, (key, sync, engineId) -> { }).drainOnce();
+
+        ArgumentCaptor<StartProcessByKeyRequest> request =
+                ArgumentCaptor.forClass(StartProcessByKeyRequest.class);
+        verify(delegate).startProcessByKey(request.capture());
+        assertThat(request.getValue().processDefinitionKey()).isEqualTo("child-orders");
+        assertThat(request.getValue().tenantId()).isEqualTo("tenant-a");
+        verify(commands).markDone("command-key-tenant");
+    }
+
+    @Test
     void dispatcherReconstructsTheExactIdentityInsteadOfSelectingByKey() {
         EngineCommandRepository commands = mock(EngineCommandRepository.class);
         EngineGateway delegate = mock(EngineGateway.class);

@@ -11,6 +11,7 @@ import org.casemgmt.engine.embedded.ProcessActivityClassifier;
 import org.casemgmt.engine.embedded.RepositoryProcessActivityClassifier;
 import org.casemgmt.orchestration.OrchestrationDeploymentPort;
 import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.LegacyPlanModelObservationHandler;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
@@ -20,7 +21,6 @@ import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.TaskService;
 import org.springframework.beans.BeansException;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -120,7 +120,9 @@ public class EmbeddedEngineAutoConfiguration {
         @Bean
         @ConditionalOnMissingBean(EmbeddedEngineEventBridge.class)
         EmbeddedEngineEventBridge embeddedEngineEventBridge(
-                EngineObservationHandler observations, ProcessCaseCorrelation correlation,
+                EngineObservationHandler observations,
+                LegacyPlanModelObservationHandler planModelObservations,
+                ProcessCaseCorrelation correlation,
                 ProcessActivityClassifier classifier, RepositoryService repositoryService,
                 TaskService taskService, CaseManagementProperties properties) {
             // Do not guard this with @ConditionalOnBean(EngineObservationHandler.class).
@@ -129,8 +131,9 @@ public class EmbeddedEngineAutoConfiguration {
             // the condition here therefore skips the bridge even though the dependency exists
             // by bean-instantiation time. Required method parameters provide the correct
             // fail-fast behaviour without making registration order observable.
-            return new EmbeddedEngineEventBridge(observations, correlation, classifier,
-                    repositoryService, taskService, properties.getEngineId());
+            return new EmbeddedEngineEventBridge(observations, planModelObservations,
+                    correlation, classifier, repositoryService, taskService,
+                    properties.getEngineId());
         }
 
         @Bean
@@ -140,10 +143,9 @@ public class EmbeddedEngineAutoConfiguration {
         }
 
         @Bean
-        @ConditionalOnMissingBean(EmbeddedTransactionResourceValidator.class)
         EmbeddedTransactionResourceValidator embeddedTransactionResourceValidator(
-                @Qualifier("dataSource") DataSource dataSource,
-                @Qualifier("transactionManager") PlatformTransactionManager transactionManager,
+                DataSource dataSource,
+                PlatformTransactionManager transactionManager,
                 ProcessEngineConfigurationImpl engineConfiguration,
                 ProcessEngine initializedProcessEngine) {
             // Depending on ProcessEngine guarantees Operaton's configuration plugins have

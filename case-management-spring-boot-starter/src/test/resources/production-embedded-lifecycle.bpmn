@@ -1,12 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
              xmlns:operaton="http://operaton.org/schema/1.0/bpmn"
+             xmlns:casemgmt="https://casemgmt.org/bpmn"
              targetNamespace="https://casemgmt.org/tests">
   <process id="production-root" name="Production root" isExecutable="true">
     <startEvent id="root-start"/>
     <sequenceFlow id="root-flow-1" sourceRef="root-start" targetRef="root-review"/>
     <userTask id="root-review" name="Root review" operaton:candidateGroups="handlers"/>
-    <sequenceFlow id="root-flow-2" sourceRef="root-review" targetRef="root-end"/>
+    <sequenceFlow id="root-flow-2" sourceRef="root-review" targetRef="root-assessment"/>
+    <subProcess id="root-assessment" name="Root assessment" casemgmt:stage="true">
+      <startEvent id="root-assessment-start"/>
+      <sequenceFlow id="root-assessment-flow-1" sourceRef="root-assessment-start"
+                    targetRef="root-stage-review"/>
+      <userTask id="root-stage-review" name="Root stage review"/>
+      <sequenceFlow id="root-assessment-flow-2" sourceRef="root-stage-review"
+                    targetRef="root-assessment-end"/>
+      <endEvent id="root-assessment-end"/>
+    </subProcess>
+    <sequenceFlow id="root-flow-3" sourceRef="root-assessment" targetRef="root-approved"/>
+    <intermediateThrowEvent id="root-approved" name="Root approved"
+                            casemgmt:milestoneId="root-approved"/>
+    <sequenceFlow id="root-flow-4" sourceRef="root-approved" targetRef="root-end"/>
     <endEvent id="root-end"/>
   </process>
 
@@ -16,5 +30,13 @@
     <userTask id="child-review" name="Child review"/>
     <sequenceFlow id="child-flow-2" sourceRef="child-review" targetRef="child-end"/>
     <endEvent id="child-end"/>
+  </process>
+
+  <process id="production-plan-child" name="Production plan child" isExecutable="true">
+    <startEvent id="plan-child-start"/>
+    <sequenceFlow id="plan-child-flow-1" sourceRef="plan-child-start" targetRef="plan-child-review"/>
+    <userTask id="plan-child-review" name="Plan child review"/>
+    <sequenceFlow id="plan-child-flow-2" sourceRef="plan-child-review" targetRef="plan-child-end"/>
+    <endEvent id="plan-child-end"/>
   </process>
 </definitions>

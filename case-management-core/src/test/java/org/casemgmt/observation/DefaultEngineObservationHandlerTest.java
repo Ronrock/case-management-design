@@ -491,6 +491,45 @@ class DefaultEngineObservationHandlerTest {
     }
 
     @Test
+    void embeddedActivityCancellationOverridesTheSyntheticEndAtTheSameEngineTimestamp() {
+        ActivityLifecycleObservation observation = new ActivityLifecycleObservation(
+                "obs-stage-cancelled", 1, "operaton:embedded", "tenant-a", "case-1",
+                "process-1", "stage-instance", null,
+                ActivityLifecycleObservation.EventType.CANCELLED, OCCURRED, RECEIVED,
+                authorityAttributes("activityId", "assessment", "name", "Assessment"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-stage-ended", null, OCCURRED, "COMPLETED")));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.APPLIED);
+
+        verify(projections).observe(argThat((ActivityObservation projected) ->
+                projected.eventName().equals("delete")));
+        verify(claims).markApplied(claim);
+        verify(claims, never()).markIgnoredStale(claim);
+    }
+
+    @Test
+    void syntheticActivityEndCannotReverseAnObservedCancellation() {
+        ActivityLifecycleObservation observation = new ActivityLifecycleObservation(
+                "obs-stage-ended", 1, "operaton:embedded", "tenant-a", "case-1",
+                "process-1", "stage-instance", null,
+                ActivityLifecycleObservation.EventType.COMPLETED, OCCURRED.plusMillis(3), RECEIVED,
+                authorityAttributes("activityId", "assessment", "name", "Assessment"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-stage-cancelled", null, OCCURRED, "CANCELLED")));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.IGNORED_STALE);
+
+        verify(projections, never()).observe(any(ActivityObservation.class));
+        verify(claims).markIgnoredStale(claim);
+        verify(claims, never()).markApplied(claim);
+    }
+
+    @Test
     void remoteArrivalOrderCannotBreakAnEqualTimestampTie() {
         UserTaskObservation observation = new UserTaskObservation("obs-remote-claim", 1,
                 "operaton:remote", "tenant-a", "case-1", "process-1", "task-1", null,

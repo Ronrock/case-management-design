@@ -1,6 +1,5 @@
 package org.casemgmt.engine.embedded;
 
-import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
@@ -49,30 +48,44 @@ public final class PersistedProcessCaseCorrelation implements ProcessCaseCorrela
     public String caseId(String processInstanceId) {
         var instance = runtime.createProcessInstanceQuery()
                 .processInstanceId(processInstanceId).singleResult();
-        return caseId(processInstanceId,
-                instance == null ? null : instance.getProcessDefinitionId());
+        return authority(processInstanceId,
+                instance == null ? null : instance.getProcessDefinitionId())
+                .map(Authority::caseId).orElse(null);
     }
 
     @Override
     public String caseId(String processInstanceId, String processDefinitionId) {
+        return authority(processInstanceId, processDefinitionId)
+                .map(Authority::caseId).orElse(null);
+    }
+
+    @Override
+    public java.util.Optional<Authority> authority(
+            String processInstanceId, String processDefinitionId) {
         if (processInstanceId == null || processInstanceId.isBlank()) {
-            return null;
+            return java.util.Optional.empty();
         }
         var confirmed = processes.findByProcessInstanceId(processInstanceId);
         if (confirmed.isPresent()) {
-            return isBpmnCase(confirmed.orElseThrow().caseId())
-                    ? confirmed.orElseThrow().caseId() : null;
+            var link = confirmed.orElseThrow();
+            if (processDefinitionId == null || processDefinitionId.isBlank()
+                    || !processDefinitionId.equals(link.processDefinitionId())) {
+                return java.util.Optional.empty();
+            }
+            return authorityFor(link.caseId());
         }
 
         Object marker = runtime.getVariable(processInstanceId,
                 EmbeddedEngineGateway.LIFECYCLE_CORRELATION_VARIABLE);
         if (!(marker instanceof String correlationId) || correlationId.isBlank()) {
-            return null;
+            return java.util.Optional.empty();
         }
         var pending = processes.findByCorrelation(correlationId);
-        if (pending.isEmpty() || !isBpmnCase(pending.orElseThrow().caseId())) {
-            return null;
+        if (pending.isEmpty()) {
+            return java.util.Optional.empty();
         }
+        var authority = authorityFor(pending.orElseThrow().caseId());
+        if (authority.isEmpty()) return java.util.Optional.empty();
         if (processDefinitionId == null || processDefinitionId.isBlank()) {
             throw new IllegalStateException("Managed process " + processInstanceId
                     + " has no exact process-definition id");
@@ -86,13 +99,12 @@ public final class PersistedProcessCaseCorrelation implements ProcessCaseCorrela
         processes.confirmStarted(link.caseId(), correlationId, processInstanceId,
                 processDefinitionId, definition.getKey(),
                 clock.instant().atOffset(ZoneOffset.UTC));
-        return link.caseId();
+        return authority;
     }
 
-    private boolean isBpmnCase(String caseId) {
+    private java.util.Optional<Authority> authorityFor(String caseId) {
         var instance = cases.require(caseId);
         return bindings.find(instance.caseDefId())
-                .filter(binding -> binding.orchestrationMode() == OrchestrationMode.BPMN)
-                .isPresent();
+                .map(binding -> new Authority(caseId, binding.orchestrationMode()));
     }
 }

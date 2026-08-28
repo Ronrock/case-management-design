@@ -10,10 +10,8 @@ import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
 import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration;
 import org.junit.jupiter.api.Test;
-import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
-import org.springframework.jdbc.datasource.LazyConnectionDataSourceProxy;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -26,23 +24,63 @@ import static org.mockito.Mockito.mock;
 class EmbeddedTransactionAuthorityAutoConfigurationTest {
 
     @Test
-    void registersValidatorForOperatonsDeclaredConfigurationTypeAndAcceptsQualifiedProxies() {
+    void registersValidatorForOperatonsDeclaredConfigurationTypeAndSharedResourceProxy() {
         var target = dataSource("context-shared");
         DataSource platformDataSource = new TransactionAwareDataSourceProxy(target);
-        DataSource operatonDataSource = new LazyConnectionDataSourceProxy(target);
-        var sharedTransactions = new DataSourceTransactionManager(operatonDataSource);
-        ProxyFactory proxyFactory = new ProxyFactory(sharedTransactions);
-        PlatformTransactionManager platformTransactionProxy =
-                (PlatformTransactionManager) proxyFactory.getProxy();
-        var engineConfiguration = springConfiguration(operatonDataSource, sharedTransactions);
+        var sharedTransactions = new DataSourceTransactionManager(platformDataSource);
+        var engineConfiguration = springConfiguration(target, sharedTransactions);
 
-        runner(platformDataSource, platformTransactionProxy, engineConfiguration)
-                .withBean("operatonBpmDataSource", DataSource.class, () -> operatonDataSource)
+        runner(platformDataSource, sharedTransactions, engineConfiguration)
+                .withBean("operatonBpmDataSource", DataSource.class, () -> target)
                 .withBean("operatonBpmTransactionManager", PlatformTransactionManager.class,
                         () -> sharedTransactions)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(EmbeddedTransactionResourceValidator.class);
+                });
+    }
+
+    @Test
+    void usesPrimaryRepositoryAuthorityInsteadOfDivergentConventionalBeanNames() {
+        var decoyDataSource = dataSource("context-decoy");
+        var decoyTransactions = new DataSourceTransactionManager(decoyDataSource);
+        var repositoryDataSource = dataSource("context-primary");
+        var repositoryTransactions = new DataSourceTransactionManager(repositoryDataSource);
+        var engineConfiguration = springConfiguration(
+                repositoryDataSource, repositoryTransactions);
+
+        baseRunner()
+                .withBean("dataSource", DataSource.class, () -> decoyDataSource)
+                .withBean("transactionManager", PlatformTransactionManager.class,
+                        () -> decoyTransactions)
+                .withBean("caseRepositoryDataSource", DataSource.class,
+                        () -> repositoryDataSource, definition -> definition.setPrimary(true))
+                .withBean("caseRepositoryTransactionManager", PlatformTransactionManager.class,
+                        () -> repositoryTransactions, definition -> definition.setPrimary(true))
+                .withBean("processEngineConfigurationImpl",
+                        ProcessEngineConfigurationImpl.class, () -> engineConfiguration)
+                .withBean(ProcessEngine.class, () -> mock(ProcessEngine.class))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(EmbeddedTransactionResourceValidator.class);
+                });
+    }
+
+    @Test
+    void consumerValidatorCannotSuppressMandatorySplitResourceValidation() {
+        var repositoryDataSource = dataSource("context-mandatory-platform");
+        var operatonDataSource = dataSource("context-mandatory-operaton");
+        var transactions = new DataSourceTransactionManager(repositoryDataSource);
+        var engineConfiguration = springConfiguration(operatonDataSource, transactions);
+
+        runner(repositoryDataSource, transactions, engineConfiguration)
+                .withBean("consumerValidator", EmbeddedTransactionResourceValidator.class,
+                        () -> mock(EmbeddedTransactionResourceValidator.class))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasRootCauseMessage("Embedded Operaton does not use the transaction "
+                                    + "manager's exact DataSource resource");
                 });
     }
 
@@ -57,8 +95,8 @@ class EmbeddedTransactionAuthorityAutoConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasFailed();
                     assertThat(context.getStartupFailure())
-                            .hasRootCauseMessage("Embedded Operaton and case lifecycle must use "
-                                    + "the same DataSource and transaction manager authority");
+                            .hasRootCauseMessage("Embedded Operaton does not use the transaction "
+                                    + "manager's exact DataSource resource");
                 });
     }
 

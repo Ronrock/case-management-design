@@ -99,7 +99,20 @@ class PersistedProcessCaseCorrelationTest {
     }
 
     @Test
-    void leavesPlanModelProcessCompatibilityOnTheLegacyPath() {
+    void rejectsAConfirmedProcessWhenTheCallbackCarriesAnotherExactDefinition() {
+        var link = new LinkedProcessRepository.LinkedProcessRow("link-1", "eng-a:1", null,
+                "correlation-7", "process-42", "child-process:3", "child-process", "ACTIVE",
+                CaseTask.EngineSync.SYNCED, false);
+        when(processes.findByProcessInstanceId("process-42")).thenReturn(Optional.of(link));
+
+        assertThat(correlation.authority("process-42", "child-process:4")).isEmpty();
+
+        verify(cases, never()).require(org.mockito.ArgumentMatchers.any());
+        verify(bindings, never()).find(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void resolvesPlanModelOnlyThroughPersistedAuthorityForTheCompatibilityPath() {
         var link = new LinkedProcessRepository.LinkedProcessRow("link-1", "eng-a:1", null,
                 "correlation-7", null, null, "legacy-process", "ACTIVE",
                 CaseTask.EngineSync.PENDING, false);
@@ -112,13 +125,16 @@ class PersistedProcessCaseCorrelationTest {
         CaseDefinitionVersionBinding binding = mock(CaseDefinitionVersionBinding.class);
         when(binding.orchestrationMode()).thenReturn(OrchestrationMode.PLAN_MODEL);
         when(bindings.find(caseInstance(Map.of()).caseDefId())).thenReturn(Optional.of(binding));
+        ProcessDefinition definition = mock(ProcessDefinition.class);
+        when(definition.getKey()).thenReturn("legacy-process");
+        when(repository.getProcessDefinition("legacy-process:1")).thenReturn(definition);
 
-        assertThat(correlation.caseId("process-42", "legacy-process:1")).isNull();
+        assertThat(correlation.authority("process-42", "legacy-process:1"))
+                .contains(new ProcessCaseCorrelation.Authority(
+                        "eng-a:1", OrchestrationMode.PLAN_MODEL));
 
-        verify(processes, never()).confirmStarted(
-                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        verify(processes).confirmStarted("eng-a:1", "correlation-7", "process-42",
+                "legacy-process:1", "legacy-process", CONFIRMED_AT.atOffset(ZoneOffset.UTC));
     }
 
     private void allowBpmnCase(String caseId) {

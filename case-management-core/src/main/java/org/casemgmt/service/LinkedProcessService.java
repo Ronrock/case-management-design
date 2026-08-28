@@ -80,16 +80,18 @@ public class LinkedProcessService {
                     processDefinitionKey, OffsetDateTime.now());
         }
 
-        Map<String, Object> details = new LinkedHashMap<>();
-        details.put("correlationId", id);
-        details.put("processDefinitionKey", processDefinitionKey);
-        if (instanceId != null) {
-            details.put("processInstanceId", instanceId);
+        if (!engine.emitsSynchronousLifecycleObservations()) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("correlationId", id);
+            details.put("processDefinitionKey", processDefinitionKey);
+            if (instanceId != null) {
+                details.put("processInstanceId", instanceId);
+            }
+            publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(),
+                    EventTypes.PROCESS_STARTED, caseId, c.tenantId(), OffsetDateTime.now(), details));
+            publisher.audit(caseId, c.tenantId(), actor.userId(), "process.start",
+                    "LinkedProcess", id, null, details);
         }
-        publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(),
-                EventTypes.PROCESS_STARTED, caseId, c.tenantId(), OffsetDateTime.now(), details));
-        publisher.audit(caseId, c.tenantId(), actor.userId(), "process.start", "LinkedProcess", id,
-                null, details);
 
         return processes.findByCase(caseId).stream()
                 .filter(row -> row.id().equals(id)).findFirst().orElseThrow();

@@ -136,36 +136,49 @@ public class TransitionApplier {
         }
 
         String id = CaseIds.newId();
+        linkedProcesses.insert(id, snapshot.caseInstance().id(), item.id(), null,
+                null, def.processDefinitionKey(), CaseTask.EngineSync.PENDING);
         EngineProcessRef ref = engine.startProcessByKey(new StartProcessByKeyRequest(
                 snapshot.caseInstance().id(), item.id(), def.processDefinitionKey(),
                 snapshot.caseInstance().variables(), id, snapshot.caseInstance().tenantId()));
+        if (ref == null || !def.processDefinitionKey().equals(ref.processDefinitionKey())) {
+            throw new org.casemgmt.engine.EngineException(
+                    "Engine start returned an inconsistent process-definition key");
+        }
         String instanceId = ref.processInstanceId();
         CaseTask.EngineSync sync = instanceId == null
                 ? CaseTask.EngineSync.PENDING
                 : CaseTask.EngineSync.SYNCED;
-
-        linkedProcesses.insert(id, snapshot.caseInstance().id(), item.id(), instanceId,
-                def.processDefinitionKey(), sync);
-
-        Map<String, Object> details = new LinkedHashMap<>();
-        details.put("linkedProcessId", id);
-        details.put("planItemId", item.id());
-        details.put("processDefinitionKey", def.processDefinitionKey());
-        details.put("engineSync", sync.name());
-        if (instanceId != null) {
-            details.put("processInstanceId", instanceId);
+        if (sync == CaseTask.EngineSync.SYNCED) {
+            if (ref.processDefinitionId() == null) {
+                throw new org.casemgmt.engine.EngineException(
+                        "Engine start returned no process-definition id");
+            }
+            linkedProcesses.confirmStarted(snapshot.caseInstance().id(), id, instanceId,
+                    ref.processDefinitionId(), def.processDefinitionKey(), OffsetDateTime.now());
         }
-        publisher.publish(event(snapshot, EventTypes.PROCESS_STARTED, details));
 
-        Map<String, Object> auditDetails = new LinkedHashMap<>();
-        auditDetails.put("planItemId", item.id());
-        auditDetails.put("processDefinitionKey", def.processDefinitionKey());
-        if (instanceId != null) {
-            auditDetails.put("processInstanceId", instanceId);
+        if (!engine.emitsSynchronousLifecycleObservations()) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("linkedProcessId", id);
+            details.put("planItemId", item.id());
+            details.put("processDefinitionKey", def.processDefinitionKey());
+            details.put("engineSync", sync.name());
+            if (instanceId != null) {
+                details.put("processInstanceId", instanceId);
+            }
+            publisher.publish(event(snapshot, EventTypes.PROCESS_STARTED, details));
+
+            Map<String, Object> auditDetails = new LinkedHashMap<>();
+            auditDetails.put("planItemId", item.id());
+            auditDetails.put("processDefinitionKey", def.processDefinitionKey());
+            if (instanceId != null) {
+                auditDetails.put("processInstanceId", instanceId);
+            }
+            publisher.audit(snapshot.caseInstance().id(), snapshot.caseInstance().tenantId(),
+                    actor.userId(), "process.start", "LinkedProcess", id, null,
+                    auditDetails);
         }
-        publisher.audit(snapshot.caseInstance().id(), snapshot.caseInstance().tenantId(),
-                actor.userId(), "process.start", "LinkedProcess", id, null,
-                auditDetails);
     }
 
     private void achieveMilestone(CaseSnapshot snapshot, PlanItem item, Actor actor) {

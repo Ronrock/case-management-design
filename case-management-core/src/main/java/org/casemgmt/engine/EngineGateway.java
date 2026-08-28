@@ -12,6 +12,11 @@ import java.util.Map;
  */
 public interface EngineGateway {
 
+    /** True only when starts synchronously emit authoritative lifecycle observations. */
+    default boolean emitsSynchronousLifecycleObservations() {
+        return false;
+    }
+
     EngineTaskRef createHumanTask(HumanTaskRequest request);
 
     void claimTask(String engineTaskId, String userId);

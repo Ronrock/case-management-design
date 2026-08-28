@@ -3,7 +3,6 @@ package org.casemgmt.engine.embedded;
 import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
 import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration;
-import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.jdbc.datasource.LazyConnectionDataSourceProxy;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
@@ -32,20 +31,32 @@ class EmbeddedTransactionResourceValidatorTest {
     }
 
     @Test
-    void acceptsSupportedProxiesWithTheSameUnderlyingTransactionResource() {
+    void rejectsLazyManagerResourceWhenRepositoryUsesTransactionAwareRawResource() {
         var target = dataSource("proxied-shared-resource");
         DataSource platformDataSource = new TransactionAwareDataSourceProxy(target);
         DataSource engineDataSource = new LazyConnectionDataSourceProxy(target);
         var sharedTransactions = new DataSourceTransactionManager(engineDataSource);
-        ProxyFactory proxyFactory = new ProxyFactory(sharedTransactions);
-        PlatformTransactionManager platformTransactionProxy =
-                (PlatformTransactionManager) proxyFactory.getProxy();
         var engine = new SpringProcessEngineConfiguration();
         engine.setDataSource(engineDataSource);
         engine.setTransactionManager(sharedTransactions);
 
+        assertThatThrownBy(() -> new EmbeddedTransactionResourceValidator(
+                platformDataSource, sharedTransactions, engine).afterPropertiesSet())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("repository DataSource transaction resource");
+    }
+
+    @Test
+    void acceptsTransactionAwareRepositoryUsingTheManagersExactRawResource() {
+        var target = dataSource("transaction-aware-shared-resource");
+        DataSource repositoryDataSource = new TransactionAwareDataSourceProxy(target);
+        var sharedTransactions = new DataSourceTransactionManager(repositoryDataSource);
+        var engine = new SpringProcessEngineConfiguration();
+        engine.setDataSource(target);
+        engine.setTransactionManager(sharedTransactions);
+
         assertThatCode(() -> new EmbeddedTransactionResourceValidator(
-                platformDataSource, platformTransactionProxy, engine).afterPropertiesSet())
+                repositoryDataSource, sharedTransactions, engine).afterPropertiesSet())
                 .doesNotThrowAnyException();
     }
 

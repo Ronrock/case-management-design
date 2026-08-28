@@ -3,7 +3,11 @@ package org.casemgmt.starter;
 import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
+import org.casemgmt.domain.PlanItemDefinition;
+import org.casemgmt.domain.PlanItemType;
+import org.casemgmt.domain.TaskState;
 import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
+import org.casemgmt.event.EventTypes;
 import org.casemgmt.observation.SlaLifecyclePort;
 import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.casemgmt.orchestration.OrchestrationMode;
@@ -19,6 +23,7 @@ import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseService;
+import org.casemgmt.service.CaseTaskService;
 import org.casemgmt.service.LinkedProcessService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -109,12 +114,14 @@ class ProductionEmbeddedLifecycleIT {
     @Autowired CaseRepository cases;
     @Autowired LinkedProcessRepository processes;
     @Autowired LinkedProcessService linkedProcesses;
+    @Autowired CaseTaskService caseTasks;
     @Autowired FailingSlaLifecyclePort failures;
     @Autowired EmbeddedTransactionResourceValidator transactionResourceValidator;
     @Autowired @Qualifier("caseManagementCaseService") CaseService caseService;
 
     private ProcessDefinition rootDefinition;
     private ProcessDefinition childDefinition;
+    private ProcessDefinition planChildDefinition;
 
     @BeforeAll
     void deployAndPublishDefinition() {
@@ -130,7 +137,12 @@ class ProductionEmbeddedLifecycleIT {
                 .deploymentId(deployment.getId())
                 .processDefinitionKey("production-child")
                 .singleResult();
+        planChildDefinition = repository.createProcessDefinitionQuery()
+                .deploymentId(deployment.getId())
+                .processDefinitionKey("production-plan-child")
+                .singleResult();
         publishCaseDefinition(rootDefinition);
+        publishPlanModelDefinition();
     }
 
     @BeforeEach
@@ -167,6 +179,8 @@ class ProductionEmbeddedLifecycleIT {
         var childTask = tasks.createTaskQuery()
                 .processInstanceId(child.processInstanceId()).singleResult();
         assertProjectedTask(childTask.getId(), created.id(), "OPEN", null);
+        assertThat(eventCount(created.id(), EventTypes.PROCESS_STARTED)).isEqualTo(2);
+        assertThat(auditActionCount(created.id(), "engine.process.started")).isEqualTo(2);
 
         tasks.complete(childTask.getId());
 
@@ -176,9 +190,25 @@ class ProductionEmbeddedLifecycleIT {
 
         tasks.complete(rootTask.getId());
 
+        assertPlanItem(created.id(), "STAGE", "ACTIVE");
+        var stageTask = tasks.createTaskQuery()
+                .processInstanceId(created.rootProcessInstanceId()).singleResult();
+        assertThat(stageTask.getTaskDefinitionKey()).isEqualTo("root-stage-review");
+        assertProjectedTask(stageTask.getId(), created.id(), "OPEN", null);
+        tasks.complete(stageTask.getId());
+
         assertThat(cases.require(created.id()).state()).isEqualTo(CaseState.CLOSED);
         assertThat(processes.findByProcessInstanceId(created.rootProcessInstanceId())
                 .orElseThrow().state()).isEqualTo("COMPLETED");
+        assertPlanItem(created.id(), "STAGE", "COMPLETED");
+        assertPlanItem(created.id(), "MILESTONE", "COMPLETED");
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM CM_MILESTONE WHERE CASE_ID_ = :caseId "
+                        + "AND ACHIEVED_ = 1")
+                .param("caseId", created.id()).query(Integer.class).single()).isEqualTo(1);
+        assertThat(auditActionCount(created.id(), "engine.activity.started")).isEqualTo(1);
+        assertThat(auditActionCount(created.id(), "engine.activity.completed")).isEqualTo(1);
+        assertThat(auditActionCount(created.id(), "engine.milestone.reached")).isEqualTo(1);
+        assertThat(eventCount(created.id(), EventTypes.MILESTONE_ACHIEVED)).isEqualTo(1);
     }
 
     @Test
@@ -213,6 +243,29 @@ class ProductionEmbeddedLifecycleIT {
         assertProjectedTask(task.getId(), created.id(), "OPEN", null);
         assertThat(observationCount(created.id(), null, null)).isEqualTo(observationsBefore);
         assertThat(observationCount(created.id(), "USER_TASK", "COMPLETED")).isZero();
+    }
+
+    @Test
+    void cancellingAProcessInsideAnActiveStagePersistsAllProductionEffects() {
+        var created = caseService.create("production-root", TENANT, "business-cancel-effects",
+                "Cancel effects", CasePriority.MEDIUM, Map.of(), ACTOR);
+        var rootTask = tasks.createTaskQuery()
+                .processInstanceId(created.rootProcessInstanceId()).singleResult();
+        tasks.complete(rootTask.getId());
+        var stageTask = tasks.createTaskQuery()
+                .processInstanceId(created.rootProcessInstanceId()).singleResult();
+        assertPlanItem(created.id(), "STAGE", "ACTIVE");
+
+        runtime.deleteProcessInstance(created.rootProcessInstanceId(), "operator cancellation");
+
+        assertThat(cases.require(created.id()).state()).isEqualTo(CaseState.CANCELLED);
+        assertThat(processes.findByProcessInstanceId(created.rootProcessInstanceId())
+                .orElseThrow().state()).isEqualTo("TERMINATED");
+        assertProjectedTask(stageTask.getId(), created.id(), "TERMINATED", null);
+        assertThat(auditActionCount(created.id(), "engine.activity.cancelled")).isEqualTo(1);
+        assertPlanItem(created.id(), "STAGE", "TERMINATED");
+        assertThat(auditActionCount(created.id(), "engine.process.terminated")).isEqualTo(1);
+        assertThat(eventCount(created.id(), EventTypes.CASE_CANCELLED)).isEqualTo(1);
     }
 
     @Test
@@ -264,6 +317,38 @@ class ProductionEmbeddedLifecycleIT {
         assertThat(observationCount(created.id(), null, null)).isEqualTo(observationsBefore);
     }
 
+    @Test
+    void planModelProcessTaskUsesPersistedCompatibilityAuthorityThroughNestedTaskCompletion() {
+        var created = caseService.create("production-plan", TENANT, "business-plan",
+                "Plan compatibility", CasePriority.MEDIUM, Map.of(), ACTOR);
+        var link = processes.findByCase(created.id()).getFirst();
+        var legacyTask = caseTasks.forCase(created.id()).getFirst();
+
+        assertThat(legacyTask.state()).isEqualTo(TaskState.OPEN);
+        var claimed = caseTasks.claim(legacyTask.id(), legacyTask.version(), ACTOR);
+        var completed = caseTasks.complete(
+                claimed.id(), claimed.version(), Map.of("outcome", "approved"), ACTOR);
+        assertThat(completed.state()).isEqualTo(TaskState.COMPLETED);
+
+        assertThat(link.processDefinitionId()).isEqualTo(planChildDefinition.getId());
+        assertThat(link.planItemId()).isNotBlank();
+        var nestedTask = tasks.createTaskQuery()
+                .processInstanceId(link.processInstanceId()).singleResult();
+        assertThat(nestedTask).isNotNull();
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = :taskId")
+                .param("taskId", nestedTask.getId()).query(Integer.class).single()).isZero();
+
+        tasks.complete(nestedTask.getId());
+
+        assertThat(runtime.createProcessInstanceQuery()
+                .processInstanceId(link.processInstanceId()).singleResult()).isNull();
+        assertThat(processes.findByProcessInstanceId(link.processInstanceId()).orElseThrow().state())
+                .isEqualTo("COMPLETED");
+        assertThat(cases.require(created.id()).state()).isEqualTo(CaseState.ACTIVE);
+        assertThat(eventCount(created.id(), EventTypes.PROCESS_STARTED)).isEqualTo(1);
+        assertThat(auditActionCount(created.id(), "engine.process.started")).isEqualTo(1);
+    }
+
     private void publishCaseDefinition(ProcessDefinition definition) {
         String definitionId = "production-root:1";
         OffsetDateTime now = OffsetDateTime.now();
@@ -299,6 +384,46 @@ class ProductionEmbeddedLifecycleIT {
                         now, now, null, "publisher"));
     }
 
+    private void publishPlanModelDefinition() {
+        String definitionId = "production-plan:1";
+        OffsetDateTime now = OffsetDateTime.now();
+        var processTask = new PlanItemDefinition("production-plan-task:1", definitionId,
+                "nested-process", PlanItemType.PROCESS_TASK, "Nested process", null,
+                false, true, false, List.of(), List.of(), null,
+                "production-plan-child", List.of(), 10);
+        var humanTask = new PlanItemDefinition("production-human-task:1", definitionId,
+                "legacy-review", PlanItemType.HUMAN_TASK, "Legacy review", null,
+                false, true, false, List.of(), List.of(), null,
+                null, List.of("handlers"), 20);
+        new CaseDefinitionRepository(dataSource).insert(new CaseDefinition(
+                definitionId, "production-plan", 1, "Production plan", TENANT,
+                null, null, List.of("handlers"), List.of(), Map.of(),
+                List.of(processTask, humanTask),
+                OrchestrationMode.PLAN_MODEL, now, "publisher"));
+
+        CaseDefinitionReleaseRepository releases =
+                new CaseDefinitionReleaseRepository(dataSource);
+        releases.insert(CaseDefinitionRelease.stored(
+                "production-plan-orchestration", "production-plan", TENANT,
+                ReleaseKind.ORCHESTRATION, "application/json", "{}".getBytes(StandardCharsets.UTF_8),
+                sha('d'), ReleaseStatus.ACTIVE, null, null, "publisher"));
+        releases.insert(CaseDefinitionRelease.stored(
+                "production-plan-contract", "production-plan", TENANT,
+                ReleaseKind.CONTRACT, "application/json", "{}".getBytes(StandardCharsets.UTF_8),
+                sha('e'), ReleaseStatus.ACTIVE, null, null, "publisher"));
+        releases.insert(CaseDefinitionRelease.stored(
+                "production-plan-presentation", "production-plan", TENANT,
+                ReleaseKind.PRESENTATION, "application/json", "{}".getBytes(StandardCharsets.UTF_8),
+                sha('f'), ReleaseStatus.ACTIVE, null, null, "publisher"));
+        new CaseDefinitionVersionBindingRepository(dataSource).insert(
+                new CaseDefinitionVersionBinding(definitionId, "production-plan", TENANT,
+                        "production-plan-orchestration", sha('d'),
+                        "production-plan-contract", sha('e'),
+                        "production-plan-presentation", sha('f'), ReleaseStatus.ACTIVE,
+                        OrchestrationMode.PLAN_MODEL, BindingStatus.ACTIVE, null, null,
+                        now, now, null, "publisher"));
+    }
+
     private void assertProjectedTask(String taskId, String caseId, String state, String assignee) {
         Map<String, Object> row = jdbc.sql("""
                 SELECT CASE_ID_, STATE_, ASSIGNEE_ FROM CM_TASK
@@ -309,6 +434,13 @@ class ProductionEmbeddedLifecycleIT {
         assertThat(row.get("ASSIGNEE_")).isEqualTo(assignee);
     }
 
+    private void assertPlanItem(String caseId, String type, String state) {
+        assertThat(jdbc.sql("SELECT STATE_ FROM CM_PLAN_ITEM WHERE CASE_ID_ = :caseId "
+                        + "AND TYPE_ = :type")
+                .param("caseId", caseId).param("type", type)
+                .query(String.class).single()).isEqualTo(state);
+    }
+
     private int observationCount(String caseId, String kind, String eventType) {
         String sql = "SELECT COUNT(*) FROM CM_APPLIED_ENGINE_OBSERVATION WHERE CASE_ID_ = :caseId"
                 + (kind == null ? "" : " AND OBSERVATION_KIND_ = :kind")
@@ -317,6 +449,22 @@ class ProductionEmbeddedLifecycleIT {
         if (kind != null) query = query.param("kind", kind);
         if (eventType != null) query = query.param("eventType", eventType);
         return query.query(Integer.class).single();
+    }
+
+    private int eventCount(String caseId, String type) {
+        return jdbc.sql("SELECT COUNT(*) FROM CM_EVENT WHERE SUBJECT_ = :caseId "
+                        + "AND TYPE_ LIKE :type")
+                .param("caseId", caseId)
+                .param("type", "%" + type)
+                .query(Integer.class).single();
+    }
+
+    private int auditActionCount(String caseId, String action) {
+        return jdbc.sql("SELECT COUNT(*) FROM CM_AUDIT_LOG WHERE CASE_ID_ = :caseId "
+                        + "AND ACTION_ = :action")
+                .param("caseId", caseId)
+                .param("action", action)
+                .query(Integer.class).single();
     }
 
     private int rowCount(String table) {

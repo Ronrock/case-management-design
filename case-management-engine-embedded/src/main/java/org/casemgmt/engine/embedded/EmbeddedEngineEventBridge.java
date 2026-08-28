@@ -2,6 +2,8 @@ package org.casemgmt.engine.embedded;
 
 import org.casemgmt.observation.ActivityLifecycleObservation;
 import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.EngineObservation;
+import org.casemgmt.observation.LegacyPlanModelObservationHandler;
 import org.casemgmt.observation.MilestoneObservation;
 import org.casemgmt.observation.ProcessObservation;
 import org.casemgmt.observation.UserTaskObservation;
@@ -30,6 +32,7 @@ public final class EmbeddedEngineEventBridge {
     public static final String SOURCE = "operaton:embedded";
 
     private final EngineObservationHandler observations;
+    private final LegacyPlanModelObservationHandler planModelObservations;
     private final ProcessCaseCorrelation correlation;
     private final ProcessActivityClassifier classifier;
     private final RepositoryService repository;
@@ -44,8 +47,20 @@ public final class EmbeddedEngineEventBridge {
             RepositoryService repository,
             TaskService tasks,
             String engineId) {
-        this(observations, correlation, classifier, repository, tasks, engineId,
+        this(observations, null, correlation, classifier, repository, tasks, engineId,
                 Clock.systemUTC());
+    }
+
+    public EmbeddedEngineEventBridge(
+            EngineObservationHandler observations,
+            LegacyPlanModelObservationHandler planModelObservations,
+            ProcessCaseCorrelation correlation,
+            ProcessActivityClassifier classifier,
+            RepositoryService repository,
+            TaskService tasks,
+            String engineId) {
+        this(observations, planModelObservations, correlation, classifier, repository, tasks,
+                engineId, Clock.systemUTC());
     }
 
     EmbeddedEngineEventBridge(
@@ -56,7 +71,20 @@ public final class EmbeddedEngineEventBridge {
             TaskService tasks,
             String engineId,
             Clock clock) {
+        this(observations, null, correlation, classifier, repository, tasks, engineId, clock);
+    }
+
+    EmbeddedEngineEventBridge(
+            EngineObservationHandler observations,
+            LegacyPlanModelObservationHandler planModelObservations,
+            ProcessCaseCorrelation correlation,
+            ProcessActivityClassifier classifier,
+            RepositoryService repository,
+            TaskService tasks,
+            String engineId,
+            Clock clock) {
         this.observations = Objects.requireNonNull(observations, "observations");
+        this.planModelObservations = planModelObservations;
         this.correlation = Objects.requireNonNull(correlation, "correlation");
         this.classifier = Objects.requireNonNull(classifier, "classifier");
         this.repository = Objects.requireNonNull(repository, "repository");
@@ -111,7 +139,7 @@ public final class EmbeddedEngineEventBridge {
             attributes.put("variables", new LinkedHashMap<>(tasks.getVariables(event.getId())));
         }
 
-        observations.apply(new UserTaskObservation(observationId(), 1, SOURCE, engineId,
+        apply(new UserTaskObservation(observationId(), 1, SOURCE, engineId,
                 event.getTenantId(), caseId, event.getProcessInstanceId(), event.getId(), null,
                 eventType, occurredAt, receivedAt, attributes));
     }
@@ -150,7 +178,7 @@ public final class EmbeddedEngineEventBridge {
                 return;
             }
             put(attributes, "milestoneId", value.milestoneId());
-            observations.apply(new MilestoneObservation(observationId(), 1, SOURCE, engineId,
+            apply(new MilestoneObservation(observationId(), 1, SOURCE, engineId,
                     event.getTenantId(), caseId, event.getProcessInstanceId(),
                     event.getActivityInstanceId(), null, type, now, now, attributes));
             return;
@@ -159,7 +187,7 @@ public final class EmbeddedEngineEventBridge {
         if (type == null) {
             return;
         }
-        observations.apply(new ActivityLifecycleObservation(observationId(), 1, SOURCE, engineId,
+        apply(new ActivityLifecycleObservation(observationId(), 1, SOURCE, engineId,
                 event.getTenantId(), caseId, event.getProcessInstanceId(),
                 event.getActivityInstanceId(), null, type, now, now, attributes));
     }
@@ -174,7 +202,7 @@ public final class EmbeddedEngineEventBridge {
         Map<String, Object> attributes = authorityAttributes(
                 event.getProcessDefinitionId(),
                 processDefinitionKey(event.getProcessDefinitionId()));
-        observations.apply(new ProcessObservation(observationId(), 1, SOURCE, engineId,
+        apply(new ProcessObservation(observationId(), 1, SOURCE, engineId,
                 event.getTenantId(), caseId, event.getProcessInstanceId(),
                 event.getProcessInstanceId(), null, ProcessObservation.EventType.STARTED,
                 now, now, attributes));
@@ -225,7 +253,7 @@ public final class EmbeddedEngineEventBridge {
             // history producer's explicit start event is canonical evidence.
             return;
         }
-        observations.apply(new ProcessObservation(observationId(), 1, SOURCE, engineId,
+        apply(new ProcessObservation(observationId(), 1, SOURCE, engineId,
                 process.getTenantId(), caseId, process.getProcessInstanceId(),
                 process.getProcessInstanceId(), stableRevision(process.getSequenceCounter()), type,
                 engineDate.toInstant(), receivedAt, attributes));
@@ -253,14 +281,14 @@ public final class EmbeddedEngineEventBridge {
         var value = classification.orElseThrow();
         if (value.kind() == ActivityObservation.Kind.MILESTONE) {
             put(attributes, "milestoneId", value.milestoneId());
-            observations.apply(new MilestoneObservation(observationId(), 1, SOURCE, engineId,
+            apply(new MilestoneObservation(observationId(), 1, SOURCE, engineId,
                     activity.getTenantId(), caseId, activity.getProcessInstanceId(),
                     activity.getActivityInstanceId(), stableRevision(activity.getSequenceCounter()),
                     MilestoneObservation.EventType.CANCELLED,
                     activity.getEndTime().toInstant(), receivedAt, attributes));
             return;
         }
-        observations.apply(new ActivityLifecycleObservation(observationId(), 1, SOURCE, engineId,
+        apply(new ActivityLifecycleObservation(observationId(), 1, SOURCE, engineId,
                 activity.getTenantId(), caseId, activity.getProcessInstanceId(),
                 activity.getActivityInstanceId(), stableRevision(activity.getSequenceCounter()),
                 ActivityLifecycleObservation.EventType.CANCELLED,
@@ -277,6 +305,22 @@ public final class EmbeddedEngineEventBridge {
                     "No process definition key for exact definition " + processDefinitionId);
         }
         return definition.getKey();
+    }
+
+    private void apply(EngineObservation observation) {
+        var authority = correlation.authority(observation.processInstanceId(),
+                (String) observation.attributes().get("processDefinitionId"));
+        if (authority.isEmpty() || !authority.orElseThrow().caseId().equals(observation.caseId())) {
+            return;
+        }
+        if (authority.orElseThrow().orchestrationMode()
+                == org.casemgmt.orchestration.OrchestrationMode.PLAN_MODEL) {
+            if (planModelObservations != null) {
+                planModelObservations.apply(observation);
+            }
+            return;
+        }
+        observations.apply(observation);
     }
 
     private static Map<String, Object> authorityAttributes(

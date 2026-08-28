@@ -2,10 +2,10 @@ package org.casemgmt.engine.embedded;
 
 import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
 import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration;
-import org.springframework.aop.framework.AopProxyUtils;
 import org.springframework.beans.factory.InitializingBean;
-import org.springframework.jdbc.datasource.DelegatingDataSource;
+import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.ResourceTransactionManager;
 
 import javax.sql.DataSource;
 import java.util.Objects;
@@ -34,38 +34,35 @@ public final class EmbeddedTransactionResourceValidator implements InitializingB
             throw new IllegalStateException("Embedded Operaton requires a "
                     + "SpringProcessEngineConfiguration to share transaction authority");
         }
-        if (unwrapDataSource(springEngine.getDataSource())
-                != unwrapDataSource(platformDataSource)
-                || transactionAuthority(springEngine.getTransactionManager())
-                != transactionAuthority(platformTransactions)) {
+        if (springEngine.getTransactionManager() != platformTransactions) {
             throw new IllegalStateException("Embedded Operaton and case lifecycle must use the "
                     + "same DataSource and transaction manager authority");
         }
-    }
-
-    private static Object transactionAuthority(PlatformTransactionManager transactions) {
-        return unwrapAopProxy(transactions);
-    }
-
-    private static DataSource unwrapDataSource(DataSource dataSource) {
-        Object current = unwrapAopProxy(dataSource);
-        while (current instanceof DelegatingDataSource delegating
-                && delegating.getTargetDataSource() != null) {
-            current = unwrapAopProxy(delegating.getTargetDataSource());
+        if (!(platformTransactions instanceof ResourceTransactionManager resourceManager)
+                || !(resourceManager.getResourceFactory() instanceof DataSource managedResource)) {
+            throw new IllegalStateException("Embedded transaction manager must expose its exact "
+                    + "managed DataSource resource");
         }
-        if (!(current instanceof DataSource unwrapped)) {
-            throw new IllegalStateException(
-                    "Embedded transaction authority did not resolve to a DataSource");
+        DataSource repositoryResource = transactionResource(platformDataSource);
+        if (managedResource != repositoryResource) {
+            throw new IllegalStateException("Embedded transaction manager does not manage the "
+                    + "repository DataSource transaction resource");
         }
-        return unwrapped;
+        if (managedResource != transactionResource(springEngine.getDataSource())) {
+            throw new IllegalStateException("Embedded Operaton does not use the transaction "
+                    + "manager's exact DataSource resource");
+        }
     }
 
-    private static Object unwrapAopProxy(Object candidate) {
-        Object current = Objects.requireNonNull(candidate, "transaction resource");
-        Object target;
-        while ((target = AopProxyUtils.getSingletonTarget(current)) != null
-                && target != current) {
-            current = target;
+    /** Mirrors Spring's transaction-aware proxy participation without flattening other proxies. */
+    private static DataSource transactionResource(DataSource dataSource) {
+        DataSource current = Objects.requireNonNull(dataSource, "dataSource");
+        while (current instanceof TransactionAwareDataSourceProxy proxy) {
+            current = proxy.getTargetDataSource();
+            if (current == null) {
+                throw new IllegalStateException(
+                        "TransactionAwareDataSourceProxy has no target DataSource");
+            }
         }
         return current;
     }

@@ -302,6 +302,14 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
 
     private static boolean stale(EngineObservation incoming,
                                  AppliedObservationRepository.AppliedPosition current) {
+        // Cancellation is an irreversible engine fact. Operaton publishes a cancelled history
+        // record before its synchronous execution "end" callback while deleting an active
+        // subprocess, and that later callback must not resurrect the activity as completed.
+        if ((incoming instanceof ActivityLifecycleObservation
+                || incoming instanceof MilestoneObservation)
+                && "CANCELLED".equals(current.eventType())) {
+            return true;
+        }
         if (incoming.entityRevision() != null && current.entityRevision() != null) {
             return incoming.entityRevision() <= current.entityRevision();
         }
@@ -328,9 +336,10 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
                     || "DELETED".equals(current.eventType())
                     || incoming.eventType() == UserTaskObservation.EventType.CREATED;
         }
-        if (incoming instanceof ActivityLifecycleObservation) {
-            return "COMPLETED".equals(current.eventType())
-                    || "CANCELLED".equals(current.eventType());
+        if (incoming instanceof ActivityLifecycleObservation activity) {
+            return "CANCELLED".equals(current.eventType())
+                    || ("COMPLETED".equals(current.eventType())
+                        && activity.eventType() != ActivityLifecycleObservation.EventType.CANCELLED);
         }
         if (incoming instanceof ProcessObservation) {
             return "COMPLETED".equals(current.eventType())

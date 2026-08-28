@@ -4,7 +4,6 @@ import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
-import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
 import org.casemgmt.engine.embedded.PersistedProcessCaseCorrelation;
 import org.casemgmt.engine.embedded.ProcessActivityClassifier;
 import org.casemgmt.engine.embedded.ProcessCaseCorrelation;
@@ -27,6 +26,8 @@ import org.operaton.bpm.engine.ProcessEngine;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.TaskService;
+import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
+import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 // Spring Boot 4 relocated DataSourceAutoConfiguration out of spring-boot-autoconfigure's
@@ -182,11 +183,10 @@ class AutoConfigurationTest {
 
     @Test
     void embeddedModeRegistersTheSpringEventProjectionBridgeAfterItsPort() {
-        runner.withBean(TaskService.class, () -> mock(TaskService.class))
+        runner.withUserConfiguration(EmbeddedOperatonAuthorityConfiguration.class)
+                .withBean(TaskService.class, () -> mock(TaskService.class))
                 .withBean(RuntimeService.class, () -> mock(RuntimeService.class))
                 .withBean(RepositoryService.class, () -> mock(RepositoryService.class))
-                .withBean(EmbeddedTransactionResourceValidator.class,
-                        () -> mock(EmbeddedTransactionResourceValidator.class))
                 .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
                         "casemgmt.engine.mode=embedded",
                         "casemgmt.events.type-prefix=org.example.cm",
@@ -208,14 +208,13 @@ class AutoConfigurationTest {
                 mock(EngineObservationHandler.class), correlation, classifier,
                 mock(RepositoryService.class), mock(TaskService.class), "consumer-engine");
 
-        runner.withBean(TaskService.class, () -> mock(TaskService.class))
+        runner.withUserConfiguration(EmbeddedOperatonAuthorityConfiguration.class)
+                .withBean(TaskService.class, () -> mock(TaskService.class))
                 .withBean(RuntimeService.class, () -> mock(RuntimeService.class))
                 .withBean(RepositoryService.class, () -> mock(RepositoryService.class))
                 .withBean(ProcessCaseCorrelation.class, () -> correlation)
                 .withBean(ProcessActivityClassifier.class, () -> classifier)
                 .withBean(EmbeddedEngineEventBridge.class, () -> bridge)
-                .withBean(EmbeddedTransactionResourceValidator.class,
-                        () -> mock(EmbeddedTransactionResourceValidator.class))
                 .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
                         "casemgmt.engine.mode=embedded",
                         "casemgmt.events.type-prefix=org.example.cm",
@@ -226,6 +225,25 @@ class AutoConfigurationTest {
                     assertThat(context.getBean(ProcessActivityClassifier.class)).isSameAs(classifier);
                     assertThat(context.getBean(EmbeddedEngineEventBridge.class)).isSameAs(bridge);
                 });
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class EmbeddedOperatonAuthorityConfiguration {
+
+        @Bean
+        ProcessEngineConfigurationImpl processEngineConfiguration(
+                javax.sql.DataSource dataSource,
+                PlatformTransactionManager transactionManager) {
+            var configuration = new SpringProcessEngineConfiguration();
+            configuration.setDataSource(dataSource);
+            configuration.setTransactionManager(transactionManager);
+            return configuration;
+        }
+
+        @Bean
+        ProcessEngine processEngine() {
+            return mock(ProcessEngine.class);
+        }
     }
 
     @Test
