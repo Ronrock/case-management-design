@@ -264,6 +264,7 @@ the Oracle result is an environment limitation rather than policy-model verifica
 `./mvnw -pl case-management-core,case-management-engine-remote,case-management-spring-boot-starter -am -DskipTests package`
 
 Result: all six reactor projects succeeded (root, core, embedded, remote, REST, and starter).
+
 `git diff --check` also completed cleanly.
 
 ## Durable-state validation addendum
@@ -414,3 +415,70 @@ failures.
 `./mvnw -pl case-management-core,case-management-engine-remote,case-management-spring-boot-starter -am -DskipTests package`
 
 Result: all six reactor projects succeeded (root, core, embedded, remote, REST, and starter).
+
+## Normalized action-history final addendum
+
+The final follow-up commit named `fix: normalize command action history` supersedes the
+round-four in-memory unbounded list. The scope remains the pure command model and tests. Task 2
+still owns the normalized action table, repository implementation, and transactional dispatcher.
+
+### Package-isolated legacy migration
+
+The public `EngineCommandPolicy.migrateLegacyDone` factory was removed. Historical `DONE` rows now
+enter through the package-private `LegacyDoneCommandMigration` and its package-private,
+strongly-typed `LegacyDoneRow`; neither the mapper, row constructor, evidence type, nor old-status
+type is exposed as a public runtime API. Task 2 must implement its repository mapper in
+`org.casemgmt.engine` (or add a comparably narrow package-local migration component). Ordinary
+`CommandDispatchOutcome.ConfirmationEvidence` continues to reject `LEGACY_MIGRATION`, so a live
+dispatcher cannot manufacture this terminal provenance.
+
+The old `ATTEMPTS_` value is interpreted as the historical failure/retry count, not total started
+dispatches. Migration accepts only 0 through 5, retains that raw count in legacy evidence, and
+derives both lifetime and current-budget dispatch counts as `legacyFailureCount + 1` in epoch zero.
+The canonical migration timestamp and raw count are bound to the decision and fail closed if a
+persisted row is repackaged.
+
+### O(1) normalized action-ledger contract
+
+`Decision` and `CommandState` retain only an `ActionLedgerSummary` plus the action applied by the
+current decision, rather than copying historical rows. The summary contains long-valued action
+count/contiguous high-water sequence, audited retry-override count, and cancellation count.
+Construction checks aggregate ranges, budget epoch against the repository-verified reset count,
+cancellation/status consistency, the current action's high-water identity, and exact lifetime
+attempt arithmetic. The API documentation states explicitly that row aggregates are not proof of
+database history and must be verified by Task 2 under the same transaction.
+
+Operator transitions now require an `AuthoritativeActionLookup` for the incoming action ID:
+
+- `EXACT_MATCH` compares the complete normalized action and review evidence, then returns the
+  current decision unchanged even after intervening transitions or reload;
+- `CONFLICT` rejects reused identity with different provenance;
+- `ABSENT` emits exactly one `ActionAppend` intent containing the expected summary, next
+  overflow-checked sequence, normalized row, and resulting summary.
+
+The persistence contract requires Task 2 to atomically insert under unique `(command, actionId)`
+and `(command, sequence)` keys and compare-and-update the command from the expected to resulting
+summary. Insert/CAS races must reload the command and authoritative lookup and rerun policy. This
+keeps transition work O(1), makes large high-water values practical, and avoids silently dropping
+replay identities or pretending an aggregate alone proves history.
+
+### Final-round TDD and verification evidence
+
+The first RED legacy run failed compilation on the missing package-isolated mapper, typed legacy
+row, raw count, and canonical migration time. A second RED run produced seven provenance failures
+when migrated time/count could be repackaged; the final accessibility RED exposed the public old
+status type. The normalized-ledger RED run produced 23 compilation errors for the missing summary,
+lookup, append, and operator-transition API before those contracts were implemented.
+
+`./mvnw -pl case-management-core -Dtest=EngineCommandDurableStateTest,EngineCommandPolicyTest,ExactStartOutboxTest,EngineCommandDispatcherRootConfirmationTest,StartProcessRequestTest,EngineCommandLegacyMigrationTest,EngineCommandNormalizedActionLedgerTest,StartProcessByKeyRequestTest test`
+
+Result: 1,426 tests passed, 0 failures, 0 errors, 0 skipped. This includes the exhaustive 1,285-case
+policy matrix, the complete status/provenance reconstruction matrix, all seven legacy command
+types and boundary conversions 0-to-1/5-to-6, public-forgery checks, large high-water O(1)
+transitions, A-to-B-to-A reload replay, exact/conflict comparison, sequence overflow, and simulated
+insert-race reload semantics.
+
+`./mvnw -pl case-management-core,case-management-engine-remote,case-management-spring-boot-starter -am -DskipTests package`
+
+Result: all six reactor projects succeeded (root, core, embedded, remote, REST, and starter).
+Final `git diff --check` completed cleanly.

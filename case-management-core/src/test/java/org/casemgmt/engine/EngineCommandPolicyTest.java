@@ -59,12 +59,12 @@ class EngineCommandPolicyTest {
         EngineCommandPolicy.CommandState state = state(type, status);
 
         if (expected == null) {
-            assertThatThrownBy(() -> POLICY.transition(state, scenario.outcome()))
+            assertThatThrownBy(() -> transition(state, scenario.outcome()))
                     .isInstanceOfAny(IllegalStateException.class, IllegalArgumentException.class);
             return;
         }
 
-        assertThat(POLICY.transition(state, scenario.outcome())).isEqualTo(expected);
+        assertThat(transition(state, scenario.outcome())).isEqualTo(expected);
     }
 
     static Stream<Arguments> completeDecisionMatrix() {
@@ -234,7 +234,7 @@ class EngineCommandPolicyTest {
                 ? EngineCommandStatus.AWAITING_CONFIRMATION : EngineCommandStatus.DISPATCHING;
         var firstEvidence = confirmation(type, firstSource);
         var expectedFirst = confirmed(firstEvidence);
-        var first = POLICY.transition(state(type, initialStatus),
+        var first = transition(state(type, initialStatus),
                 confirmationOutcome(type, firstSource));
         assertThat(first).isEqualTo(expectedFirst);
 
@@ -276,11 +276,11 @@ class EngineCommandPolicyTest {
                 original.expectedTargetIdentity(), original.remoteIdentity(),
                 wrongState(type), OBSERVATION, "evidence:changed-state");
 
-        assertThatThrownBy(() -> POLICY.transition(
+        assertThatThrownBy(() -> transition(
                 state, CommandDispatchOutcome.observation(wrongIdentity)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("remote identity");
-        assertThatThrownBy(() -> POLICY.transition(
+        assertThatThrownBy(() -> transition(
                 state, CommandDispatchOutcome.observation(wrongState)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("state");
@@ -292,13 +292,15 @@ class EngineCommandPolicyTest {
             EngineCommandPolicy.CommandState initial,
             CommandDispatchOutcome outcome,
             EngineCommandPolicy.Decision expected) {
-        var first = POLICY.transition(initial, outcome);
+        var first = transition(initial, outcome);
         assertThat(first).isEqualTo(expected);
 
         EngineCommandPolicy laterPolicy = new EngineCommandPolicy(Clock.fixed(
                 NOW.plus(Duration.ofDays(2)), ZoneOffset.UTC));
         assertThat(laterPolicy.transition(new EngineCommandPolicy.CommandState(
-                initial.command(), first), outcome)).isEqualTo(expected);
+                initial.command(), first), outcome,
+                EngineCommandPolicy.AuthoritativeActionLookup.exact(first.appliedAction()))
+                .decision()).isEqualTo(expected);
     }
 
     static Stream<Arguments> operatorReplayCases() {
@@ -343,7 +345,7 @@ class EngineCommandPolicyTest {
     void repackagingAnAppliedActionIdOrUsingTheWrongActionTypeFailsClosed() {
         EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
         var action = operator(type, MANUAL_REVIEW, "action:stable", false, NOW_OFFSET);
-        var first = POLICY.transition(state(type, EngineCommandStatus.AWAITING_CONFIRMATION),
+        var first = transition(state(type, EngineCommandStatus.AWAITING_CONFIRMATION),
                 CommandDispatchOutcome.manualReviewRequested(action));
         var committed = new EngineCommandPolicy.CommandState(command(type), first);
         var repackaged = new CommandDispatchOutcome.OperatorAction(
@@ -351,7 +353,8 @@ class EngineCommandPolicyTest {
                 MANUAL_REVIEW, "action:stable", "audit:different", NOW_OFFSET, false);
 
         assertThatThrownBy(() -> POLICY.transition(committed,
-                CommandDispatchOutcome.manualReviewRequested(repackaged)))
+                CommandDispatchOutcome.manualReviewRequested(repackaged),
+                EngineCommandPolicy.AuthoritativeActionLookup.exact(first.appliedAction())))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("repackaged");
         assertThatThrownBy(() -> CommandDispatchOutcome.reconciliationRequested(action))
@@ -364,13 +367,13 @@ class EngineCommandPolicyTest {
         EngineCommand.Type type = EngineCommand.Type.START_PROCESS;
         var initial = decision(EngineCommandStatus.PENDING, PRIOR, null,
                 null, null, 0, 0, 0, false, null, null, null);
-        var firstDispatch = POLICY.transition(new EngineCommandPolicy.CommandState(
+        var firstDispatch = transition(new EngineCommandPolicy.CommandState(
                 command(type), initial), CommandDispatchOutcome.dispatchRequested());
         assertThat(firstDispatch).isEqualTo(decision(
                 EngineCommandStatus.DISPATCHING, NOW_OFFSET, null, null, null,
                 1, 1, 0, false, null, null, null));
 
-        var firstFailure = POLICY.transition(new EngineCommandPolicy.CommandState(
+        var firstFailure = transition(new EngineCommandPolicy.CommandState(
                 command(type), firstDispatch),
                 CommandDispatchOutcome.transportFailure(PRE_SEND_ZERO_BYTES));
         assertThat(firstFailure).isEqualTo(decision(
@@ -389,7 +392,7 @@ class EngineCommandPolicyTest {
         var absence = review(type, DEFINITIVE_ABSENCE, OPERATOR_REVIEW);
         var override = operator(type, RETRY_OVERRIDE,
                 "action:override", true, NOW_OFFSET);
-        var overridden = POLICY.transition(new EngineCommandPolicy.CommandState(
+        var overridden = transition(new EngineCommandPolicy.CommandState(
                 command(type), exhaustedReview),
                 CommandDispatchOutcome.retryAfterReviewedAbsence(absence, override));
         var expectedOverride = decision(EngineCommandStatus.RETRYABLE, NOW_OFFSET, NOW_OFFSET,
@@ -398,16 +401,18 @@ class EngineCommandPolicyTest {
         assertThat(overridden).isEqualTo(expectedOverride);
         assertThat(POLICY.transition(new EngineCommandPolicy.CommandState(
                 command(type), overridden),
-                CommandDispatchOutcome.retryAfterReviewedAbsence(absence, override)))
+                CommandDispatchOutcome.retryAfterReviewedAbsence(absence, override),
+                EngineCommandPolicy.AuthoritativeActionLookup.exact(overridden.appliedAction()))
+                .decision())
                 .isEqualTo(expectedOverride);
 
-        var nextDispatch = POLICY.transition(new EngineCommandPolicy.CommandState(
+        var nextDispatch = transition(new EngineCommandPolicy.CommandState(
                 command(type), overridden), CommandDispatchOutcome.dispatchRequested());
         assertThat(nextDispatch).isEqualTo(new EngineCommandPolicy.Decision(
                 EngineCommandStatus.DISPATCHING, NOW_OFFSET, null, null, null,
                 7, 1, 1, false, null, null, null,
-                java.util.List.of(new EngineCommandPolicy.ProcessedAction(
-                        1, override, absence))));
+                null,
+                new EngineCommandPolicy.ActionLedgerSummary(1, 1, 1, 0)));
     }
 
     @Test
@@ -432,7 +437,7 @@ class EngineCommandPolicyTest {
             int status, CommandDispatchOutcome.Acceptance acceptance,
             EngineCommand.Type type, Duration retryAfter,
             EngineCommandPolicy.Decision expected) {
-        assertThat(POLICY.transition(state(type, EngineCommandStatus.DISPATCHING),
+        assertThat(transition(state(type, EngineCommandStatus.DISPATCHING),
                 CommandDispatchOutcome.http(status, acceptance, retryAfter, null)))
                 .isEqualTo(expected);
     }
@@ -488,7 +493,7 @@ class EngineCommandPolicyTest {
     void everyTransportPhaseProducesTheCompleteExpectedDecision(
             CommandDispatchOutcome.TransportFailure failure,
             EngineCommandPolicy.Decision expected) {
-        assertThat(POLICY.transition(state(
+        assertThat(transition(state(
                 EngineCommand.Type.START_PROCESS, EngineCommandStatus.DISPATCHING),
                 CommandDispatchOutcome.transportFailure(failure))).isEqualTo(expected);
     }
@@ -517,7 +522,7 @@ class EngineCommandPolicyTest {
                 "other-tenant", matching.operationId(), matching.commandId(), type,
                 matching.expectedTargetIdentity(), matching.remoteIdentity(),
                 matching.remoteState(), OBSERVATION, "evidence:wrong-tenant");
-        assertThatThrownBy(() -> POLICY.transition(
+        assertThatThrownBy(() -> transition(
                 state(type, EngineCommandStatus.DISPATCHING),
                 CommandDispatchOutcome.observation(wrongTenant)))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -531,11 +536,11 @@ class EngineCommandPolicyTest {
         EngineCommand.Type type = EngineCommand.Type.COMPLETE_TASK;
         CommandDispatchOutcome outcome = CommandDispatchOutcome.observation(evidence);
 
-        assertThatThrownBy(() -> POLICY.transition(
+        assertThatThrownBy(() -> transition(
                 state(type, EngineCommandStatus.DISPATCHING), outcome))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(mismatch);
-        assertThatThrownBy(() -> POLICY.transition(
+        assertThatThrownBy(() -> transition(
                 state(type, EngineCommandStatus.CONFIRMED), outcome))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(mismatch);
@@ -601,7 +606,7 @@ class EngineCommandPolicyTest {
         assertThat(retry.nextAttemptAt()).isEqualTo(
                 EngineCommandPolicy.MAX_PERSISTABLE_TIMESTAMP);
 
-        var bounded = POLICY.transition(
+        var bounded = transition(
                 state(EngineCommand.Type.COMPLETE_TASK, EngineCommandStatus.DISPATCHING),
                 CommandDispatchOutcome.http(429, PROVEN_NOT_ACCEPTED,
                         Duration.ofDays(365_000), null));
@@ -663,6 +668,19 @@ class EngineCommandPolicyTest {
                     operator(type, CANCEL, "action:cancel", false, NOW_OFFSET));
         };
         return new EngineCommandPolicy.CommandState(command(type), committed);
+    }
+
+    private static EngineCommandPolicy.Decision transition(
+            EngineCommandPolicy.CommandState state, CommandDispatchOutcome outcome) {
+        if (outcome.operatorAction() == null) {
+            return POLICY.transition(state, outcome);
+        }
+        EngineCommandPolicy.ProcessedAction applied = state.committedDecision().appliedAction();
+        EngineCommandPolicy.AuthoritativeActionLookup lookup = applied != null
+                && applied.action().actionId().equals(outcome.operatorAction().actionId())
+                ? EngineCommandPolicy.AuthoritativeActionLookup.exact(applied)
+                : EngineCommandPolicy.AuthoritativeActionLookup.absent();
+        return POLICY.transition(state, outcome, lookup).decision();
     }
 
     private static EngineCommandPolicy.CommandContext command(EngineCommand.Type type) {
