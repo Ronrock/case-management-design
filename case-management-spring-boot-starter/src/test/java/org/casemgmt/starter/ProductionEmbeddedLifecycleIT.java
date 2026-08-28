@@ -9,6 +9,14 @@ import org.casemgmt.domain.TaskState;
 import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
 import org.casemgmt.event.EventTypes;
 import org.casemgmt.observation.SlaLifecyclePort;
+import org.casemgmt.observation.EngineObservation;
+import org.casemgmt.observation.UserTaskObservation;
+import org.casemgmt.observation.ActivityLifecycleObservation;
+import org.casemgmt.observation.MilestoneObservation;
+import org.casemgmt.observation.ProcessObservation;
+import org.casemgmt.observation.LegacyPlanModelObservationHandler;
+import org.casemgmt.projection.CaseProjectionPort;
+import org.casemgmt.event.EventPublisher;
 import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.release.BindingStatus;
@@ -39,13 +47,17 @@ import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.SimpleDriverDataSource;
+import com.zaxxer.hikari.HikariDataSource;
 
 import javax.sql.DataSource;
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -82,15 +94,67 @@ class ProductionEmbeddedLifecycleIT {
     @SpringBootConfiguration
     @EnableAutoConfiguration
     static class TestApp {
+        @Bean("dataSource")
+        @Primary
+        DataSource caseDataSource() {
+            HikariDataSource dataSource = new HikariDataSource();
+            dataSource.setDriverClassName("org.h2.Driver");
+            dataSource.setJdbcUrl(
+                    "jdbc:h2:mem:production-lifecycle;MODE=LEGACY;DB_CLOSE_DELAY=-1;"
+                            + "INIT=CREATE CONSTANT IF NOT EXISTS SYSTIMESTAMP VALUE "
+                            + "'2026-08-28 12:00:00+00'");
+            return dataSource;
+        }
+
         @Bean
         FailingSlaLifecyclePort failingSlaLifecyclePort() {
             return new FailingSlaLifecyclePort();
+        }
+
+        @Bean("consumerDataSource")
+        DataSource consumerDataSource() {
+            return new SimpleDriverDataSource(new org.h2.Driver(),
+                    "jdbc:h2:mem:consumer-primary-jdbc;DB_CLOSE_DELAY=-1");
+        }
+
+        @Bean("consumerJdbcClient")
+        @Primary
+        JdbcClient consumerJdbcClient(@Qualifier("consumerDataSource") DataSource dataSource) {
+            return JdbcClient.create(dataSource);
+        }
+
+        @Bean
+        @Primary
+        RecordingPlanModelObservationHandler recordingPlanModelObservationHandler(
+                CaseProjectionPort projections, EventPublisher events) {
+            return new RecordingPlanModelObservationHandler(projections, events);
+        }
+    }
+
+    static final class RecordingPlanModelObservationHandler
+            extends LegacyPlanModelObservationHandler {
+        private final List<EngineObservation> recorded = new CopyOnWriteArrayList<>();
+
+        RecordingPlanModelObservationHandler(CaseProjectionPort projections,
+                                             EventPublisher events) {
+            super(projections, events);
+        }
+
+        @Override
+        public void apply(EngineObservation observation) {
+            recorded.add(observation);
+            super.apply(observation);
+        }
+
+        void clear() {
+            recorded.clear();
         }
     }
 
     static final class FailingSlaLifecyclePort implements SlaLifecyclePort {
         private volatile boolean failCreatedTask;
         private volatile boolean failCompletedTask;
+        private volatile boolean failTerminatedProcess;
 
         @Override
         public void observeAnchor(Anchor anchor) {
@@ -98,6 +162,10 @@ class ProductionEmbeddedLifecycleIT {
                     && ((failCreatedTask && "CREATED".equals(anchor.eventType()))
                     || (failCompletedTask && "COMPLETED".equals(anchor.eventType())))) {
                 throw new IllegalStateException("injected lifecycle persistence failure");
+            }
+            if (failTerminatedProcess && "process".equals(anchor.observationKind())
+                    && "TERMINATED".equals(anchor.eventType())) {
+                throw new IllegalStateException("injected cancellation persistence failure");
             }
         }
 
@@ -109,7 +177,8 @@ class ProductionEmbeddedLifecycleIT {
     @Autowired RepositoryService repository;
     @Autowired RuntimeService runtime;
     @Autowired TaskService tasks;
-    @Autowired JdbcClient jdbc;
+    @Autowired @Qualifier("caseJdbcClient") JdbcClient jdbc;
+    @Autowired @Qualifier("consumerJdbcClient") JdbcClient consumerJdbc;
     @Autowired DataSource dataSource;
     @Autowired CaseRepository cases;
     @Autowired LinkedProcessRepository processes;
@@ -117,6 +186,7 @@ class ProductionEmbeddedLifecycleIT {
     @Autowired CaseTaskService caseTasks;
     @Autowired FailingSlaLifecyclePort failures;
     @Autowired EmbeddedTransactionResourceValidator transactionResourceValidator;
+    @Autowired RecordingPlanModelObservationHandler planModelObservations;
     @Autowired @Qualifier("caseManagementCaseService") CaseService caseService;
 
     private ProcessDefinition rootDefinition;
@@ -149,11 +219,15 @@ class ProductionEmbeddedLifecycleIT {
     void resetFailure() {
         failures.failCreatedTask = false;
         failures.failCompletedTask = false;
+        failures.failTerminatedProcess = false;
+        planModelObservations.clear();
     }
 
     @Test
     void caseCreateAndLinkedChildUseProductionAuthorityAndLifecycleEffects() {
         assertThat(transactionResourceValidator).isNotNull();
+        assertThatThrownBy(() -> consumerJdbc.sql("SELECT COUNT(*) FROM CM_CASE")
+                .query(Integer.class).single()).isInstanceOf(RuntimeException.class);
         var created = caseService.create("production-root", TENANT, "business-1",
                 "Production lifecycle", CasePriority.MEDIUM, Map.of(), ACTOR);
 
@@ -269,6 +343,62 @@ class ProductionEmbeddedLifecycleIT {
     }
 
     @Test
+    void publicCaseCancellationKeepsTheSynchronousEngineTransitionAndPersistsUserReasonOnce() {
+        var created = caseService.create("production-root", TENANT, "business-api-cancel",
+                "API cancel", CasePriority.MEDIUM, Map.of(), ACTOR);
+        var rootTask = tasks.createTaskQuery()
+                .processInstanceId(created.rootProcessInstanceId()).singleResult();
+        tasks.complete(rootTask.getId());
+        var stageTask = tasks.createTaskQuery()
+                .processInstanceId(created.rootProcessInstanceId()).singleResult();
+        assertPlanItem(created.id(), "STAGE", "ACTIVE");
+
+        var cancelled = caseService.cancel(created.id(), cases.require(created.id()).version(),
+                "customer withdrew", ACTOR);
+
+        assertThat(cancelled.state()).isEqualTo(CaseState.CANCELLED);
+        assertThat(cancelled.cancelReason()).isEqualTo("customer withdrew");
+        assertThat(cases.require(created.id()).cancelReason()).isEqualTo("customer withdrew");
+        assertThat(runtime.createProcessInstanceQuery()
+                .processInstanceId(created.rootProcessInstanceId()).singleResult()).isNull();
+        assertThat(processes.findByProcessInstanceId(created.rootProcessInstanceId())
+                .orElseThrow().state()).isEqualTo("TERMINATED");
+        assertProjectedTask(stageTask.getId(), created.id(), "TERMINATED", null);
+        assertPlanItem(created.id(), "STAGE", "TERMINATED");
+        assertThat(eventCount(created.id(), EventTypes.CASE_CANCELLED)).isEqualTo(1);
+        assertThat(auditActionCount(created.id(), "engine.process.terminated")).isEqualTo(1);
+        assertThat(auditActionCount(created.id(), "case.cancel")).isEqualTo(1);
+    }
+
+    @Test
+    void publicCaseCancellationRollsBackEngineAndPlatformOnHandlerFailure() {
+        var created = caseService.create("production-root", TENANT, "business-api-cancel-fail",
+                "API cancel failure", CasePriority.MEDIUM, Map.of(), ACTOR);
+        var rootTask = tasks.createTaskQuery()
+                .processInstanceId(created.rootProcessInstanceId()).singleResult();
+        int eventsBefore = rowCount("CM_EVENT");
+        int auditsBefore = rowCount("CM_AUDIT_LOG");
+        int observationsBefore = observationCount(created.id(), null, null);
+        failures.failTerminatedProcess = true;
+
+        assertThatThrownBy(() -> caseService.cancel(created.id(),
+                cases.require(created.id()).version(), "must roll back", ACTOR))
+                .isInstanceOf(RuntimeException.class)
+                .hasStackTraceContaining("injected cancellation persistence failure");
+
+        assertThat(cases.require(created.id()).state()).isEqualTo(CaseState.ACTIVE);
+        assertThat(cases.require(created.id()).cancelReason()).isNull();
+        assertThat(runtime.createProcessInstanceQuery()
+                .processInstanceId(created.rootProcessInstanceId()).singleResult()).isNotNull();
+        assertThat(processes.findByProcessInstanceId(created.rootProcessInstanceId())
+                .orElseThrow().state()).isEqualTo("ACTIVE");
+        assertProjectedTask(rootTask.getId(), created.id(), "OPEN", null);
+        assertThat(rowCount("CM_EVENT")).isEqualTo(eventsBefore);
+        assertThat(rowCount("CM_AUDIT_LOG")).isEqualTo(auditsBefore);
+        assertThat(observationCount(created.id(), null, null)).isEqualTo(observationsBefore);
+    }
+
+    @Test
     void lifecycleFailureDuringRootStartRollsBackEngineAndPendingAuthorityTogether() {
         long engineProcessesBefore = runtime.createProcessInstanceQuery()
                 .processDefinitionId(rootDefinition.getId()).count();
@@ -338,7 +468,18 @@ class ProductionEmbeddedLifecycleIT {
         assertThat(jdbc.sql("SELECT COUNT(*) FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = :taskId")
                 .param("taskId", nestedTask.getId()).query(Integer.class).single()).isZero();
 
+        jdbc.sql("UPDATE CM_LINKED_PROCESS SET PROC_DEF_ID_ = NULL WHERE ID_ = :id")
+                .param("id", link.id()).update();
+        planModelObservations.clear();
+        tasks.claim(nestedTask.getId(), "alice");
+        assertThat(processes.findByProcessInstanceId(link.processInstanceId())
+                .orElseThrow().processDefinitionId()).isEqualTo(planChildDefinition.getId());
+
         tasks.complete(nestedTask.getId());
+        var stageTask = tasks.createTaskQuery()
+                .processInstanceId(link.processInstanceId()).singleResult();
+        assertThat(stageTask.getTaskDefinitionKey()).isEqualTo("plan-child-stage-review");
+        tasks.complete(stageTask.getId());
 
         assertThat(runtime.createProcessInstanceQuery()
                 .processInstanceId(link.processInstanceId()).singleResult()).isNull();
@@ -347,6 +488,12 @@ class ProductionEmbeddedLifecycleIT {
         assertThat(cases.require(created.id()).state()).isEqualTo(CaseState.ACTIVE);
         assertThat(eventCount(created.id(), EventTypes.PROCESS_STARTED)).isEqualTo(1);
         assertThat(auditActionCount(created.id(), "engine.process.started")).isEqualTo(1);
+        assertThat(planModelObservations.recorded)
+                .anyMatch(UserTaskObservation.class::isInstance)
+                .anyMatch(ActivityLifecycleObservation.class::isInstance)
+                .anyMatch(MilestoneObservation.class::isInstance)
+                .anyMatch(observation -> observation instanceof ProcessObservation process
+                        && process.eventType() == ProcessObservation.EventType.COMPLETED);
     }
 
     private void publishCaseDefinition(ProcessDefinition definition) {

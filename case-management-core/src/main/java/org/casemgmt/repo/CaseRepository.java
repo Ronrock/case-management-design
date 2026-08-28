@@ -208,6 +208,35 @@ public class CaseRepository {
     }
 
     /**
+     * Persists the user-supplied cancellation reason after a synchronous embedded engine
+     * callback has already made the authoritative ACTIVE-to-CANCELLED transition.
+     *
+     * <p>This deliberately owns only cancellation metadata. Reusing {@link #update} here would
+     * rewrite every mutable case column from a callback-era snapshot and would obscure that the
+     * engine observation, not the API service, owns the state transition and cancellation event.
+     */
+    public CaseInstance updateCancellationReason(
+            CaseInstance cancelled, String reason, long expectedVersion) {
+        if (cancelled.state() != CaseState.CANCELLED) {
+            throw new IllegalArgumentException("Cancellation metadata requires a CANCELLED case");
+        }
+        OffsetDateTime updatedAt = OffsetDateTime.now();
+        int rows = jdbc.sql("""
+                UPDATE CM_CASE SET CANCEL_REASON_ = :reason, UPDATED_AT_ = :updatedAt,
+                    VERSION_ = VERSION_ + 1
+                WHERE ID_ = :id AND STATE_ = 'CANCELLED' AND VERSION_ = :expected""")
+                .param("reason", reason)
+                .param("updatedAt", updatedAt)
+                .param("id", cancelled.id())
+                .param("expected", expectedVersion)
+                .update();
+        if (rows == 0) {
+            throw new OptimisticLockException("Case", cancelled.id(), expectedVersion);
+        }
+        return require(cancelled.id());
+    }
+
+    /**
      * Atomically applies canonical fields only when both their captured values and the case
      * version still match.
      *

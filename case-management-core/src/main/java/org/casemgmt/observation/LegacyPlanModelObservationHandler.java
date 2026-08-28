@@ -17,7 +17,7 @@ import java.util.Map;
 import java.util.Objects;
 
 /** Preserves the pre-WS3 PLAN_MODEL projection surface without canonical BPMN effects. */
-public final class LegacyPlanModelObservationHandler {
+public class LegacyPlanModelObservationHandler {
 
     private final CaseProjectionPort projections;
     private final EventPublisher events;

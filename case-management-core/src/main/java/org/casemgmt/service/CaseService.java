@@ -3,6 +3,7 @@ package org.casemgmt.service;
 import org.casemgmt.domain.*;
 import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.error.NotFoundException;
+import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
@@ -319,12 +320,35 @@ public class CaseService {
     public CaseInstance cancel(String caseId, long expectedVersion, String reason, Actor actor) {
         CaseInstance current = cases.require(caseId);
         requireTransitionAllowed(current, CaseState.CANCELLED, "cancel");
+        if (current.version() != expectedVersion) {
+            throw new OptimisticLockException("Case", caseId, expectedVersion);
+        }
 
         orchestration(definitions.require(current.caseDefId())).onCaseCancelled(current, reason);
 
         // Same gap as close()'s sweep: terminates the plan item, not any CM_TASK row or live
         // engine task an ACTIVE HUMAN_TASK already has. See sweepOpenPlanItems' Javadoc.
         sweepOpenPlanItems(caseId, "case cancelled", actor);
+
+        // Embedded Operaton callbacks run synchronously inside this transaction. Root process
+        // termination therefore may already have performed the authoritative case transition,
+        // version bump, projection sweep and CASE_CANCELLED publication. Re-read after returning
+        // from orchestration and, in that case, add only the user's reason and intent audit at
+        // the fresh version. Remote/no-callback orchestration still follows the service-owned
+        // transition below.
+        CaseInstance afterOrchestration = cases.require(caseId);
+        if (afterOrchestration.state() == CaseState.CANCELLED) {
+            // Root termination itself owns one version increment. Anything beyond that means a
+            // different writer advanced the case after this request's precondition read; do not
+            // hide that conflict merely because the synchronous callback also cancelled it.
+            if (afterOrchestration.version() != expectedVersion + 1) {
+                throw new OptimisticLockException("Case", caseId, expectedVersion);
+            }
+            CaseInstance saved = cases.updateCancellationReason(
+                    afterOrchestration, reason, afterOrchestration.version());
+            auditCancellationIntent(current, saved, reason, actor);
+            return saved;
+        }
 
         CaseInstance cancelled = new CaseInstance(current.id(), current.engineId(), current.tenantId(),
                 current.caseDefId(), current.caseDefKey(), current.caseDefVersion(),
@@ -335,14 +359,19 @@ public class CaseService {
 
         CaseInstance saved = cases.update(cancelled, expectedVersion);
         publisher.publish(event(saved, EventTypes.CASE_CANCELLED, Map.of("reason", reason == null ? "" : reason)));
+        auditCancellationIntent(current, saved, reason, actor);
+        return saved;
+    }
+
+    private void auditCancellationIntent(CaseInstance current, CaseInstance saved,
+                                         String reason, Actor actor) {
         // Same null-intolerance fix as close() above, for the same reason: POST
         // /cases/{id}/cancel also accepts no body (CaseController.cancel), so reason may be null.
         Map<String, Object> cancelAuditValues = new LinkedHashMap<>();
         cancelAuditValues.put("state", "CANCELLED");
         cancelAuditValues.put("reason", reason);
-        publisher.audit(caseId, saved.tenantId(), actor.userId(), "case.cancel", "Case", caseId,
-                Map.of("state", current.state().name()), cancelAuditValues);
-        return saved;
+        publisher.audit(saved.id(), saved.tenantId(), actor.userId(), "case.cancel", "Case",
+                saved.id(), Map.of("state", current.state().name()), cancelAuditValues);
     }
 
     /**

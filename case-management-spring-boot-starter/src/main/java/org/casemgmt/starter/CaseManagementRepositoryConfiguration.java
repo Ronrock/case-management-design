@@ -27,6 +27,7 @@ import org.casemgmt.domain.CaseIds;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -67,20 +68,34 @@ public class CaseManagementRepositoryConfiguration {
         return new CaseDefinitionVersionBindingRepository(dataSource);
     }
 
-    @Bean public PlanItemRepository planItemRepository(JdbcClient c) { return new PlanItemRepository(c); }
-    @Bean public CaseTaskRepository caseTaskRepository(JdbcClient c) { return new CaseTaskRepository(c); }
-    @Bean public MilestoneRepository milestoneRepository(JdbcClient c) { return new MilestoneRepository(c); }
-    @Bean public CommentRepository commentRepository(JdbcClient c) { return new CommentRepository(c); }
-    @Bean public DocumentRepository documentRepository(JdbcClient c) { return new DocumentRepository(c); }
-    @Bean public ParticipantRepository participantRepository(JdbcClient c) { return new ParticipantRepository(c); }
-    @Bean public LinkedProcessRepository linkedProcessRepository(JdbcClient c) { return new LinkedProcessRepository(c); }
-    @Bean public EventRepository eventRepository(JdbcClient c) { return new EventRepository(c); }
-    @Bean public AuditRepository auditRepository(JdbcClient c) { return new AuditRepository(c); }
-    @Bean public WebhookRepository webhookRepository(JdbcClient c) { return new WebhookRepository(c); }
-    @Bean public IdempotencyRepository idempotencyRepository(JdbcClient c) { return new IdempotencyRepository(c); }
-    @Bean public EngineCommandRepository engineCommandRepository(JdbcClient c) { return new EngineCommandRepository(c); }
-    @Bean public SlaRepository slaRepository(JdbcClient c) { return new SlaRepository(c); }
-    @Bean public AppliedObservationRepository appliedObservationRepository(JdbcClient c) {
+    @Bean public PlanItemRepository planItemRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new PlanItemRepository(c); }
+    @Bean public CaseTaskRepository caseTaskRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new CaseTaskRepository(c); }
+    @Bean public MilestoneRepository milestoneRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new MilestoneRepository(c); }
+    @Bean public CommentRepository commentRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new CommentRepository(c); }
+    @Bean public DocumentRepository documentRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new DocumentRepository(c); }
+    @Bean public ParticipantRepository participantRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new ParticipantRepository(c); }
+    @Bean public LinkedProcessRepository linkedProcessRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new LinkedProcessRepository(c); }
+    @Bean public EventRepository eventRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new EventRepository(c); }
+    @Bean public AuditRepository auditRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new AuditRepository(c); }
+    @Bean public WebhookRepository webhookRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new WebhookRepository(c); }
+    @Bean public IdempotencyRepository idempotencyRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new IdempotencyRepository(c); }
+    @Bean public EngineCommandRepository engineCommandRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new EngineCommandRepository(c); }
+    @Bean public SlaRepository slaRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new SlaRepository(c); }
+    @Bean public AppliedObservationRepository appliedObservationRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) {
         return new AppliedObservationRepository(c);
     }
     @Bean
@@ -105,13 +120,16 @@ public class CaseManagementRepositoryConfiguration {
         };
     }
     @Bean public CaseProjectionPort caseProjectionPort(
-            JdbcClient c, CaseCompletionPublisher completionPublisher) {
+            @Qualifier("caseJdbcClient") JdbcClient c,
+            CaseCompletionPublisher completionPublisher) {
         return new JdbcCaseProjectionPort(c, completionPublisher);
     }
-    @Bean public RemotePollingCheckpointRepository remotePollingCheckpointRepository(JdbcClient c) {
+    @Bean public RemotePollingCheckpointRepository remotePollingCheckpointRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) {
         return new RemotePollingCheckpointRepository(c);
     }
-    @Bean public ActiveBpmnCaseRepository activeBpmnCaseRepository(JdbcClient c) {
+    @Bean public ActiveBpmnCaseRepository activeBpmnCaseRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) {
         return new ActiveBpmnCaseRepository(c);
     }
 }

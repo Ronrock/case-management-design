@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.casemgmt.rules.PlanModelFixtures.caseInstance;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -60,6 +61,7 @@ class PersistedProcessCaseCorrelationTest {
         allowBpmnCase("eng-a:1");
         ProcessDefinition definition = mock(ProcessDefinition.class);
         when(definition.getKey()).thenReturn("child-process");
+        when(definition.getTenantId()).thenReturn("t1");
         when(repository.getProcessDefinition("child-process:3")).thenReturn(definition);
 
         assertThat(correlation.caseId("process-42", "child-process:3"))
@@ -127,6 +129,7 @@ class PersistedProcessCaseCorrelationTest {
         when(bindings.find(caseInstance(Map.of()).caseDefId())).thenReturn(Optional.of(binding));
         ProcessDefinition definition = mock(ProcessDefinition.class);
         when(definition.getKey()).thenReturn("legacy-process");
+        when(definition.getTenantId()).thenReturn("t1");
         when(repository.getProcessDefinition("legacy-process:1")).thenReturn(definition);
 
         assertThat(correlation.authority("process-42", "legacy-process:1"))
@@ -137,11 +140,128 @@ class PersistedProcessCaseCorrelationTest {
                 "legacy-process:1", "legacy-process", CONFIRMED_AT.atOffset(ZoneOffset.UTC));
     }
 
+    @Test
+    void claimsMissingDefinitionIdentityForAMigratedConfirmedPlanModelLink() {
+        var migrated = new LinkedProcessRepository.LinkedProcessRow("link-1", "eng-a:1", null,
+                "correlation-7", "process-42", null, "legacy-process", "ACTIVE",
+                CaseTask.EngineSync.SYNCED, false);
+        when(processes.findByProcessInstanceId("process-42"))
+                .thenReturn(Optional.of(migrated));
+        allowPlanModelCase("eng-a:1");
+        ProcessDefinition definition = definition("legacy-process", "t1");
+        when(repository.getProcessDefinition("legacy-process:1")).thenReturn(definition);
+
+        assertThat(correlation.authority("process-42", "legacy-process:1"))
+                .contains(new ProcessCaseCorrelation.Authority(
+                        "eng-a:1", OrchestrationMode.PLAN_MODEL));
+
+        verify(processes).confirmStarted("eng-a:1", "correlation-7", "process-42",
+                "legacy-process:1", "legacy-process", CONFIRMED_AT.atOffset(ZoneOffset.UTC));
+    }
+
+    @Test
+    void keepsBpmnStrictWhenAConfirmedLinkHasNoExactDefinitionIdentity() {
+        var migrated = new LinkedProcessRepository.LinkedProcessRow("link-1", "eng-a:1", null,
+                "correlation-7", "process-42", null, "child-process", "ACTIVE",
+                CaseTask.EngineSync.SYNCED, false);
+        when(processes.findByProcessInstanceId("process-42"))
+                .thenReturn(Optional.of(migrated));
+        allowBpmnCase("eng-a:1");
+
+        assertThat(correlation.authority("process-42", "child-process:3")).isEmpty();
+
+        verify(repository, never()).getProcessDefinition(
+                org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    void rejectsMigratedPlanModelDefinitionWithWrongStoredKey() {
+        var migrated = new LinkedProcessRepository.LinkedProcessRow("link-1", "eng-a:1", null,
+                "correlation-7", "process-42", null, "legacy-process", "ACTIVE",
+                CaseTask.EngineSync.SYNCED, false);
+        when(processes.findByProcessInstanceId("process-42"))
+                .thenReturn(Optional.of(migrated));
+        allowPlanModelCase("eng-a:1");
+        ProcessDefinition definition = definition("other-process", "t1");
+        when(repository.getProcessDefinition("other-process:1")).thenReturn(definition);
+
+        assertThatThrownBy(() -> correlation.authority("process-42", "other-process:1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("does not match stored key");
+    }
+
+    @Test
+    void rejectsMigratedPlanModelDefinitionFromAnotherTenant() {
+        var migrated = new LinkedProcessRepository.LinkedProcessRow("link-1", "eng-a:1", null,
+                "correlation-7", "process-42", null, "legacy-process", "ACTIVE",
+                CaseTask.EngineSync.SYNCED, false);
+        when(processes.findByProcessInstanceId("process-42"))
+                .thenReturn(Optional.of(migrated));
+        allowPlanModelCase("eng-a:1");
+        ProcessDefinition definition = definition("legacy-process", "tenant-b");
+        when(repository.getProcessDefinition("legacy-process:1")).thenReturn(definition);
+
+        assertThatThrownBy(() -> correlation.authority("process-42", "legacy-process:1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("tenant");
+    }
+
+    @Test
+    void rejectsUnknownExactDefinitionForMigratedPlanModelLink() {
+        var migrated = new LinkedProcessRepository.LinkedProcessRow("link-1", "eng-a:1", null,
+                "correlation-7", "process-42", null, "legacy-process", "ACTIVE",
+                CaseTask.EngineSync.SYNCED, false);
+        when(processes.findByProcessInstanceId("process-42"))
+                .thenReturn(Optional.of(migrated));
+        allowPlanModelCase("eng-a:1");
+
+        assertThatThrownBy(() -> correlation.authority("process-42", "missing:1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("No exact process definition");
+    }
+
+    @Test
+    void acceptsAMigratedPlanModelDefinitionWhenBothTenantsAreNull() {
+        var migrated = new LinkedProcessRepository.LinkedProcessRow("link-1", "eng-a:1", null,
+                "correlation-7", "process-42", null, "legacy-process", "ACTIVE",
+                CaseTask.EngineSync.SYNCED, false);
+        when(processes.findByProcessInstanceId("process-42"))
+                .thenReturn(Optional.of(migrated));
+        var instance = mock(org.casemgmt.domain.CaseInstance.class);
+        when(instance.caseDefId()).thenReturn("d:1");
+        when(instance.tenantId()).thenReturn(null);
+        when(cases.require("eng-a:1")).thenReturn(instance);
+        CaseDefinitionVersionBinding binding = mock(CaseDefinitionVersionBinding.class);
+        when(binding.orchestrationMode()).thenReturn(OrchestrationMode.PLAN_MODEL);
+        when(bindings.find("d:1")).thenReturn(Optional.of(binding));
+        ProcessDefinition definition = definition("legacy-process", null);
+        when(repository.getProcessDefinition("legacy-process:1")).thenReturn(definition);
+
+        assertThat(correlation.authority("process-42", "legacy-process:1"))
+                .contains(new ProcessCaseCorrelation.Authority(
+                        "eng-a:1", OrchestrationMode.PLAN_MODEL));
+    }
+
     private void allowBpmnCase(String caseId) {
         var instance = caseInstance(Map.of());
         when(cases.require(caseId)).thenReturn(instance);
         CaseDefinitionVersionBinding binding = mock(CaseDefinitionVersionBinding.class);
         when(binding.orchestrationMode()).thenReturn(OrchestrationMode.BPMN);
         when(bindings.find(instance.caseDefId())).thenReturn(Optional.of(binding));
+    }
+
+    private void allowPlanModelCase(String caseId) {
+        var instance = caseInstance(Map.of());
+        when(cases.require(caseId)).thenReturn(instance);
+        CaseDefinitionVersionBinding binding = mock(CaseDefinitionVersionBinding.class);
+        when(binding.orchestrationMode()).thenReturn(OrchestrationMode.PLAN_MODEL);
+        when(bindings.find(instance.caseDefId())).thenReturn(Optional.of(binding));
+    }
+
+    private ProcessDefinition definition(String key, String tenantId) {
+        ProcessDefinition definition = mock(ProcessDefinition.class);
+        when(definition.getKey()).thenReturn(key);
+        when(definition.getTenantId()).thenReturn(tenantId);
+        return definition;
     }
 }

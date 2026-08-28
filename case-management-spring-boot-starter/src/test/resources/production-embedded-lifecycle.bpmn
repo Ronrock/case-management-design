@@ -36,7 +36,22 @@
     <startEvent id="plan-child-start"/>
     <sequenceFlow id="plan-child-flow-1" sourceRef="plan-child-start" targetRef="plan-child-review"/>
     <userTask id="plan-child-review" name="Plan child review"/>
-    <sequenceFlow id="plan-child-flow-2" sourceRef="plan-child-review" targetRef="plan-child-end"/>
+    <sequenceFlow id="plan-child-flow-2" sourceRef="plan-child-review" targetRef="plan-child-stage"/>
+    <subProcess id="plan-child-stage" name="Plan child stage" casemgmt:stage="true">
+      <startEvent id="plan-child-stage-start"/>
+      <sequenceFlow id="plan-child-stage-flow-1" sourceRef="plan-child-stage-start"
+                    targetRef="plan-child-stage-review"/>
+      <userTask id="plan-child-stage-review" name="Plan child stage review"/>
+      <sequenceFlow id="plan-child-stage-flow-2" sourceRef="plan-child-stage-review"
+                    targetRef="plan-child-stage-end"/>
+      <endEvent id="plan-child-stage-end"/>
+    </subProcess>
+    <sequenceFlow id="plan-child-flow-3" sourceRef="plan-child-stage"
+                  targetRef="plan-child-milestone"/>
+    <intermediateThrowEvent id="plan-child-milestone" name="Plan child milestone"
+                            casemgmt:milestoneId="plan-child-milestone"/>
+    <sequenceFlow id="plan-child-flow-4" sourceRef="plan-child-milestone"
+                  targetRef="plan-child-end"/>
     <endEvent id="plan-child-end"/>
   </process>
 </definitions>

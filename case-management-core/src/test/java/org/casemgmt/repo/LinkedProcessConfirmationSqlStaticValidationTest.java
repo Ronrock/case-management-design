@@ -22,4 +22,18 @@ class LinkedProcessConfirmationSqlStaticValidationTest {
                 .contains("(:processDefinitionKey IS NULL OR PROC_DEF_KEY_ IS NULL "
                         + "OR PROC_DEF_KEY_ = :processDefinitionKey)");
     }
+
+    @Test
+    void migratedDefinitionClaimIsNullGuardedAndUsesTheExactPersistedAuthority() throws Exception {
+        String source = Files.readString(Path.of(
+                "src/main/java/org/casemgmt/repo/LinkedProcessRepository.java"))
+                .replaceAll("\\s+", " ");
+
+        assertThat(source)
+                .contains("AND CORRELATION_ID_ = :correlationId "
+                        + "AND PROC_INST_ID_ = :processInstanceId "
+                        + "AND ENGINE_SYNC_ = 'SYNCED' AND PROC_DEF_ID_ IS NULL "
+                        + "AND PROC_DEF_KEY_ = :processDefinitionKey")
+                .contains("Always re-read: a zero-row result may mean a concurrent claimant won");
+    }
 }

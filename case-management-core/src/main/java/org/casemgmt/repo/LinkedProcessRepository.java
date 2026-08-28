@@ -155,6 +155,40 @@ public class LinkedProcessRepository {
                 new IllegalStateException("No pending linked process for case " + caseId
                         + " and correlation " + correlationId));
         if (updated == 0) {
+            if (link.engineSync() == CaseTask.EngineSync.SYNCED
+                    && engineProcessInstanceId.equals(link.processInstanceId())
+                    && link.processDefinitionId() == null
+                    && processDefinitionId != null) {
+                int claimed = jdbc.sql("""
+                        UPDATE CM_LINKED_PROCESS
+                        SET PROC_DEF_ID_ = :processDefinitionId,
+                            PROC_DEF_KEY_ = COALESCE(PROC_DEF_KEY_, :processDefinitionKey),
+                            LAST_ENGINE_UPDATE_AT_ = :confirmedAt,
+                            LAST_PROJECTED_AT_ = :confirmedAt
+                        WHERE CASE_ID_ = :caseId
+                          AND CORRELATION_ID_ = :correlationId
+                          AND PROC_INST_ID_ = :processInstanceId
+                          AND ENGINE_SYNC_ = 'SYNCED'
+                          AND PROC_DEF_ID_ IS NULL
+                          AND PROC_DEF_KEY_ = :processDefinitionKey""")
+                        .param("processDefinitionId", processDefinitionId)
+                        .param("processDefinitionKey", processDefinitionKey)
+                        .param("confirmedAt", confirmedAt)
+                        .param("caseId", caseId)
+                        .param("correlationId", correlationId)
+                        .param("processInstanceId", engineProcessInstanceId)
+                        .update();
+                if (claimed > 1) {
+                    throw new IllegalStateException("Definition claim matched " + claimed
+                            + " linked processes for correlation " + correlationId);
+                }
+                // Always re-read: a zero-row result may mean a concurrent claimant won. Only
+                // the exact same definition is idempotent; a different winner is rejected by
+                // assertSameConfirmation below.
+                link = findByCorrelation(caseId, correlationId).orElseThrow(() ->
+                        new IllegalStateException("Linked process disappeared while claiming "
+                                + "definition identity for correlation " + correlationId));
+            }
             assertSameConfirmation(link, engineProcessInstanceId, processDefinitionId,
                     processDefinitionKey);
             if (link.caseRoot()) {

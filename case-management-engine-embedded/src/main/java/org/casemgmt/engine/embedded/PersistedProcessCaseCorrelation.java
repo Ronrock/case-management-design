@@ -1,5 +1,6 @@
 package org.casemgmt.engine.embedded;
 
+import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
@@ -68,11 +69,32 @@ public final class PersistedProcessCaseCorrelation implements ProcessCaseCorrela
         var confirmed = processes.findByProcessInstanceId(processInstanceId);
         if (confirmed.isPresent()) {
             var link = confirmed.orElseThrow();
-            if (processDefinitionId == null || processDefinitionId.isBlank()
-                    || !processDefinitionId.equals(link.processDefinitionId())) {
+            if (link.processDefinitionId() != null
+                    && (processDefinitionId == null
+                    || !processDefinitionId.equals(link.processDefinitionId()))) {
                 return java.util.Optional.empty();
             }
-            return authorityFor(link.caseId());
+            var managed = managedCase(link.caseId());
+            if (managed.isEmpty()) {
+                return java.util.Optional.empty();
+            }
+            if (link.processDefinitionId() != null) {
+                return java.util.Optional.of(managed.orElseThrow().authority());
+            }
+            // Only legacy PLAN_MODEL rows may lack the exact definition id. BPMN authority is
+            // strict and never infers or repairs an incomplete link from callback data.
+            if (managed.orElseThrow().authority().orchestrationMode()
+                    != org.casemgmt.orchestration.OrchestrationMode.PLAN_MODEL
+                    || processDefinitionId == null || processDefinitionId.isBlank()) {
+                return java.util.Optional.empty();
+            }
+            var definition = exactDefinition(processDefinitionId, processInstanceId);
+            validateDefinitionAuthority(link, managed.orElseThrow().instance(), definition,
+                    processInstanceId);
+            processes.confirmStarted(link.caseId(), link.correlationId(), processInstanceId,
+                    processDefinitionId, definition.getKey(),
+                    clock.instant().atOffset(ZoneOffset.UTC));
+            return java.util.Optional.of(managed.orElseThrow().authority());
         }
 
         Object marker = runtime.getVariable(processInstanceId,
@@ -84,27 +106,53 @@ public final class PersistedProcessCaseCorrelation implements ProcessCaseCorrela
         if (pending.isEmpty()) {
             return java.util.Optional.empty();
         }
-        var authority = authorityFor(pending.orElseThrow().caseId());
-        if (authority.isEmpty()) return java.util.Optional.empty();
+        var managed = managedCase(pending.orElseThrow().caseId());
+        if (managed.isEmpty()) return java.util.Optional.empty();
         if (processDefinitionId == null || processDefinitionId.isBlank()) {
             throw new IllegalStateException("Managed process " + processInstanceId
                     + " has no exact process-definition id");
         }
+        var definition = exactDefinition(processDefinitionId, processInstanceId);
+        var link = pending.orElseThrow();
+        validateDefinitionAuthority(link, managed.orElseThrow().instance(), definition,
+                processInstanceId);
+        processes.confirmStarted(link.caseId(), correlationId, processInstanceId,
+                processDefinitionId, definition.getKey(),
+                clock.instant().atOffset(ZoneOffset.UTC));
+        return java.util.Optional.of(managed.orElseThrow().authority());
+    }
+
+    private org.operaton.bpm.engine.repository.ProcessDefinition exactDefinition(
+            String processDefinitionId, String processInstanceId) {
         var definition = repository.getProcessDefinition(processDefinitionId);
         if (definition == null || definition.getKey() == null || definition.getKey().isBlank()) {
             throw new IllegalStateException("No exact process definition " + processDefinitionId
                     + " for managed process " + processInstanceId);
         }
-        var link = pending.orElseThrow();
-        processes.confirmStarted(link.caseId(), correlationId, processInstanceId,
-                processDefinitionId, definition.getKey(),
-                clock.instant().atOffset(ZoneOffset.UTC));
-        return authority;
+        return definition;
     }
 
-    private java.util.Optional<Authority> authorityFor(String caseId) {
+    private static void validateDefinitionAuthority(
+            LinkedProcessRepository.LinkedProcessRow link,
+            CaseInstance instance,
+            org.operaton.bpm.engine.repository.ProcessDefinition definition,
+            String processInstanceId) {
+        if (!Objects.equals(link.processDefinitionKey(), definition.getKey())) {
+            throw new IllegalStateException("Process definition " + definition.getId()
+                    + " does not match stored key for managed process " + processInstanceId);
+        }
+        if (!Objects.equals(instance.tenantId(), definition.getTenantId())) {
+            throw new IllegalStateException("Process definition tenant does not match case tenant "
+                    + "for managed process " + processInstanceId);
+        }
+    }
+
+    private java.util.Optional<ManagedCase> managedCase(String caseId) {
         var instance = cases.require(caseId);
         return bindings.find(instance.caseDefId())
-                .map(binding -> new Authority(caseId, binding.orchestrationMode()));
+                .map(binding -> new ManagedCase(instance,
+                        new Authority(caseId, binding.orchestrationMode())));
     }
+
+    private record ManagedCase(CaseInstance instance, Authority authority) { }
 }
