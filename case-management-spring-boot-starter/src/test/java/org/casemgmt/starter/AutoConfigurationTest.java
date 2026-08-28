@@ -4,6 +4,7 @@ import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
+import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
 import org.casemgmt.engine.embedded.PersistedProcessCaseCorrelation;
 import org.casemgmt.engine.embedded.ProcessActivityClassifier;
 import org.casemgmt.engine.embedded.ProcessCaseCorrelation;
@@ -184,6 +185,8 @@ class AutoConfigurationTest {
         runner.withBean(TaskService.class, () -> mock(TaskService.class))
                 .withBean(RuntimeService.class, () -> mock(RuntimeService.class))
                 .withBean(RepositoryService.class, () -> mock(RepositoryService.class))
+                .withBean(EmbeddedTransactionResourceValidator.class,
+                        () -> mock(EmbeddedTransactionResourceValidator.class))
                 .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
                         "casemgmt.engine.mode=embedded",
                         "casemgmt.events.type-prefix=org.example.cm",
@@ -211,6 +214,8 @@ class AutoConfigurationTest {
                 .withBean(ProcessCaseCorrelation.class, () -> correlation)
                 .withBean(ProcessActivityClassifier.class, () -> classifier)
                 .withBean(EmbeddedEngineEventBridge.class, () -> bridge)
+                .withBean(EmbeddedTransactionResourceValidator.class,
+                        () -> mock(EmbeddedTransactionResourceValidator.class))
                 .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
                         "casemgmt.engine.mode=embedded",
                         "casemgmt.events.type-prefix=org.example.cm",

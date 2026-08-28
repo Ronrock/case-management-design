@@ -38,6 +38,37 @@ class RemoteEngineGatewayResponseTest {
         server.verify();
     }
 
+    @Test
+    void tenantKeyStartUsesTheTenantQualifiedOperatonEndpoint() {
+        server.expect(once(), requestTo(
+                        "http://engine.test/process-definition/key/orders/tenant-id/tenant-a/start"))
+                .andExpect(method(POST))
+                .andRespond(withSuccess(
+                        "{\"id\":\"process-42\",\"definitionId\":\"orders:9:exact\"}",
+                        MediaType.APPLICATION_JSON));
+
+        gateway.startProcessByKey(new StartProcessByKeyRequest(
+                "case-1", null, "orders", Map.of(), "correlation-1", "tenant-a"));
+
+        server.verify();
+    }
+
+    @Test
+    void tenantKeyStartEncodesReservedPathCharactersAsSegments() {
+        server.expect(once(), requestTo("http://engine.test/process-definition/key/"
+                        + "orders%2Freview/tenant-id/tenant%20west%2F1/start"))
+                .andExpect(method(POST))
+                .andRespond(withSuccess(
+                        "{\"id\":\"process-42\",\"definitionId\":\"orders:9:exact\"}",
+                        MediaType.APPLICATION_JSON));
+
+        gateway.startProcessByKey(new StartProcessByKeyRequest(
+                "case-1", null, "orders/review", Map.of(), "correlation-1",
+                "tenant west/1"));
+
+        server.verify();
+    }
+
     private MockRestServiceServer server;
     private RemoteEngineGateway gateway;
 

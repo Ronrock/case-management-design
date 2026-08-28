@@ -15,7 +15,6 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
@@ -351,9 +350,8 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
 
-        String encodedKey = URLEncoder.encode(request.processDefinitionKey(), StandardCharsets.UTF_8);
-        Map<String, Object> response = post("startProcessByKey",
-                "/process-definition/key/" + encodedKey + "/start",
+        Map<String, Object> response = postKeyStart(
+                request.processDefinitionKey(), request.tenantId(),
                 Map.of("businessKey", request.caseId(), "variables", typed(variables)));
 
         return processRef(response, null, request.processDefinitionKey(), request.caseId(), true);
@@ -563,6 +561,31 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         } catch (RestClientException e) {
             throw new EngineException("startProcess (POST exact " + processDefinitionId
                     + ") failed: " + e.getMessage(), e);
+        }
+    }
+
+    private Map<String, Object> postKeyStart(String processDefinitionKey,
+                                             String tenantId, Object body) {
+        boolean tenantQualified = tenantId != null && !tenantId.isBlank();
+        String diagnostic = tenantQualified
+                ? "/process-definition/key/{key}/tenant-id/{tenant}/start"
+                : "/process-definition/key/{key}/start";
+        try {
+            return client.post().uri(builder -> tenantQualified
+                            ? builder.path("/process-definition/key/{key}/tenant-id/{tenant}/start")
+                                    .build(processDefinitionKey, tenantId)
+                            : builder.path("/process-definition/key/{key}/start")
+                                    .build(processDefinitionKey))
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(Map.class);
+        } catch (RestClientResponseException e) {
+            throw new EngineException("startProcessByKey (POST " + diagnostic + ") failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException("startProcessByKey (POST " + diagnostic + ") failed: "
+                    + e.getMessage(), e);
         }
     }
 

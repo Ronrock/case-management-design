@@ -15,16 +15,16 @@ import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.operaton.bpm.engine.ProcessEngine;
+import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
 import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.TaskService;
-import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration;
 import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -140,12 +140,14 @@ public class EmbeddedEngineAutoConfiguration {
         }
 
         @Bean
-        @ConditionalOnBean(SpringProcessEngineConfiguration.class)
         @ConditionalOnMissingBean(EmbeddedTransactionResourceValidator.class)
         EmbeddedTransactionResourceValidator embeddedTransactionResourceValidator(
-                DataSource dataSource,
-                PlatformTransactionManager transactionManager,
-                SpringProcessEngineConfiguration engineConfiguration) {
+                @Qualifier("dataSource") DataSource dataSource,
+                @Qualifier("transactionManager") PlatformTransactionManager transactionManager,
+                ProcessEngineConfigurationImpl engineConfiguration,
+                ProcessEngine initializedProcessEngine) {
+            // Depending on ProcessEngine guarantees Operaton's configuration plugins have
+            // populated the effective DataSource and transaction manager before validation.
             return new EmbeddedTransactionResourceValidator(
                     dataSource, transactionManager, engineConfiguration);
         }

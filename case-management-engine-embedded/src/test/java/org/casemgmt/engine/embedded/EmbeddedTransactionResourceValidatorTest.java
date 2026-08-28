@@ -1,12 +1,20 @@
 package org.casemgmt.engine.embedded;
 
 import org.junit.jupiter.api.Test;
+import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
 import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.jdbc.datasource.LazyConnectionDataSourceProxy;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
+import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 class EmbeddedTransactionResourceValidatorTest {
 
@@ -20,6 +28,24 @@ class EmbeddedTransactionResourceValidatorTest {
 
         assertThatCode(() -> new EmbeddedTransactionResourceValidator(
                 dataSource, transactions, engine).afterPropertiesSet())
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void acceptsSupportedProxiesWithTheSameUnderlyingTransactionResource() {
+        var target = dataSource("proxied-shared-resource");
+        DataSource platformDataSource = new TransactionAwareDataSourceProxy(target);
+        DataSource engineDataSource = new LazyConnectionDataSourceProxy(target);
+        var sharedTransactions = new DataSourceTransactionManager(engineDataSource);
+        ProxyFactory proxyFactory = new ProxyFactory(sharedTransactions);
+        PlatformTransactionManager platformTransactionProxy =
+                (PlatformTransactionManager) proxyFactory.getProxy();
+        var engine = new SpringProcessEngineConfiguration();
+        engine.setDataSource(engineDataSource);
+        engine.setTransactionManager(sharedTransactions);
+
+        assertThatCode(() -> new EmbeddedTransactionResourceValidator(
+                platformDataSource, platformTransactionProxy, engine).afterPropertiesSet())
                 .doesNotThrowAnyException();
     }
 
@@ -53,6 +79,18 @@ class EmbeddedTransactionResourceValidatorTest {
                 dataSource, platformTransactions, engine).afterPropertiesSet())
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("transaction manager");
+    }
+
+    @Test
+    void rejectsANonSpringOperatonConfigurationExplicitly() {
+        var dataSource = dataSource("non-spring");
+        var transactions = new DataSourceTransactionManager(dataSource);
+        ProcessEngineConfigurationImpl engine = mock(ProcessEngineConfigurationImpl.class);
+
+        assertThatThrownBy(() -> new EmbeddedTransactionResourceValidator(
+                dataSource, transactions, engine).afterPropertiesSet())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("SpringProcessEngineConfiguration");
     }
 
     private static SimpleDriverDataSource dataSource(String name) {

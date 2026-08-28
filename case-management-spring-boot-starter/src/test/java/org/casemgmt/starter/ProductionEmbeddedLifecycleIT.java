@@ -3,6 +3,7 @@ package org.casemgmt.starter;
 import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
+import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
 import org.casemgmt.observation.SlaLifecyclePort;
 import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.casemgmt.orchestration.OrchestrationMode;
@@ -109,6 +110,7 @@ class ProductionEmbeddedLifecycleIT {
     @Autowired LinkedProcessRepository processes;
     @Autowired LinkedProcessService linkedProcesses;
     @Autowired FailingSlaLifecyclePort failures;
+    @Autowired EmbeddedTransactionResourceValidator transactionResourceValidator;
     @Autowired @Qualifier("caseManagementCaseService") CaseService caseService;
 
     private ProcessDefinition rootDefinition;
@@ -139,6 +141,7 @@ class ProductionEmbeddedLifecycleIT {
 
     @Test
     void caseCreateAndLinkedChildUseProductionAuthorityAndLifecycleEffects() {
+        assertThat(transactionResourceValidator).isNotNull();
         var created = caseService.create("production-root", TENANT, "business-1",
                 "Production lifecycle", CasePriority.MEDIUM, Map.of(), ACTOR);
 
