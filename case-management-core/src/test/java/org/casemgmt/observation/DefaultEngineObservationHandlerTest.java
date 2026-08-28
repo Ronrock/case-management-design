@@ -491,6 +491,23 @@ class DefaultEngineObservationHandlerTest {
     }
 
     @Test
+    void remoteArrivalOrderCannotBreakAnEqualTimestampTie() {
+        UserTaskObservation observation = new UserTaskObservation("obs-remote-claim", 1,
+                "operaton:remote", "tenant-a", "case-1", "process-1", "task-1", null,
+                UserTaskObservation.EventType.CLAIMED, OCCURRED, RECEIVED,
+                authorityAttributes("taskDefinitionKey", "review", "assignee", "alice"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-created", null, OCCURRED, "CREATED")));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.IGNORED_STALE);
+
+        verify(projections, never()).observe(any(TaskObservation.class));
+        verify(claims).markIgnoredStale(claim);
+    }
+
+    @Test
     void terminalTaskStateRejectsDifferentEventAtSameEngineTimestamp() {
         UserTaskObservation observation = new UserTaskObservation("obs-late-claim", 1,
                 "operaton:embedded", "tenant-a", "case-1", "process-1", "task-1", null,

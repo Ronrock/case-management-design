@@ -57,8 +57,13 @@ public class LinkedProcessService {
         // Mint before the engine call so the asynchronous command carries the durable local
         // correlation of the row that will wait for confirmation.
         String id = CaseIds.newId();
+        // Persist authority before a synchronous embedded start. The engine bridge can then
+        // atomically bind the actual process id/exact definition during its first callback.
+        processes.insert(id, caseId, planItemId, null, null,
+                processDefinitionKey, CaseTask.EngineSync.PENDING);
         EngineProcessRef ref = engine.startProcessByKey(
-                new StartProcessByKeyRequest(caseId, planItemId, processDefinitionKey, variables, id));
+                new StartProcessByKeyRequest(caseId, planItemId, processDefinitionKey, variables,
+                        id, c.tenantId()));
 
         if (ref == null || !processDefinitionKey.equals(ref.processDefinitionKey())) {
             throw new EngineException("Engine start returned an inconsistent process-definition key");
@@ -70,8 +75,10 @@ public class LinkedProcessService {
         if (sync == CaseTask.EngineSync.SYNCED && ref.processDefinitionId() == null) {
             throw new EngineException("Engine start returned no process-definition id");
         }
-        processes.insert(id, caseId, planItemId, instanceId, ref.processDefinitionId(),
-                processDefinitionKey, sync);
+        if (sync == CaseTask.EngineSync.SYNCED) {
+            processes.confirmStarted(caseId, id, instanceId, ref.processDefinitionId(),
+                    processDefinitionKey, OffsetDateTime.now());
+        }
 
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("correlationId", id);

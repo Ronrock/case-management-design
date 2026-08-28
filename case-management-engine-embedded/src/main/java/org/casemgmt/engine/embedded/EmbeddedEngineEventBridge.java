@@ -9,6 +9,7 @@ import org.casemgmt.projection.ActivityObservation;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.TaskService;
 import org.operaton.bpm.engine.impl.history.event.HistoricProcessInstanceEventEntity;
+import org.operaton.bpm.engine.impl.history.event.HistoricActivityInstanceEventEntity;
 import org.operaton.bpm.engine.impl.history.event.HistoryEvent;
 import org.operaton.bpm.spring.boot.starter.event.ExecutionEvent;
 import org.operaton.bpm.spring.boot.starter.event.TaskEvent;
@@ -79,7 +80,8 @@ public final class EmbeddedEngineEventBridge {
         if (eventType == null || event.getProcessInstanceId() == null || event.getId() == null) {
             return;
         }
-        String caseId = correlation.caseId(event.getProcessInstanceId());
+        String caseId = correlation.caseId(
+                event.getProcessInstanceId(), event.getProcessDefinitionId());
         if (caseId == null) {
             return;
         }
@@ -117,11 +119,15 @@ public final class EmbeddedEngineEventBridge {
     /** Emits lifecycle for explicitly classified stages and milestones only. */
     @EventListener
     public void onExecution(ExecutionEvent event) {
+        if (isRootProcessStart(event)) {
+            emitProcessStarted(event);
+            return;
+        }
         if (event.getProcessInstanceId() == null || event.getActivityInstanceId() == null) {
             return;
         }
-        String caseId = event.getProcessBusinessKey() != null
-                ? event.getProcessBusinessKey() : correlation.caseId(event.getProcessInstanceId());
+        String caseId = correlation.caseId(
+                event.getProcessInstanceId(), event.getProcessDefinitionId());
         if (caseId == null) {
             return;
         }
@@ -158,28 +164,107 @@ public final class EmbeddedEngineEventBridge {
                 event.getActivityInstanceId(), null, type, now, now, attributes));
     }
 
+    private void emitProcessStarted(ExecutionEvent event) {
+        String caseId = correlation.caseId(
+                event.getProcessInstanceId(), event.getProcessDefinitionId());
+        if (caseId == null) {
+            return;
+        }
+        Instant now = clock.instant();
+        Map<String, Object> attributes = authorityAttributes(
+                event.getProcessDefinitionId(),
+                processDefinitionKey(event.getProcessDefinitionId()));
+        observations.apply(new ProcessObservation(observationId(), 1, SOURCE, engineId,
+                event.getTenantId(), caseId, event.getProcessInstanceId(),
+                event.getProcessInstanceId(), null, ProcessObservation.EventType.STARTED,
+                now, now, attributes));
+    }
+
+    private static boolean isRootProcessStart(ExecutionEvent event) {
+        return "start".equals(event.getEventName())
+                && event.getActivityInstanceId() == null
+                && event.getProcessInstanceId() != null
+                && event.getProcessInstanceId().equals(event.getId());
+    }
+
     /** Process history provides the engine's stable sequence and exact terminal timestamp. */
     @EventListener
     public void onHistory(HistoryEvent event) {
-        if (!(event instanceof HistoricProcessInstanceEventEntity process)
-                || process.getEndTime() == null || process.getProcessInstanceId() == null) {
+        if (event instanceof HistoricActivityInstanceEventEntity activity
+                && activity.getEndTime() != null && activity.isCanceled()) {
+            onCancelledActivity(activity);
             return;
         }
-        String caseId = process.getBusinessKey() != null
-                ? process.getBusinessKey() : correlation.caseId(process.getProcessInstanceId());
+        if (!(event instanceof HistoricProcessInstanceEventEntity process)
+                || process.getProcessInstanceId() == null) {
+            return;
+        }
+        String caseId = correlation.caseId(
+                process.getProcessInstanceId(), process.getProcessDefinitionId());
         if (caseId == null) {
             return;
         }
         Instant receivedAt = clock.instant();
         Map<String, Object> attributes = authorityAttributes(
                 process.getProcessDefinitionId(), process.getProcessDefinitionKey());
-        ProcessObservation.EventType type = process.getDeleteReason() == null
-                ? ProcessObservation.EventType.COMPLETED
-                : ProcessObservation.EventType.TERMINATED;
+        ProcessObservation.EventType type;
+        Date engineDate;
+        if (process.getEndTime() != null) {
+            type = process.getDeleteReason() == null
+                    ? ProcessObservation.EventType.COMPLETED
+                    : ProcessObservation.EventType.TERMINATED;
+            engineDate = process.getEndTime();
+        } else if (HistoryEvent.ACTIVITY_EVENT_TYPE_START.equals(process.getEventType())
+                && process.getStartTime() != null) {
+            type = ProcessObservation.EventType.STARTED;
+            engineDate = process.getStartTime();
+        } else {
+            // Historic process entities are updated and republished throughout execution. Their
+            // original start time remains populated, so treating every non-terminal snapshot as
+            // STARTED creates a fresh revision/fingerprint for the same semantic fact. Only the
+            // history producer's explicit start event is canonical evidence.
+            return;
+        }
         observations.apply(new ProcessObservation(observationId(), 1, SOURCE, engineId,
                 process.getTenantId(), caseId, process.getProcessInstanceId(),
                 process.getProcessInstanceId(), stableRevision(process.getSequenceCounter()), type,
-                process.getEndTime().toInstant(), receivedAt, attributes));
+                engineDate.toInstant(), receivedAt, attributes));
+    }
+
+    private void onCancelledActivity(HistoricActivityInstanceEventEntity activity) {
+        if (activity.getProcessInstanceId() == null || activity.getActivityInstanceId() == null) {
+            return;
+        }
+        String caseId = correlation.caseId(
+                activity.getProcessInstanceId(), activity.getProcessDefinitionId());
+        if (caseId == null) {
+            return;
+        }
+        var classification = classifier.classify(
+                activity.getProcessDefinitionId(), activity.getActivityId());
+        if (classification.isEmpty()) {
+            return;
+        }
+        Instant receivedAt = clock.instant();
+        Map<String, Object> attributes = authorityAttributes(
+                activity.getProcessDefinitionId(), activity.getProcessDefinitionKey());
+        put(attributes, "activityId", activity.getActivityId());
+        put(attributes, "name", activity.getActivityName());
+        var value = classification.orElseThrow();
+        if (value.kind() == ActivityObservation.Kind.MILESTONE) {
+            put(attributes, "milestoneId", value.milestoneId());
+            observations.apply(new MilestoneObservation(observationId(), 1, SOURCE, engineId,
+                    activity.getTenantId(), caseId, activity.getProcessInstanceId(),
+                    activity.getActivityInstanceId(), stableRevision(activity.getSequenceCounter()),
+                    MilestoneObservation.EventType.CANCELLED,
+                    activity.getEndTime().toInstant(), receivedAt, attributes));
+            return;
+        }
+        observations.apply(new ActivityLifecycleObservation(observationId(), 1, SOURCE, engineId,
+                activity.getTenantId(), caseId, activity.getProcessInstanceId(),
+                activity.getActivityInstanceId(), stableRevision(activity.getSequenceCounter()),
+                ActivityLifecycleObservation.EventType.CANCELLED,
+                activity.getEndTime().toInstant(), receivedAt, attributes));
     }
 
     private String processDefinitionKey(String processDefinitionId) {

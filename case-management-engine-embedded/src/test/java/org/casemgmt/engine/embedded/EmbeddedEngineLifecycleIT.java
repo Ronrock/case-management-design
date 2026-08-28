@@ -127,6 +127,9 @@ class EmbeddedEngineLifecycleIT {
 
         tasks.claim(task.getId(), "alice");
         tasks.complete(task.getId(), Map.of("decision", "approved"));
+        var stageTask = tasks.createTaskQuery().processInstanceId(process.getId()).singleResult();
+        assertThat(stageTask.getTaskDefinitionKey()).isEqualTo("stage-review");
+        tasks.complete(stageTask.getId());
 
         assertThat(handler.observations).anySatisfy(value ->
                 assertThat(value).isInstanceOfSatisfying(UserTaskObservation.class,
@@ -173,6 +176,10 @@ class EmbeddedEngineLifecycleIT {
                                     .isEqualTo(ProcessObservation.EventType.COMPLETED);
                             assertThat(observation.entityRevision()).isNull();
                         }));
+        assertThat(handler.observations).anySatisfy(value ->
+                assertThat(value).isInstanceOfSatisfying(ProcessObservation.class,
+                        observation -> assertThat(observation.eventType())
+                                .isEqualTo(ProcessObservation.EventType.STARTED)));
         assertThat(handler.observations).noneMatch(value ->
                 value instanceof UserTaskObservation observation
                         && observation.eventType() == UserTaskObservation.EventType.ASSIGNED);
@@ -190,6 +197,10 @@ class EmbeddedEngineLifecycleIT {
     @Test
     void emitsCancellationForARealDeletedProcess() {
         ProcessInstance process = start("case-cancelled");
+        var task = tasks.createTaskQuery().processInstanceId(process.getId()).singleResult();
+        tasks.complete(task.getId());
+        var stageTask = tasks.createTaskQuery().processInstanceId(process.getId()).singleResult();
+        assertThat(stageTask.getTaskDefinitionKey()).isEqualTo("stage-review");
 
         runtime.deleteProcessInstance(process.getId(), "operator cancellation");
 
@@ -199,6 +210,21 @@ class EmbeddedEngineLifecycleIT {
                             assertThat(observation.processInstanceId()).isEqualTo(process.getId());
                             assertThat(observation.eventType())
                                     .isEqualTo(ProcessObservation.EventType.TERMINATED);
+                        }));
+        assertThat(handler.observations).anySatisfy(value ->
+                assertThat(value).isInstanceOfSatisfying(UserTaskObservation.class,
+                        observation -> {
+                            assertThat(observation.entityId()).isEqualTo(stageTask.getId());
+                            assertThat(observation.eventType())
+                                    .isEqualTo(UserTaskObservation.EventType.DELETED);
+                        }));
+        assertThat(handler.observations).anySatisfy(value ->
+                assertThat(value).isInstanceOfSatisfying(ActivityLifecycleObservation.class,
+                        observation -> {
+                            assertThat(observation.attributes())
+                                    .containsEntry("activityId", "assessment");
+                            assertThat(observation.eventType())
+                                    .isEqualTo(ActivityLifecycleObservation.EventType.CANCELLED);
                         }));
     }
 

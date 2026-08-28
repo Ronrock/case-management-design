@@ -40,6 +40,24 @@ class ExactStartOutboxTest {
     }
 
     @Test
+    void keyStartTenantSurvivesOutboxSerialization() {
+        EngineCommandRepository commands = mock(EngineCommandRepository.class);
+        OutboxEngineGateway outbox = new OutboxEngineGateway(commands, ignored -> { });
+
+        outbox.startProcessByKey(new StartProcessByKeyRequest(
+                "case-1", "plan-item-1", "child-orders", Map.of(),
+                "linked-1", "tenant-a"));
+
+        ArgumentCaptor<EngineCommand> command = ArgumentCaptor.forClass(EngineCommand.class);
+        verify(commands).enqueue(command.capture());
+        assertThat(command.getValue().payload())
+                .containsEntry("selectionType", "KEY")
+                .containsEntry("processDefinitionKey", "child-orders")
+                .containsEntry("tenantId", "tenant-a")
+                .containsEntry("correlationId", "linked-1");
+    }
+
+    @Test
     void dispatcherReconstructsTheExactIdentityInsteadOfSelectingByKey() {
         EngineCommandRepository commands = mock(EngineCommandRepository.class);
         EngineGateway delegate = mock(EngineGateway.class);
@@ -88,6 +106,7 @@ class ExactStartOutboxTest {
                 ArgumentCaptor.forClass(StartProcessByKeyRequest.class);
         verify(delegate).startProcessByKey(request.capture());
         assertThat(request.getValue().processDefinitionKey()).isEqualTo("legacy-process");
+        assertThat(request.getValue().tenantId()).isNull();
     }
 
     @Test

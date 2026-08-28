@@ -4,6 +4,9 @@ import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
+import org.casemgmt.engine.embedded.PersistedProcessCaseCorrelation;
+import org.casemgmt.engine.embedded.ProcessActivityClassifier;
+import org.casemgmt.engine.embedded.ProcessCaseCorrelation;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.event.WebhookSecretStore;
@@ -189,6 +192,34 @@ class AutoConfigurationTest {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(EmbeddedEngineEventBridge.class);
                     assertThat(context).hasSingleBean(EngineObservationHandler.class);
+                    assertThat(context.getBean(ProcessCaseCorrelation.class))
+                            .isInstanceOf(PersistedProcessCaseCorrelation.class);
+                });
+    }
+
+    @Test
+    void embeddedLifecycleExtensionPointsBackOffForConsumerSubstitutes() {
+        ProcessCaseCorrelation correlation = processInstanceId -> "consumer-case";
+        ProcessActivityClassifier classifier = mock(ProcessActivityClassifier.class);
+        EmbeddedEngineEventBridge bridge = new EmbeddedEngineEventBridge(
+                mock(EngineObservationHandler.class), correlation, classifier,
+                mock(RepositoryService.class), mock(TaskService.class), "consumer-engine");
+
+        runner.withBean(TaskService.class, () -> mock(TaskService.class))
+                .withBean(RuntimeService.class, () -> mock(RuntimeService.class))
+                .withBean(RepositoryService.class, () -> mock(RepositoryService.class))
+                .withBean(ProcessCaseCorrelation.class, () -> correlation)
+                .withBean(ProcessActivityClassifier.class, () -> classifier)
+                .withBean(EmbeddedEngineEventBridge.class, () -> bridge)
+                .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=embedded",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(ProcessCaseCorrelation.class)).isSameAs(correlation);
+                    assertThat(context.getBean(ProcessActivityClassifier.class)).isSameAs(classifier);
+                    assertThat(context.getBean(EmbeddedEngineEventBridge.class)).isSameAs(bridge);
                 });
     }
 

@@ -124,7 +124,8 @@ public class EngineCommandDispatcher {
                     ref = delegate.startProcessByKey(new StartProcessByKeyRequest(
                             command.caseId(), blankToNull(str(p, "planItemId")),
                             str(p, "processDefinitionKey"), map(p.get("variables")),
-                            blankToNull(str(p, "correlationId"))));
+                            blankToNull(str(p, "correlationId")),
+                            blankToNull(str(p, "tenantId"))));
                 } else {
                     ref = delegate.startProcess(new StartProcessRequest(
                             command.caseId(), blankToNull(str(p, "planItemId")),

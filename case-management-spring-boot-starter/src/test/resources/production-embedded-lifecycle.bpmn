@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:operaton="http://operaton.org/schema/1.0/bpmn"
+             targetNamespace="https://casemgmt.org/tests">
+  <process id="production-root" name="Production root" isExecutable="true">
+    <startEvent id="root-start"/>
+    <sequenceFlow id="root-flow-1" sourceRef="root-start" targetRef="root-review"/>
+    <userTask id="root-review" name="Root review" operaton:candidateGroups="handlers"/>
+    <sequenceFlow id="root-flow-2" sourceRef="root-review" targetRef="root-end"/>
+    <endEvent id="root-end"/>
+  </process>
+
+  <process id="production-child" name="Production child" isExecutable="true">
+    <startEvent id="child-start"/>
+    <sequenceFlow id="child-flow-1" sourceRef="child-start" targetRef="child-review"/>
+    <userTask id="child-review" name="Child review"/>
+    <sequenceFlow id="child-flow-2" sourceRef="child-review" targetRef="child-end"/>
+    <endEvent id="child-end"/>
+  </process>
+</definitions>

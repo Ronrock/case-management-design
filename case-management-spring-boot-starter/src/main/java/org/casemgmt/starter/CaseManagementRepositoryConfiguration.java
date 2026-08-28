@@ -19,9 +19,15 @@ import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.repo.SlaRepository;
 import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.projection.CaseProjectionPort;
+import org.casemgmt.projection.CaseCompletionPublisher;
 import org.casemgmt.projection.JdbcCaseProjectionPort;
 import org.casemgmt.projection.ActiveBpmnCaseRepository;
 import org.casemgmt.projection.RemotePollingCheckpointRepository;
+import org.casemgmt.domain.CaseIds;
+import org.casemgmt.event.CaseEvent;
+import org.casemgmt.event.EventPublisher;
+import org.casemgmt.event.EventTypes;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -77,10 +83,30 @@ public class CaseManagementRepositoryConfiguration {
     @Bean public AppliedObservationRepository appliedObservationRepository(JdbcClient c) {
         return new AppliedObservationRepository(c);
     }
-    @Bean public CaseProjectionPort caseProjectionPort(JdbcClient c) {
-        // Root completion is published by DefaultEngineObservationHandler. Keeping the legacy
-        // projection callback active here would emit a second event/audit for the same fact.
-        return new JdbcCaseProjectionPort(c);
+    @Bean
+    @ConditionalOnMissingBean(CaseCompletionPublisher.class)
+    public CaseCompletionPublisher caseCompletionPublisher(
+            CaseRepository cases, EventPublisher publisher, CaseManagementProperties properties) {
+        if (properties.getEngine().getMode() == CaseManagementProperties.EngineMode.embedded) {
+            // Embedded root completion is owned by DefaultEngineObservationHandler.
+            return CaseCompletionPublisher.none();
+        }
+        // Remote ingestion still reaches the lower-level projection path until Workstream 5.
+        return (caseId, state, completedAt) -> {
+            var completed = cases.require(caseId);
+            String eventType = "CANCELLED".equals(state)
+                    ? EventTypes.CASE_CANCELLED : EventTypes.CASE_CLOSED;
+            publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(), eventType,
+                    caseId, completed.tenantId(), completedAt,
+                    java.util.Map.of("state", state, "source", "root-process")));
+            publisher.audit(caseId, completed.tenantId(), "engine", "case.complete-root-process",
+                    "Case", caseId, java.util.Map.of("state", "ACTIVE"),
+                    java.util.Map.of("state", state));
+        };
+    }
+    @Bean public CaseProjectionPort caseProjectionPort(
+            JdbcClient c, CaseCompletionPublisher completionPublisher) {
+        return new JdbcCaseProjectionPort(c, completionPublisher);
     }
     @Bean public RemotePollingCheckpointRepository remotePollingCheckpointRepository(JdbcClient c) {
         return new RemotePollingCheckpointRepository(c);

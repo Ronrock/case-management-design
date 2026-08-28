@@ -13,6 +13,7 @@ import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.rules.CaseSnapshot;
 import org.casemgmt.rules.Transition;
 
+import java.time.OffsetDateTime;
 import java.util.List;
 
 /** Root-process lifecycle for BPMN-backed cases; work is supplied by engine observations. */
@@ -44,6 +45,13 @@ public final class BpmnOrchestration implements CaseOrchestration {
         String projectionId = CaseIds.newId();
         EngineDeploymentIdentity identity = identities.requireActive(
                 definition.id(), caseInstance.tenantId());
+        // The link is the authority used by synchronous embedded callbacks. Persist it before
+        // entering the engine so process-start/task-create events can prove ownership while the
+        // start command is still on the stack. The enclosing CaseService transaction rolls this
+        // pending authority back if the engine start or any lifecycle effect fails.
+        processes.insertRoot(projectionId, caseInstance.id(), null,
+                identity.processDefinitionId(), identity.processDefinitionKey(),
+                CaseTask.EngineSync.PENDING);
         EngineProcessRef process = engine.startProcess(new StartProcessRequest(
                 caseInstance.id(), null, identity.processDefinitionId(),
                 identity.processDefinitionKey(), identity.tenantId(), caseInstance.variables(),
@@ -56,8 +64,11 @@ public final class BpmnOrchestration implements CaseOrchestration {
         }
         CaseTask.EngineSync sync = process.processInstanceId() == null
                 ? CaseTask.EngineSync.PENDING : CaseTask.EngineSync.SYNCED;
-        processes.insertRoot(projectionId, caseInstance.id(), process.processInstanceId(),
-                identity.processDefinitionId(), identity.processDefinitionKey(), sync);
+        if (sync == CaseTask.EngineSync.SYNCED) {
+            processes.confirmStarted(caseInstance.id(), projectionId,
+                    process.processInstanceId(), identity.processDefinitionId(),
+                    identity.processDefinitionKey(), OffsetDateTime.now());
+        }
     }
 
     @Override

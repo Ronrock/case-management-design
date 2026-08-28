@@ -13,7 +13,9 @@
     <sequenceFlow id="flow-2" sourceRef="review" targetRef="assessment"/>
     <subProcess id="assessment" name="Assessment" casemgmt:stage="true">
       <startEvent id="assessment-start"/>
-      <sequenceFlow id="assessment-flow" sourceRef="assessment-start" targetRef="assessment-end"/>
+      <sequenceFlow id="assessment-flow-1" sourceRef="assessment-start" targetRef="stage-review"/>
+      <userTask id="stage-review" name="Stage review"/>
+      <sequenceFlow id="assessment-flow-2" sourceRef="stage-review" targetRef="assessment-end"/>
       <endEvent id="assessment-end"/>
     </subProcess>
     <sequenceFlow id="flow-3" sourceRef="assessment" targetRef="approved"/>

@@ -313,6 +313,12 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
         if (incomingType.equals(current.eventType())) {
             return true;
         }
+        // Arrival order is trustworthy only for callbacks delivered synchronously from the
+        // embedded Operaton command. Remote polling/reconciliation can reorder distinct facts
+        // that share the engine's timestamp precision, so an equal-time tie stays stale there.
+        if (!"operaton:embedded".equals(incoming.source())) {
+            return true;
+        }
         // Operaton's task timestamps have millisecond precision. Distinct callbacks in one fast
         // command (notably claim then complete) can therefore carry the same engine time. Accept
         // a distinct forward event at that instant, while preserving terminal states and

@@ -90,6 +90,7 @@ public class OutboxEngineGateway implements EngineGateway {
                 Map.of("planItemId", request.planItemId() == null ? "" : request.planItemId(),
                         "selectionType", "KEY",
                         "processDefinitionKey", request.processDefinitionKey(),
+                        "tenantId", request.tenantId() == null ? "" : request.tenantId(),
                         "variables", request.variables(),
                         "correlationId", request.correlationId() == null ? "" : request.correlationId()));
         return new EngineProcessRef(null, request.processDefinitionKey(), request.caseId());

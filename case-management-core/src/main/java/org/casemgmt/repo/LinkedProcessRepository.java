@@ -201,13 +201,25 @@ public class LinkedProcessRepository {
                 .optional();
     }
 
-    private Optional<LinkedProcessRow> findByCorrelation(String correlationId) {
+    public Optional<LinkedProcessRow> findByCorrelation(String correlationId) {
         return jdbc.sql("""
                 SELECT ID_, CASE_ID_, PLAN_ITEM_ID_, CORRELATION_ID_, PROC_INST_ID_,
                        PROC_DEF_ID_, PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_
                 FROM CM_LINKED_PROCESS
                 WHERE CORRELATION_ID_ = :correlationId""")
                 .param("correlationId", correlationId)
+                .query(LinkedProcessRepository::map)
+                .optional();
+    }
+
+    public Optional<LinkedProcessRow> findByProcessInstanceId(String processInstanceId) {
+        requireNonBlank(processInstanceId, "processInstanceId");
+        return jdbc.sql("""
+                SELECT ID_, CASE_ID_, PLAN_ITEM_ID_, CORRELATION_ID_, PROC_INST_ID_,
+                       PROC_DEF_ID_, PROC_DEF_KEY_, STATE_, ENGINE_SYNC_, IS_CASE_ROOT_
+                FROM CM_LINKED_PROCESS
+                WHERE PROC_INST_ID_ = :processInstanceId""")
+                .param("processInstanceId", processInstanceId)
                 .query(LinkedProcessRepository::map)
                 .optional();
     }

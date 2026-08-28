@@ -23,6 +23,8 @@ public class EmbeddedEngineGateway implements EngineGateway {
 
     /** Process/task variable carrying the owning case. Also the process business key. */
     public static final String CASE_ID_VARIABLE = "caseId";
+    /** Reserved high-entropy persisted start correlation; never accepted from caller variables. */
+    public static final String LIFECYCLE_CORRELATION_VARIABLE = "__casemgmtLifecycleCorrelation";
     private static final String PLAN_ITEM_VARIABLE = "planItemId";
 
     private final TaskService taskService;
@@ -114,6 +116,7 @@ public class EmbeddedEngineGateway implements EngineGateway {
                 request.variables() == null ? Map.of() : request.variables());
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
+        putLifecycleCorrelation(variables, request.correlationId());
         try {
             var instance = runtimeService.startProcessInstanceById(
                     request.processDefinitionId(), request.caseId(), variables);
@@ -132,15 +135,26 @@ public class EmbeddedEngineGateway implements EngineGateway {
 
     @Override
     public EngineProcessRef startProcessByKey(StartProcessByKeyRequest request) {
+        var query = repositoryService.createProcessDefinitionQuery()
+                .processDefinitionKey(request.processDefinitionKey())
+                .latestVersion();
+        query = request.tenantId() == null
+                ? query.withoutTenantId()
+                : query.tenantIdIn(request.tenantId());
+        var definition = query.singleResult();
+        if (definition == null) {
+            throw new EngineException("No process definition " + request.processDefinitionKey()
+                    + " for tenant " + request.tenantId());
+        }
         Map<String, Object> variables = new HashMap<>(request.variables());
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
+        putLifecycleCorrelation(variables, request.correlationId());
         try {
-            var instance = runtimeService.startProcessInstanceByKey(
-                    request.processDefinitionKey(), request.caseId(), variables);
+            var instance = runtimeService.startProcessInstanceById(
+                    definition.getId(), request.caseId(), variables);
             return processRef(instance == null ? null : instance.getId(),
-                    instance == null ? null : instance.getProcessDefinitionId(),
-                    request.processDefinitionKey(), request.caseId());
+                    definition.getId(), definition.getKey(), request.caseId());
         } catch (ProcessEngineException e) {
             throw new EngineException(
                     "Could not start process " + request.processDefinitionKey(), e);
@@ -158,6 +172,16 @@ public class EmbeddedEngineGateway implements EngineGateway {
         }
         return new EngineProcessRef(processInstanceId, processDefinitionId,
                 processDefinitionKey, caseId);
+    }
+
+    private static void putLifecycleCorrelation(Map<String, Object> variables,
+                                                String correlationId) {
+        // Always remove a caller-provided value. Only the caller-owned request coordinate minted
+        // by the case service may mark a process as lifecycle-managed.
+        variables.remove(LIFECYCLE_CORRELATION_VARIABLE);
+        if (correlationId != null && !correlationId.isBlank()) {
+            variables.put(LIFECYCLE_CORRELATION_VARIABLE, correlationId);
+        }
     }
 
     @Override

@@ -15,7 +15,8 @@ public record StartProcessByKeyRequest(
         String planItemId,
         String processDefinitionKey,
         Map<String, Object> variables,
-        String correlationId) {
+        String correlationId,
+        String tenantId) {
 
     public StartProcessByKeyRequest {
         if (processDefinitionKey == null || processDefinitionKey.isBlank()) {
@@ -27,6 +28,11 @@ public record StartProcessByKeyRequest(
 
     public StartProcessByKeyRequest(String caseId, String planItemId, String processDefinitionKey,
                                     Map<String, Object> variables) {
-        this(caseId, planItemId, processDefinitionKey, variables, null);
+        this(caseId, planItemId, processDefinitionKey, variables, null, null);
+    }
+
+    public StartProcessByKeyRequest(String caseId, String planItemId, String processDefinitionKey,
+                                    Map<String, Object> variables, String correlationId) {
+        this(caseId, planItemId, processDefinitionKey, variables, correlationId, null);
     }
 }

@@ -15,9 +15,11 @@ import static org.casemgmt.rules.PlanModelFixtures.definition;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 class BpmnOrchestrationTest {
 
@@ -36,13 +38,18 @@ class BpmnOrchestrationTest {
 
         assertThat(orchestration.mode()).isEqualTo(OrchestrationMode.BPMN);
         assertThat(orchestration.allowsExplicitClose()).isFalse();
-        verify(processes).insertRoot(any(), eq("eng-a:1"), eq("proc-1"),
-                eq("orders:1:exact"), eq("orders"), eq(CaseTask.EngineSync.SYNCED));
         ArgumentCaptor<StartProcessRequest> request = ArgumentCaptor.forClass(StartProcessRequest.class);
-        verify(engine).startProcess(request.capture());
+        ArgumentCaptor<String> correlation = ArgumentCaptor.forClass(String.class);
+        InOrder ordered = inOrder(processes, engine);
+        ordered.verify(processes).insertRoot(correlation.capture(), eq("eng-a:1"), eq(null),
+                eq("orders:1:exact"), eq("orders"), eq(CaseTask.EngineSync.PENDING));
+        ordered.verify(engine).startProcess(request.capture());
+        ordered.verify(processes).confirmStarted(eq("eng-a:1"), eq(correlation.getValue()),
+                eq("proc-1"), eq("orders:1:exact"), eq("orders"), any());
         assertThat(request.getValue().processDefinitionId()).isEqualTo("orders:1:exact");
         assertThat(request.getValue().processDefinitionKey()).isEqualTo("orders");
         assertThat(request.getValue().tenantId()).isNull();
+        assertThat(request.getValue().correlationId()).isEqualTo(correlation.getValue());
     }
 
     @Test
@@ -58,7 +65,9 @@ class BpmnOrchestrationTest {
 
         orchestration.onCaseCreated(caseInstance(Map.of()), definition());
 
-        verify(processes).insertRoot(any(), eq("eng-a:1"), eq(null),
+        InOrder ordered = inOrder(processes, engine);
+        ordered.verify(processes).insertRoot(any(), eq("eng-a:1"), eq(null),
                 eq("orders:1:exact"), eq("orders"), eq(CaseTask.EngineSync.PENDING));
+        ordered.verify(engine).startProcess(any());
     }
 }

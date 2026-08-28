@@ -183,7 +183,8 @@ public final class AppliedObservationRepository {
                   AND (TENANT_ID_ = :tenantId
                     OR (:tenantId IS NULL AND TENANT_ID_ IS NULL))
                   AND STATUS_ = 'APPLIED'
-                ORDER BY """ + ordering + " FETCH FIRST 1 ROW ONLY")
+                ORDER BY
+                """ + ordering + " FETCH FIRST 1 ROW ONLY")
                 .param("engineId", values.engineId())
                 .param("caseId", values.caseId())
                 .param("processInstanceId", values.processInstanceId())

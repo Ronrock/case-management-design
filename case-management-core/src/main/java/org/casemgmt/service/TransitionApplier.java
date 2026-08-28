@@ -138,7 +138,7 @@ public class TransitionApplier {
         String id = CaseIds.newId();
         EngineProcessRef ref = engine.startProcessByKey(new StartProcessByKeyRequest(
                 snapshot.caseInstance().id(), item.id(), def.processDefinitionKey(),
-                snapshot.caseInstance().variables(), id));
+                snapshot.caseInstance().variables(), id, snapshot.caseInstance().tenantId()));
         String instanceId = ref.processInstanceId();
         CaseTask.EngineSync sync = instanceId == null
                 ? CaseTask.EngineSync.PENDING

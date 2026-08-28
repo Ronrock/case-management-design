@@ -3,16 +3,22 @@ package org.casemgmt.starter;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
+import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
 import org.casemgmt.engine.embedded.ProcessCaseCorrelation;
+import org.casemgmt.engine.embedded.PersistedProcessCaseCorrelation;
 import org.casemgmt.engine.embedded.EmbeddedOrchestrationDeploymentPort;
 import org.casemgmt.engine.embedded.ProcessActivityClassifier;
 import org.casemgmt.engine.embedded.RepositoryProcessActivityClassifier;
 import org.casemgmt.orchestration.OrchestrationDeploymentPort;
 import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
+import org.casemgmt.repo.CaseRepository;
+import org.casemgmt.repo.LinkedProcessRepository;
 import org.operaton.bpm.engine.ProcessEngine;
 import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.TaskService;
+import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
@@ -24,6 +30,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.util.ClassUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.sql.DataSource;
 
 @AutoConfiguration(before = CaseManagementAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "casemgmt", name = "enabled", havingValue = "true", matchIfMissing = true)
@@ -97,26 +106,19 @@ public class EmbeddedEngineAutoConfiguration {
         }
 
         @Bean
-        @ConditionalOnBean(RuntimeService.class)
-        ProcessCaseCorrelation processCaseCorrelation(RuntimeService runtimeService) {
-            return processInstanceId -> {
-                // Task create events are published from inside Operaton's start command,
-                // before the new runtime row is necessarily visible to a query. The caseId
-                // process variable is already present in the command context, however, so it
-                // is the reliable correlation source on this path. Keep the business-key
-                // lookup as a fallback for observations that do not carry that variable.
-                Object caseId = runtimeService.getVariable(
-                        processInstanceId, EmbeddedEngineGateway.CASE_ID_VARIABLE);
-                if (caseId != null) {
-                    return caseId.toString();
-                }
-                var instance = runtimeService.createProcessInstanceQuery()
-                        .processInstanceId(processInstanceId).singleResult();
-                return instance == null ? null : instance.getBusinessKey();
-            };
+        @ConditionalOnMissingBean(ProcessCaseCorrelation.class)
+        ProcessCaseCorrelation processCaseCorrelation(
+                RuntimeService runtimeService,
+                RepositoryService repositoryService,
+                LinkedProcessRepository linkedProcesses,
+                CaseRepository cases,
+                CaseDefinitionVersionBindingRepository bindings) {
+            return new PersistedProcessCaseCorrelation(runtimeService, repositoryService,
+                    linkedProcesses, cases, bindings);
         }
 
         @Bean
+        @ConditionalOnMissingBean(EmbeddedEngineEventBridge.class)
         EmbeddedEngineEventBridge embeddedEngineEventBridge(
                 EngineObservationHandler observations, ProcessCaseCorrelation correlation,
                 ProcessActivityClassifier classifier, RepositoryService repositoryService,
@@ -132,13 +134,23 @@ public class EmbeddedEngineAutoConfiguration {
         }
 
         @Bean
-        @ConditionalOnBean(RepositoryService.class)
+        @ConditionalOnMissingBean(ProcessActivityClassifier.class)
         ProcessActivityClassifier processActivityClassifier(RepositoryService repositoryService) {
             return new RepositoryProcessActivityClassifier(repositoryService);
         }
 
         @Bean
-        @ConditionalOnBean(RepositoryService.class)
+        @ConditionalOnBean(SpringProcessEngineConfiguration.class)
+        @ConditionalOnMissingBean(EmbeddedTransactionResourceValidator.class)
+        EmbeddedTransactionResourceValidator embeddedTransactionResourceValidator(
+                DataSource dataSource,
+                PlatformTransactionManager transactionManager,
+                SpringProcessEngineConfiguration engineConfiguration) {
+            return new EmbeddedTransactionResourceValidator(
+                    dataSource, transactionManager, engineConfiguration);
+        }
+
+        @Bean
         OrchestrationDeploymentPort embeddedOrchestrationDeploymentPort(
                 RepositoryService repositoryService) {
             return new EmbeddedOrchestrationDeploymentPort(repositoryService);

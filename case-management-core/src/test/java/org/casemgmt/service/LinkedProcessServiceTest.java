@@ -18,9 +18,11 @@ import static org.casemgmt.rules.PlanModelFixtures.caseInstance;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import org.mockito.InOrder;
 
 class LinkedProcessServiceTest {
 
@@ -52,9 +54,10 @@ class LinkedProcessServiceTest {
         when(engine.startProcessByKey(any())).thenReturn(new EngineProcessRef(
                 "process-42", "letter-process:9", "letter-process", "eng-a:1"));
         doAnswer(invocation -> { insertedId.set(invocation.getArgument(0)); return null; })
-                .when(processes).insert(any(), eq("eng-a:1"), eq(null), eq("process-42"),
-                        eq("letter-process:9"), eq("letter-process"),
-                        eq(CaseTask.EngineSync.SYNCED));
+                .when(processes).insert(any(), eq("eng-a:1"), eq(null),
+                        org.mockito.ArgumentMatchers.<String>any(),
+                        org.mockito.ArgumentMatchers.<String>any(),
+                        eq("letter-process"), any());
         when(processes.findByCase("eng-a:1")).thenAnswer(invocation -> List.of(
                 new LinkedProcessRepository.LinkedProcessRow(insertedId.get(), "eng-a:1", null,
                         insertedId.get(), "process-42", "letter-process:9", "letter-process",
@@ -65,8 +68,12 @@ class LinkedProcessServiceTest {
                 new Actor("alice", List.of()));
 
         assertThat(result.processDefinitionId()).isEqualTo("letter-process:9");
-        verify(processes).insert(result.id(), "eng-a:1", null, "process-42",
-                "letter-process:9", "letter-process", CaseTask.EngineSync.SYNCED);
+        InOrder ordered = inOrder(processes, engine);
+        ordered.verify(processes).insert(result.id(), "eng-a:1", null, null,
+                null, "letter-process", CaseTask.EngineSync.PENDING);
+        ordered.verify(engine).startProcessByKey(any());
+        ordered.verify(processes).confirmStarted(eq("eng-a:1"), eq(result.id()),
+                eq("process-42"), eq("letter-process:9"), eq("letter-process"), any());
     }
 
     @Test
