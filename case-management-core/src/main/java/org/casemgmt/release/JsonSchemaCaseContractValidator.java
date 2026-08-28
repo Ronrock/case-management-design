@@ -81,6 +81,7 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
         if (!violations.isEmpty()) {
             throw new InvalidCaseDefinitionException(definitionKey, report(violations, mode));
         }
+        rejectUnsupportedTransforms(definitionKey, root, mode);
 
         ValidatedCaseContract contract = map(root, mode);
         checkIdentity(definitionKey, contract);
@@ -198,6 +199,35 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
         }
     }
 
+    private static void rejectUnsupportedTransforms(
+            String definitionKey, JsonNode root, OrchestrationMode mode) {
+        if (mode != OrchestrationMode.BPMN) {
+            return;
+        }
+        rejectTransformInMappings(definitionKey, root.get("mappings"), "/mappings");
+        JsonNode actions = root.get("adHocActions");
+        if (actions == null || !actions.isArray()) {
+            return;
+        }
+        for (int index = 0; index < actions.size(); index++) {
+            rejectTransformInMappings(definitionKey, actions.get(index).get("mappings"),
+                    "/adHocActions/" + index + "/mappings");
+        }
+    }
+
+    private static void rejectTransformInMappings(
+            String definitionKey, JsonNode mappings, String path) {
+        if (mappings == null || !mappings.isArray()) {
+            return;
+        }
+        for (int index = 0; index < mappings.size(); index++) {
+            if (mappings.get(index).hasNonNull("transformRef")) {
+                throw invalid(definitionKey, "Contract release is invalid:\n  " + path + "/"
+                        + index + "/transformRef: transforms are not supported");
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ mapping
 
     private ValidatedCaseContract map(JsonNode root, OrchestrationMode mode) {
@@ -206,7 +236,7 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
                 mode,
                 fields(root),
                 forms(root, mode),
-                mappings(root),
+                mode == OrchestrationMode.BPMN ? mappings(root) : List.of(),
                 slaBindings(root),
                 adHocActions(root),
                 new LinkedHashSet<>(strings(root.get("candidateGroups"))),

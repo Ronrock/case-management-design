@@ -34,8 +34,10 @@ public record CanonicalPatch(
     /** General audit payload: sensitive values are never included, even in-memory. */
     public List<AuditChange> auditSummary() {
         return changes.stream().map(change -> change.sensitive()
-                ? new AuditChange(change.fieldId(), REDACTED, REDACTED, true)
-                : new AuditChange(change.fieldId(), change.expectedValue(), change.value(), false))
+                ? new AuditChange(change.fieldId(), change.source(), change.mappingPath(),
+                        change.writeMode(), REDACTED, REDACTED, true)
+                : new AuditChange(change.fieldId(), change.source(), change.mappingPath(),
+                        change.writeMode(), change.expectedValue(), change.value(), false))
                 .toList();
     }
 
@@ -65,8 +67,14 @@ public record CanonicalPatch(
         }
     }
 
-    public record AuditChange(String fieldId, Object previousValue, Object newValue,
-                              boolean redacted) { }
+    public record AuditChange(
+            String fieldId,
+            String source,
+            String mappingPath,
+            WriteMode writeMode,
+            Object previousValue,
+            Object newValue,
+            boolean redacted) { }
 
     private static Object immutableJsonValue(Object value) {
         if (value == null || value instanceof String || value instanceof Boolean) {

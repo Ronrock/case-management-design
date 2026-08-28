@@ -160,8 +160,10 @@ class ContractCaseDataMappingServiceTest {
                 Map.of("publicVar", "approved", "secretVar", "new-secret"));
 
         assertThat(patch.auditSummary()).containsExactly(
-                new CanonicalPatch.AuditChange("decision", "pending", "approved", false),
-                new CanonicalPatch.AuditChange("secret", CanonicalPatch.REDACTED,
+                new CanonicalPatch.AuditChange("decision", "publicVar", "/mappings/0",
+                        CanonicalPatch.WriteMode.REPLACE, "pending", "approved", false),
+                new CanonicalPatch.AuditChange("secret", "secretVar", "/mappings/1",
+                        CanonicalPatch.WriteMode.REPLACE, CanonicalPatch.REDACTED,
                         CanonicalPatch.REDACTED, true));
         assertThat(patch.auditSummary().toString())
                 .doesNotContain("old-secret", "new-secret");
@@ -231,6 +233,45 @@ class ContractCaseDataMappingServiceTest {
         assertThat(patch.expectedCaseVersion()).isEqualTo(8L);
         assertThat(patch.changes()).singleElement()
                 .extracting(CanonicalPatch.FieldChange::value).isEqualTo("approved");
+    }
+
+    @Test
+    void mergeBuildsAndValidatesOneCompletePostMergeCanonicalValue() {
+        bind("""
+                {
+                  "key":"sample-case",
+                  "orchestrationMode":"BPMN",
+                  "fields":{"profile":{"schema":{
+                    "type":"object",
+                    "required":["name","language"],
+                    "additionalProperties":false,
+                    "properties":{
+                      "name":{"type":"string"},
+                      "language":{"type":"string","enum":["nl","en"]}
+                    }
+                  }}},
+                  "forms":{},
+                  "mappings":[
+                    {"direction":"ENGINE_TO_CASE", "source":"profileVar", "target":"profile",
+                     "type":"object", "writeMode":"MERGE"}
+                  ]
+                }
+                """, Map.of("profile", Map.of("name", "Alice", "language", "nl")), 9L);
+
+        CanonicalPatch patch = service.mapTaskOutput("case-1", "reviewTask",
+                Map.of("profileVar", Map.of("language", "en")));
+
+        assertThat(patch.changes()).singleElement().satisfies(change -> {
+            assertThat(change.writeMode()).isEqualTo(CanonicalPatch.WriteMode.MERGE);
+            assertThat(change.expectedValue())
+                    .isEqualTo(Map.of("name", "Alice", "language", "nl"));
+            assertThat(change.value())
+                    .isEqualTo(Map.of("name", "Alice", "language", "en"));
+        });
+        assertThat(patch.auditSummary()).containsExactly(new CanonicalPatch.AuditChange(
+                "profile", "profileVar", "/mappings/0", CanonicalPatch.WriteMode.MERGE,
+                Map.of("name", "Alice", "language", "nl"),
+                Map.of("name", "Alice", "language", "en"), false));
     }
 
     private void bind(String contract, Map<String, Object> variables, long version) {

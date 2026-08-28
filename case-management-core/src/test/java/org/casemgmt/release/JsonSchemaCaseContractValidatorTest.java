@@ -96,7 +96,7 @@ class JsonSchemaCaseContractValidatorTest {
             assertThat(mapping.type()).isEqualTo(ValidatedCaseContract.MappingType.STRING);
             assertThat(mapping.writeMode()).isEqualTo(ValidatedCaseContract.MappingWriteMode.REPLACE);
             assertThat(mapping.required()).isTrue();
-            assertThat(mapping.transformRef()).isEqualTo("normalize-outcome");
+            assertThat(mapping.transformRef()).isNull();
             assertThat(mapping.submitRoles()).containsExactly("handler");
             assertThat(mapping.extensions()).containsEntry("owner", "case-platform");
         });
@@ -296,6 +296,10 @@ class JsonSchemaCaseContractValidatorTest {
                   "slaPolicyId": "sla-sample",
                   "roles": ["owner", "handler"],
                   "attachmentCategories": ["evidence"],
+                  "mappings": [
+                    {"direction":"ENGINE_TO_CASE", "source":"legacySource",
+                     "target":"legacyTarget"}
+                  ],
                   "forms": {
                     "sampleForm": {
                       "type": "object",
@@ -317,6 +321,21 @@ class JsonSchemaCaseContractValidatorTest {
         assertThat(contract.forms().get("sampleForm").schema())
                 .containsEntry("type", "object");
         assertThat(contract.roles()).containsExactlyInAnyOrder("owner", "handler");
+        assertThat(contract.mappings()).isEmpty();
+    }
+
+    @Test
+    void acceptsArbitraryLegacyMappingContentWithoutTypingItForRuntime() {
+        ValidatedCaseContract contract = validate("""
+                {
+                  "key":"sample-case",
+                  "forms":{},
+                  "mappings":[{"legacyDirection":"OUT","copyEverything":true}]
+                }
+                """);
+
+        assertThat(contract.orchestrationMode()).isEqualTo(OrchestrationMode.PLAN_MODEL);
+        assertThat(contract.mappings()).isEmpty();
     }
 
     /**
@@ -340,6 +359,28 @@ class JsonSchemaCaseContractValidatorTest {
                 {"key":"other-case","orchestrationMode":"BPMN","fields":{},"forms":{}}"""))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("sample-case");
+    }
+
+    @Test
+    void rejectsTransformReferencesUntilATransformRegistryExists() {
+        assertThatThrownBy(() -> validate("""
+                {
+                  "key":"sample-case",
+                  "orchestrationMode":"BPMN",
+                  "fields":{"outcome":{"schema":{"type":"string"}}},
+                  "forms":{},
+                  "mappings":[{
+                    "direction":"ENGINE_TO_CASE",
+                    "source":"outcomeVar",
+                    "target":"outcome",
+                    "transformRef":"normalize-outcome"
+                  }]
+                }
+                """))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/mappings/0/transformRef")
+                .hasMessageContaining("not supported")
+                .hasMessageNotContaining("normalize-outcome");
     }
 
     @ParameterizedTest(name = "[{index}] malformed content")
@@ -524,7 +565,7 @@ class JsonSchemaCaseContractValidatorTest {
                   "mappings": [
                     {"direction": "ENGINE_TO_CASE", "source": "outcome", "target": "outcome",
                      "type": "string", "writeMode": "REPLACE", "required": true,
-                     "transformRef": "normalize-outcome", "submitRoles": ["handler"],
+                     "submitRoles": ["handler"],
                      "extensions": {"owner": "case-platform"}}
                   ],
                   "adHocActions": [

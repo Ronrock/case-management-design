@@ -71,11 +71,13 @@ public final class ContractCaseDataMappingService implements CaseDataMappingServ
             }
             Object value = variables.get(mapping.source());
             validateType(path, mapping, field, value);
-            validateSchema(path, field, value);
             Object expected = c.variables().get(mapping.target());
+            Object finalValue = mapping.writeMode() == ValidatedCaseContract.MappingWriteMode.MERGE
+                    ? merge(path, expected, value) : value;
+            validateSchema(path, field, finalValue);
             changes.add(new CanonicalPatch.FieldChange(path, mapping.source(), mapping.target(),
                     writeMode(mapping.writeMode()), c.variables().containsKey(mapping.target()),
-                    expected, value, sensitive(field)));
+                    expected, finalValue, sensitive(field)));
         }
         return new CanonicalPatch(caseId, taskDefinitionKey, c.version(), changes);
     }
@@ -181,6 +183,16 @@ public final class ContractCaseDataMappingService implements CaseDataMappingServ
             ValidatedCaseContract.MappingWriteMode writeMode) {
         return writeMode == ValidatedCaseContract.MappingWriteMode.MERGE
                 ? CanonicalPatch.WriteMode.MERGE : CanonicalPatch.WriteMode.REPLACE;
+    }
+
+    private static Map<String, Object> merge(String path, Object expected, Object fragment) {
+        if (!(expected instanceof Map<?, ?> prior)) {
+            throw invalid(path + "/target", "cannot MERGE into a non-object canonical value");
+        }
+        Map<String, Object> merged = new LinkedHashMap<>();
+        prior.forEach((key, value) -> merged.put(String.valueOf(key), value));
+        ((Map<?, ?>) fragment).forEach((key, value) -> merged.put(String.valueOf(key), value));
+        return merged;
     }
 
     private static boolean sensitive(ValidatedCaseContract.FieldDefinition field) {

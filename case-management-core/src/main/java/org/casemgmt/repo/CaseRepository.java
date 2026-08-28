@@ -6,6 +6,7 @@ import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.service.CanonicalPatch;
 import org.casemgmt.service.CaseDataMappingService;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -154,13 +155,23 @@ public class CaseRepository {
 
     /**
      * Atomically applies canonical fields only when both their captured values and the case
-     * version still match. This method joins the caller's transaction and never opens one.
+     * version still match.
+     *
+     * <p>The row is selected {@code FOR UPDATE}, then compared and updated while that lock is
+     * held. This method deliberately opens no transaction of its own: callers must already be
+     * inside a Spring-managed transaction using the repository's {@code DataSource}. A naked or
+     * auto-commit invocation is rejected because its row lock would otherwise be released after
+     * the SELECT, reopening the compare/write race this method exists to close.
      */
     public CaseDataMappingService.PatchResult applyCanonicalPatch(CanonicalPatch patch) {
         if (patch == null) {
             throw new IllegalArgumentException("patch must not be null");
         }
-        CaseInstance current = require(patch.caseId());
+        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+            throw new IllegalStateException(
+                    "Canonical compare-and-apply requires an active caller transaction");
+        }
+        CaseInstance current = requireForCanonicalUpdate(patch.caseId());
         if (patch.changes().isEmpty()) {
             return CaseDataMappingService.PatchResult.noChanges(current.version());
         }
@@ -172,7 +183,7 @@ public class CaseRepository {
 
         Map<String, Object> variables = new LinkedHashMap<>(current.variables());
         for (CanonicalPatch.FieldChange change : patch.changes()) {
-            variables.put(change.fieldId(), apply(change, variables.get(change.fieldId())));
+            variables.put(change.fieldId(), change.value());
         }
         OffsetDateTime updatedAt = OffsetDateTime.now();
         int rows = jdbc.sql("""
@@ -188,23 +199,16 @@ public class CaseRepository {
         if (rows == 1) {
             return CaseDataMappingService.PatchResult.applied(patch.expectedCaseVersion() + 1);
         }
-
-        CaseInstance raced = require(patch.caseId());
-        return conflict(patch, raced, conflicts(patch, raced));
+        throw new IllegalStateException("Locked canonical update unexpectedly affected no rows for case "
+                + patch.caseId());
     }
 
-    private static Object apply(CanonicalPatch.FieldChange change, Object currentValue) {
-        if (change.writeMode() == CanonicalPatch.WriteMode.REPLACE) {
-            return change.value();
-        }
-        if (!(currentValue instanceof Map<?, ?> current)) {
-            throw new IllegalArgumentException(change.mappingPath()
-                    + "/target cannot MERGE into a non-object canonical value");
-        }
-        Map<String, Object> merged = new LinkedHashMap<>();
-        current.forEach((key, value) -> merged.put(String.valueOf(key), value));
-        ((Map<?, ?>) change.value()).forEach((key, value) -> merged.put(String.valueOf(key), value));
-        return merged;
+    private CaseInstance requireForCanonicalUpdate(String id) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM CM_CASE WHERE ID_ = :id FOR UPDATE")
+                .param("id", id)
+                .query(CaseRepository::map)
+                .optional()
+                .orElseThrow(() -> new NotFoundException("Case", id));
     }
 
     private static List<CaseDataMappingService.FieldConflict> conflicts(

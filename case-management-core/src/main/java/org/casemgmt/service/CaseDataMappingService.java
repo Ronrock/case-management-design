@@ -9,6 +9,10 @@ public interface CaseDataMappingService {
     CanonicalPatch mapTaskOutput(String caseId, String taskDefinitionKey,
                                  Map<String, Object> engineVariables);
 
+    /**
+     * Applies a previously mapped patch inside the caller's existing transaction. Implementations
+     * do not create an independent transaction boundary.
+     */
     PatchResult apply(CanonicalPatch patch);
 
     enum PatchStatus { APPLIED, NO_CHANGES, CONFLICT }
