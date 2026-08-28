@@ -8,7 +8,8 @@ Task 7 adds executable boundaries and parity contracts around the common lifecyc
 embedded adapter is now mechanically prevented from taking ownership of projection, claim, audit,
 event, webhook, or SLA writes. All four observation records have a stored-JSON round-trip
 contract, and the Oracle transactional fixture contains a direct-versus-stored comparison of the
-complete affected database outcome after volatile identifiers and database timestamps are removed.
+complete affected database outcome. Generated identifiers are canonicalized, while timestamp
+presence, nullability, ordering, and the exact business event time remain explicit assertions.
 
 The carried Task 6 cancellation findings were fixed first in a separate commit:
 
@@ -17,6 +18,10 @@ The carried Task 6 cancellation findings were fixed first in a separate commit:
 The Task 7 changes and this report are in the commit named:
 
 - `test: enforce lifecycle handler boundary`
+
+The review-hardening changes in this report are in the commit named:
+
+- `fix: harden lifecycle parity gates`
 
 `AGENTS.md` and `RTK.md` do not exist in this checkout. Repository conventions, the complete
 workstream plan, Task 7 brief, progress ledger, and Task 6 report were used instead. The progress
@@ -28,9 +33,12 @@ ledger was not edited.
 
 Operaton distinguishes ordinary completion from deletion using a nullable engine delete reason.
 Passing a null public/domain reason straight through therefore made a bodyless cancellation look
-like successful process completion. `EmbeddedEngineGateway` now sends a reserved non-null engine
-marker when the caller supplies no reason. The case's domain `cancelReason` remains null. The
-marker is engine protocol metadata only and is never included in a business event.
+like successful process completion. `EmbeddedEngineGateway` now encodes every cancellation in a
+versioned, gateway-owned envelope. A null reason has an explicit null tag; every string, including
+the empty string, old marker text, reserved-prefix text, and Unicode, is encoded as UTF-8 Base64URL.
+This makes the mapping one-to-one and keeps engine protocol metadata out of the domain reason.
+`EmbeddedEngineEventBridge` decodes only this exact format. Unowned raw Operaton deletion reasons,
+including malformed or incomplete reserved-looking values, remain ordinary termination reasons.
 
 ### Narrow reason propagation
 
@@ -43,9 +51,10 @@ receive this field.
 
 Coverage includes:
 
-- gateway tests for null marker and non-null reason preservation;
-- bridge tests for COMPLETED versus TERMINATED classification, marker suppression, and the one
-  whitelisted reason attribute;
+- exact gateway encoding tests for null, empty, old-marker, reserved-prefix, and Unicode reasons;
+- bridge tests for COMPLETED versus TERMINATED classification, owned-envelope decoding, raw
+  external deletion reasons, malformed reserved-looking values, and the one whitelisted reason
+  attribute;
 - common-handler tests for root null/non-null payloads and child/arbitrary-attribute isolation;
 - a real Spring + Operaton + production-handler H2 scenario proving a bodyless `CaseService`
   cancellation is TERMINATED, preserves a null domain reason, publishes one cancellation event,
@@ -76,16 +85,28 @@ No production concurrency seam was added.
 
 `EmbeddedLifecycleBoundaryArchitectureTest` imports the production embedded package and first
 asserts that the real event bridge was imported, preventing a vacuous pass. It then uses ArchUnit
-to forbid dependencies on:
+to forbid embedded production dependencies on every current CM persistence, projection, service,
+event, SLA, and JDBC surface. This includes all repository and projection packages,
+`EventPublisher`, `SlaLifecyclePort`, mapping/services, `JdbcClient`, `JdbcTemplate`, `DataSource`,
+and JDBC connections. The rule checks structural bytecode dependencies, so constructor calls,
+fields, ordinary calls, and method references cannot bypass it and a newly added writer method is
+not silently allowed. CM dependencies are default-denied: only the enumerated engine DTO/gateway,
+observation record/handler/authority, and deployment read-contract types are allowed.
 
-- `CaseProjectionPort` and `JdbcCaseProjectionPort`;
-- plan-item, case-task, milestone, applied-observation, audit, event, SLA, and webhook repositories.
+Persisted process-to-case correlation and legacy PLAN_MODEL backfill were extracted to
+`PersistedProcessCaseAuthority` in core. The embedded adapter now sees only
+`ProcessCaseAuthority`, the common observation handlers/records, and a narrow engine-neutral
+`EngineProcessAuthorityLookup`. `OperatonProcessAuthorityLookup` implements that read port with
+runtime-variable, process-instance, and exact process-definition lookups. It exposes no Operaton
+type to core. The compatibility `ProcessCaseCorrelation` name remains a read-only alias, and its
+implementation only delegates to core; it owns no repository or write behavior.
 
-Because persisted correlation legitimately reads `CaseRepository` and `LinkedProcessRepository`,
-those types cannot be forbidden wholesale. A second ArchUnit condition inspects bytecode method
-calls and forbids their projection/business writer methods while allowing authority reads and the
-existing narrowly scoped correlation confirmation path. Core handlers are outside the adapter
-package and remain allowed to own lifecycle effects.
+Four mutation fixtures prove the rule fails for a repository dependency, an
+`EventPublisher::publish` method reference plus SLA dependency, and direct `JdbcClient` access.
+The fourth proves an effect-writing `OutboxEngineGateway` facade is rejected even though its
+package also contains allowed engine request/response types.
+The positive production import is non-empty and passes. Core handlers remain the only owner of
+lifecycle effects.
 
 ArchUnit was added only as a test dependency to `case-management-engine-embedded`.
 
@@ -100,13 +121,19 @@ added only at test scope.
 `EngineObservationTransactionalIntegrationTest` now applies the same completed-task fixture in two
 ways:
 
-1. directly, inside an outer transaction that captures the database state and rolls back;
-2. after JSON storage and restoration, followed by a normal commit.
+1. directly in an explicit transaction that commits;
+2. after the mutable case fixture is deleted and identically reseeded, after JSON storage and
+   restoration, in a second explicit transaction that commits.
 
-The comparison covers case, plan-item, task, linked-process, SLA, applied-observation, audit,
-event, and webhook-delivery rows. Only generated claim tokens, UUID/sequence identifiers, and
-database-generated processing timestamps are excluded. Business fields, versions, identity,
-fingerprint, statuses, audit/event JSON, and row counts remain part of the comparison.
+The snapshot is taken only after each commit, so the handler's deferred `beforeCommit` event and
+webhook delivery effects must exist in both paths. The comparison covers every selected column in
+case, plan-item, task, linked-process, SLA, applied-observation, audit, event, and webhook-delivery
+rows. Generated UUIDs, sequences, claim tokens, and processing timestamps are canonicalized only
+after their semantics are asserted. Event and delivery sequences become stable ordinals while the
+delivery-to-event foreign-key relationship is checked and preserved. `CM_EVENT.TIME_` must equal
+the observation time exactly. `NEXT_ATTEMPT_AT`, `UPDATED_AT`, claim/applied timestamps, and all
+nullable delivery processing timestamps retain explicit presence/null/order checks. Business
+fields, versions, identity, fingerprint, statuses, JSON, and row counts remain in the equality.
 
 ### Changelog regression
 
@@ -138,6 +165,32 @@ Task 7 commit:
 - `case-management-engine-embedded/src/test/java/org/casemgmt/engine/embedded/EmbeddedLifecycleBoundaryArchitectureTest.java`
 - this report.
 
+Review-hardening commit:
+
+- `case-management-core/src/main/java/org/casemgmt/observation/EngineProcessAuthorityLookup.java`
+- `case-management-core/src/main/java/org/casemgmt/observation/ProcessCaseAuthority.java`
+- `case-management-core/src/main/java/org/casemgmt/observation/PersistedProcessCaseAuthority.java`
+- `case-management-core/src/test/java/org/casemgmt/observation/PersistedProcessCaseAuthorityTest.java`
+- `case-management-core/src/test/java/org/casemgmt/observation/EngineObservationTransactionalIntegrationTest.java`
+- `case-management-engine-embedded/src/main/java/org/casemgmt/engine/embedded/EmbeddedCancellationReason.java`
+- `case-management-engine-embedded/src/main/java/org/casemgmt/engine/embedded/EmbeddedEngineGateway.java`
+- `case-management-engine-embedded/src/main/java/org/casemgmt/engine/embedded/EmbeddedEngineEventBridge.java`
+- `case-management-engine-embedded/src/main/java/org/casemgmt/engine/embedded/OperatonProcessAuthorityLookup.java`
+- `case-management-engine-embedded/src/main/java/org/casemgmt/engine/embedded/PersistedProcessCaseCorrelation.java`
+- `case-management-engine-embedded/src/main/java/org/casemgmt/engine/embedded/ProcessCaseCorrelation.java`
+- `case-management-engine-embedded/src/main/java/org/casemgmt/engine/embedded/ProcessActivityClassifier.java`
+- `case-management-engine-embedded/src/main/java/org/casemgmt/engine/embedded/RepositoryProcessActivityClassifier.java`
+- corresponding embedded gateway, bridge, authority lookup, classifier, and ArchUnit tests;
+- `case-management-engine-embedded/src/test/resources/archunit.properties`;
+- `case-management-spring-boot-starter/src/main/java/org/casemgmt/starter/EmbeddedEngineAutoConfiguration.java`;
+- `case-management-spring-boot-starter/src/main/java/org/casemgmt/starter/EmbeddedTransactionResourceValidator.java`;
+- corresponding starter auto-configuration, validator, correlation, and real lifecycle tests;
+- this updated report.
+
+The old embedded repository-owning correlation implementation/tests and embedded-owned
+transaction-validator implementation/tests were removed. Equivalent authority coverage now lives
+in core, and transaction-resource validation lives with starter wiring.
+
 ## Verification evidence
 
 ### Green gates
@@ -152,8 +205,8 @@ Task 7 commit:
 
    `./mvnw -pl case-management-spring-boot-starter -am -Dtest=ProductionEmbeddedLifecycleIT -Dsurefire.failIfNoSpecifiedTests=false test`
 
-   Result: 11 tests passed. This includes lifecycle effects, rollback injection, null/non-null
-   cancellation, and the case-lock race.
+   Result after hardening: 16 tests passed. This includes lifecycle effects, rollback injection,
+   null/empty/old-marker/prefix/Unicode cancellation, and the case-lock race.
 
 3. Focused core Task 7 contracts:
 
@@ -165,16 +218,21 @@ Task 7 commit:
 
    `./mvnw -pl case-management-engine-embedded test`
 
-   Result: 64 tests passed, including real Operaton H2 lifecycle/rollback tests and the new
-   ArchUnit boundary.
+   Result after hardening: 60 tests passed with zero failures/errors/skips. The apparent count
+   reduction is ownership movement: 11 persisted-correlation tests moved to core and six
+   transaction-validator tests moved to starter, while two Operaton lookup tests and expanded
+   cancellation/boundary tests were added. It includes real Operaton H2 lifecycle tests and all
+   six structural ArchUnit gates.
 
 5. Complete starter module outside the socket-restricted sandbox:
 
    `./mvnw -pl case-management-spring-boot-starter test`
 
-   Result: 41 tests passed. The same command inside the sandbox first produced two
-   `SocketException: Operation not permitted` errors from loopback HTTP fixtures; the escalated
-   run proves those were environmental.
+   Result after a clean reactor rebuild: 52 tests passed with zero failures/errors/skips. This
+   includes 16 production lifecycle tests, six transaction-authority wiring tests, six validator
+   unit tests, and all auto-configuration backoff tests. A prior isolated run used stale installed
+   embedded bytecode; the clean reactor run established that was build-state, not a product
+   failure. Socket-using tests ran with explicit escalation.
 
 6. PoC checks that do not require Oracle:
 
@@ -189,6 +247,20 @@ Task 7 commit:
    Result: all seven reactor entries built and installed successfully.
 
 8. `git diff --check` passed before commit.
+
+9. Focused review-hardening core contracts:
+
+   `./mvnw -pl case-management-core -Dtest=PersistedProcessCaseAuthorityTest,EngineObservationSerializationContractTest,DefaultEngineObservationHandlerTest test`
+
+   Result: 44 tests passed (11 authority, four serialization, and 29 common handler tests).
+
+10. Focused clean reactor starter verification:
+
+   `./mvnw -pl case-management-spring-boot-starter -am clean -Dtest=AutoConfigurationTest,EmbeddedTransactionAuthorityAutoConfigurationTest,EmbeddedProcessCaseCorrelationTest,ProductionEmbeddedLifecycleIT -Dsurefire.failIfNoSpecifiedTests=false test`
+
+   Result: command exited 0. It proves the default and consumer-substitute authority beans,
+   transaction-validator move, correlation delegation, and all 16 real lifecycle scenarios use
+   freshly compiled upstream classes.
 
 ### Docker/Oracle limitation
 
@@ -219,15 +291,24 @@ the Oracle service/REST cancellation tests, the existing duplicate/stale concurr
 full clean install. Those tests compile and their non-Docker counterparts pass; they must be rerun
 when Docker Desktop can start the Oracle container.
 
+After the hardening changes, the complete PoC suite was retried with escalation. It ran 32 tests:
+11 non-Oracle tests passed and 21 Oracle-dependent tests errored from the same
+`Could not find a valid Docker environment` initialization failure. The four-class non-Oracle PoC
+gate was then run separately and all 11 tests passed. The focused parity test itself was also
+retried directly; Testcontainers failed before an assertion with the Docker Desktop HTTP 503
+response. Its committed transaction flow and complete fixture compile successfully, but this
+report intentionally does not claim a live database result.
+
 ## Completion evidence mapping
 
 - Transaction trace: `ProductionEmbeddedLifecycleIT` exercises real Operaton callbacks through
   the production common handler and asserts projection, audit/event, SLA, and rollback effects.
-- Failure injection: all 11 production-handler scenarios pass; the Oracle every-effect atomicity
+- Failure injection: all 16 production-handler scenarios pass; the Oracle every-effect atomicity
   test remains executable but runtime-blocked by Docker.
 - Duplicate/stale: executable handler unit coverage passes; the complete row/version/count Oracle
   snapshots compile and remain runtime-blocked.
-- Embedded real-engine lifecycle: all 64 embedded tests and all 11 production-handler tests pass.
-- Adapter boundary: the new non-vacuous ArchUnit dependency and bytecode-call rules pass.
+- Embedded real-engine lifecycle: all 60 embedded tests and all 16 production-handler tests pass.
+- Adapter boundary: core now owns persisted authority/backfill; the non-vacuous structural
+  ArchUnit rule and all four negative mutation fixtures pass.
 - Remote reuse parity: all four JSON record contracts pass; complete database-outcome parity is
   executable in the Oracle integration fixture and is runtime-blocked only by Docker Desktop.

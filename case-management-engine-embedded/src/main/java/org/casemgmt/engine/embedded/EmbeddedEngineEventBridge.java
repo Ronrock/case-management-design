@@ -6,8 +6,8 @@ import org.casemgmt.observation.EngineObservation;
 import org.casemgmt.observation.LegacyPlanModelObservationHandler;
 import org.casemgmt.observation.MilestoneObservation;
 import org.casemgmt.observation.ProcessObservation;
+import org.casemgmt.observation.ProcessCaseAuthority;
 import org.casemgmt.observation.UserTaskObservation;
-import org.casemgmt.projection.ActivityObservation;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.TaskService;
 import org.operaton.bpm.engine.impl.history.event.HistoricProcessInstanceEventEntity;
@@ -33,7 +33,7 @@ public final class EmbeddedEngineEventBridge {
 
     private final EngineObservationHandler observations;
     private final LegacyPlanModelObservationHandler planModelObservations;
-    private final ProcessCaseCorrelation correlation;
+    private final ProcessCaseAuthority correlation;
     private final ProcessActivityClassifier classifier;
     private final RepositoryService repository;
     private final TaskService tasks;
@@ -42,7 +42,7 @@ public final class EmbeddedEngineEventBridge {
 
     public EmbeddedEngineEventBridge(
             EngineObservationHandler observations,
-            ProcessCaseCorrelation correlation,
+            ProcessCaseAuthority correlation,
             ProcessActivityClassifier classifier,
             RepositoryService repository,
             TaskService tasks,
@@ -54,7 +54,7 @@ public final class EmbeddedEngineEventBridge {
     public EmbeddedEngineEventBridge(
             EngineObservationHandler observations,
             LegacyPlanModelObservationHandler planModelObservations,
-            ProcessCaseCorrelation correlation,
+            ProcessCaseAuthority correlation,
             ProcessActivityClassifier classifier,
             RepositoryService repository,
             TaskService tasks,
@@ -65,7 +65,7 @@ public final class EmbeddedEngineEventBridge {
 
     EmbeddedEngineEventBridge(
             EngineObservationHandler observations,
-            ProcessCaseCorrelation correlation,
+            ProcessCaseAuthority correlation,
             ProcessActivityClassifier classifier,
             RepositoryService repository,
             TaskService tasks,
@@ -77,7 +77,7 @@ public final class EmbeddedEngineEventBridge {
     EmbeddedEngineEventBridge(
             EngineObservationHandler observations,
             LegacyPlanModelObservationHandler planModelObservations,
-            ProcessCaseCorrelation correlation,
+            ProcessCaseAuthority correlation,
             ProcessActivityClassifier classifier,
             RepositoryService repository,
             TaskService tasks,
@@ -172,7 +172,7 @@ public final class EmbeddedEngineEventBridge {
         put(attributes, "name", event.getCurrentActivityName());
 
         ProcessActivityClassifier.Classification value = classification.orElseThrow();
-        if (value.kind() == ActivityObservation.Kind.MILESTONE) {
+        if (value.kind() == ProcessActivityClassifier.Kind.MILESTONE) {
             MilestoneObservation.EventType type = milestoneEvent(event.getEventName());
             if (type == null) {
                 return;
@@ -241,10 +241,12 @@ public final class EmbeddedEngineEventBridge {
             type = process.getDeleteReason() == null
                     ? ProcessObservation.EventType.COMPLETED
                     : ProcessObservation.EventType.TERMINATED;
-            if (type == ProcessObservation.EventType.TERMINATED
-                    && !EmbeddedEngineGateway.CASE_MANAGEMENT_CANCELLATION_MARKER.equals(
-                            process.getDeleteReason())) {
-                attributes.put("cancellationReason", process.getDeleteReason());
+            if (type == ProcessObservation.EventType.TERMINATED) {
+                var managed = EmbeddedCancellationReason.decode(process.getDeleteReason());
+                String reason = managed == null ? process.getDeleteReason() : managed.reason();
+                if (reason != null) {
+                    attributes.put("cancellationReason", reason);
+                }
             }
             engineDate = process.getEndTime();
         } else if (HistoryEvent.ACTIVITY_EVENT_TYPE_START.equals(process.getEventType())
@@ -284,7 +286,7 @@ public final class EmbeddedEngineEventBridge {
         put(attributes, "activityId", activity.getActivityId());
         put(attributes, "name", activity.getActivityName());
         var value = classification.orElseThrow();
-        if (value.kind() == ActivityObservation.Kind.MILESTONE) {
+        if (value.kind() == ProcessActivityClassifier.Kind.MILESTONE) {
             put(attributes, "milestoneId", value.milestoneId());
             apply(new MilestoneObservation(observationId(), 1, SOURCE, engineId,
                     activity.getTenantId(), caseId, activity.getProcessInstanceId(),

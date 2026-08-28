@@ -2,7 +2,6 @@ package org.casemgmt.starter;
 
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
-import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
 import org.casemgmt.engine.embedded.ProcessActivityClassifier;
 import org.casemgmt.engine.embedded.ProcessCaseCorrelation;
 import org.operaton.bpm.engine.ProcessEngine;

@@ -4,6 +4,9 @@ import org.casemgmt.engine.EngineException;
 import org.casemgmt.engine.StartProcessByKeyRequest;
 import org.casemgmt.engine.StartProcessRequest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.RuntimeService;
@@ -13,6 +16,7 @@ import org.operaton.bpm.engine.repository.ProcessDefinitionQuery;
 import org.operaton.bpm.engine.runtime.ProcessInstance;
 
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -25,7 +29,7 @@ import static org.mockito.Mockito.verify;
 class EmbeddedEngineGatewayResponseTest {
 
     @Test
-    void bodylessCancellationStillUsesAnExplicitEngineDeletionMarker() {
+    void bodylessCancellationUsesTheVersionedNullIntentEnvelope() {
         RuntimeService runtime = mock(RuntimeService.class);
         EmbeddedEngineGateway gateway = new EmbeddedEngineGateway(
                 mock(TaskService.class), runtime, mock(RepositoryService.class));
@@ -33,18 +37,39 @@ class EmbeddedEngineGatewayResponseTest {
         gateway.cancelProcess("process-42", null);
 
         verify(runtime).deleteProcessInstance("process-42",
-                EmbeddedEngineGateway.CASE_MANAGEMENT_CANCELLATION_MARKER);
+                "__casemgmt_cancel_v1__:N");
     }
 
-    @Test
-    void suppliedCancellationReasonIsPreservedForEngineHistory() {
+    @ParameterizedTest
+    @MethodSource("cancellationReasons")
+    void everyNullableUserReasonHasAnUnambiguousVersionedEngineEnvelope(
+            String reason, String expectedEnvelope) {
         RuntimeService runtime = mock(RuntimeService.class);
         EmbeddedEngineGateway gateway = new EmbeddedEngineGateway(
                 mock(TaskService.class), runtime, mock(RepositoryService.class));
 
-        gateway.cancelProcess("process-42", "customer withdrew");
+        gateway.cancelProcess("process-42", reason);
 
-        verify(runtime).deleteProcessInstance("process-42", "customer withdrew");
+        ArgumentCaptor<String> encoded = ArgumentCaptor.forClass(String.class);
+        verify(runtime).deleteProcessInstance(eq("process-42"), encoded.capture());
+        assertThat(encoded.getValue()).isEqualTo(expectedEnvelope);
+        if (reason != null) {
+            assertThat(encoded.getValue()).isNotEqualTo(reason);
+        }
+    }
+
+    private static Stream<Arguments> cancellationReasons() {
+        return Stream.of(
+                Arguments.of(null, "__casemgmt_cancel_v1__:N"),
+                Arguments.of("", "__casemgmt_cancel_v1__:S"),
+                Arguments.of("customer withdrew",
+                        "__casemgmt_cancel_v1__:SY3VzdG9tZXIgd2l0aGRyZXc"),
+                Arguments.of("case-management:cancelled-without-reason",
+                        "__casemgmt_cancel_v1__:SY2FzZS1tYW5hZ2VtZW50OmNhbmNlbGxlZC13aXRob3V0LXJlYXNvbg"),
+                Arguments.of("__casemgmt_cancel_v1__:",
+                        "__casemgmt_cancel_v1__:SX19jYXNlbWdtdF9jYW5jZWxfdjFfXzo"),
+                Arguments.of("reden: klant koos café ☕",
+                        "__casemgmt_cancel_v1__:ScmVkZW46IGtsYW50IGtvb3MgY2Fmw6kg4piV"));
     }
 
     @Test

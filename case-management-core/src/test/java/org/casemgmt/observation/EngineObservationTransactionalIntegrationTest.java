@@ -62,7 +62,6 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -179,24 +178,27 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
 
     @Test
     void directAndStoredObservationProduceTheSameCommittedDatabaseOutcome() throws Exception {
-        DatabaseState baseline = state();
-        TransactionTemplate transaction = new TransactionTemplate(
-                context.getBean(PlatformTransactionManager.class));
-        DatabaseState direct = transaction.execute(status -> {
-            handler.apply(observation);
-            DatabaseState outcome = stableBusinessOutcome(state());
-            status.setRollbackOnly();
-            return outcome;
-        });
-        assertThat(state()).isEqualTo(baseline);
+        applyAndCommit(observation);
+        DatabaseState direct = canonicalCommittedOutcome(state());
+        assertThat(direct.eventRows()).hasSize(1);
+        assertThat(direct.deliveryRows()).hasSize(1);
+
+        resetMutableCaseFixture();
 
         byte[] stored = STORED_JSON.writeValueAsBytes(observation);
         UserTaskObservation restored = STORED_JSON.readValue(stored,
                 UserTaskObservation.class);
-        handler.apply(restored);
+        applyAndCommit(restored);
+        DatabaseState serialized = canonicalCommittedOutcome(state());
 
         assertThat(restored).isEqualTo(observation);
-        assertThat(stableBusinessOutcome(state())).isEqualTo(direct);
+        assertThat(serialized).isEqualTo(direct);
+    }
+
+    private void applyAndCommit(EngineObservation value) {
+        TransactionTemplate transaction = new TransactionTemplate(
+                context.getBean(PlatformTransactionManager.class));
+        transaction.executeWithoutResult(status -> handler.apply(value));
     }
 
     @Test
@@ -243,6 +245,37 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                         OrchestrationMode.BPMN, BindingStatus.ACTIVE, identity, null,
                         now, now, null, "publisher"));
 
+        SlaRepository sla = new SlaRepository(jdbc);
+        sla.insertCalendar("calendar-1", Map.of());
+        sla.insertPolicy("policy-1", "Policy", null, "calendar-1");
+        sla.insertTarget("target-1", "policy-1", "taskAnchor", "Task anchor",
+                "PT1H", null, List.of(), List.of());
+        new WebhookRepository(jdbc).insert("webhook-1", TENANT_ID,
+                "http://localhost/atomicity", List.of("*"), "unused", 3);
+        seedMutableCaseFixture(now);
+    }
+
+    private void resetMutableCaseFixture() {
+        JdbcClient jdbc = jdbc();
+        jdbc.sql("""
+                DELETE FROM CM_WEBHOOK_DELIVERY WHERE EVENT_SEQ_ IN
+                  (SELECT SEQ_ FROM CM_EVENT WHERE SUBJECT_ = :caseId)""")
+                .param("caseId", CASE_ID).update();
+        for (String table : List.of("CM_EVENT", "CM_AUDIT_LOG",
+                "CM_APPLIED_ENGINE_OBSERVATION", "CM_MILESTONE", "CM_TASK",
+                "CM_PLAN_ITEM", "CM_SLA_RECORD", "CM_LINKED_PROCESS")) {
+            String column = "CM_EVENT".equals(table) ? "SUBJECT_" : "CASE_ID_";
+            jdbc.sql("DELETE FROM " + table + " WHERE " + column + " = :caseId")
+                    .param("caseId", CASE_ID).update();
+        }
+        jdbc.sql("DELETE FROM CM_CASE WHERE ID_ = :caseId")
+                .param("caseId", CASE_ID).update();
+        seedMutableCaseFixture(
+                OffsetDateTime.ofInstant(OCCURRED.minusSeconds(60), ZoneOffset.UTC));
+    }
+
+    private void seedMutableCaseFixture(OffsetDateTime now) {
+        JdbcClient jdbc = jdbc();
         new CaseRepository(jdbc).insert(new CaseInstance(CASE_ID, ENGINE_ID, TENANT_ID,
                 "claim:1", "claim", 1, "business-1", "Claim", CaseState.ACTIVE,
                 CasePriority.MEDIUM, null, null, "starter", "NONE", null, null,
@@ -271,16 +304,9 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                         'CURRENT')""")
                 .param("caseId", CASE_ID).param("processId", PROCESS_INSTANCE_ID)
                 .param("createdAt", now).update();
-
-        SlaRepository sla = new SlaRepository(jdbc);
-        sla.insertCalendar("calendar-1", Map.of());
-        sla.insertPolicy("policy-1", "Policy", null, "calendar-1");
-        sla.insertTarget("target-1", "policy-1", "taskAnchor", "Task anchor",
-                "PT1H", null, List.of(), List.of());
-        sla.insertRecord(new SlaRecord("sla-1", CASE_ID, "target-1", "RUNNING", now,
+        new SlaRepository(jdbc).insertRecord(new SlaRecord(
+                "sla-1", CASE_ID, "target-1", "RUNNING", now,
                 now.plusHours(1), null, null, null, 0, 0));
-        new WebhookRepository(jdbc).insert("webhook-1", TENANT_ID,
-                "http://localhost/atomicity", List.of("*"), "unused", 3);
     }
 
     private UserTaskObservation completedTask(String observationId) {
@@ -315,30 +341,87 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                         "OBSERVATION_ID_"),
                 tableRows("CM_AUDIT_LOG", "CASE_ID_", CASE_ID, "ID_"),
                 tableRows("CM_EVENT", "SUBJECT_", CASE_ID, "SEQ_"),
-                tableRows("CM_WEBHOOK_DELIVERY", "WEBHOOK_ID_", "webhook-1", "ID_"));
+                tableRows("CM_WEBHOOK_DELIVERY", "WEBHOOK_ID_", "webhook-1", "EVENT_SEQ_"));
     }
 
-    private static DatabaseState stableBusinessOutcome(DatabaseState state) {
+    private static DatabaseState canonicalCommittedOutcome(DatabaseState state) {
+        assertTimestampSemantics(state);
+        Map<Object, Object> eventOrdinals = new LinkedHashMap<>();
+        for (int index = 0; index < state.eventRows().size(); index++) {
+            eventOrdinals.put(state.eventRows().get(index).get("SEQ_"), "event-" + (index + 1));
+        }
+        List<Map<String, Object>> events = state.eventRows().stream().map(row ->
+                replacing(row, Map.of(
+                        "SEQ_", eventOrdinals.get(row.get("SEQ_")),
+                        "ID_", "generated-event-id"))).toList();
+        List<Map<String, Object>> deliveries = state.deliveryRows().stream().map(row -> {
+            Object eventOrdinal = eventOrdinals.get(row.get("EVENT_SEQ_"));
+            assertThat(eventOrdinal)
+                    .as("delivery EVENT_SEQ_ must reference a captured committed event")
+                    .isNotNull();
+            return replacing(row, Map.of(
+                    "ID_", "generated-delivery-id",
+                    "EVENT_SEQ_", eventOrdinal,
+                    "NEXT_ATTEMPT_AT_", "present-at-commit"));
+        }).toList();
         return new DatabaseState(
-                without(state.caseRows(), "UPDATED_AT_"),
-                without(state.planItemRows(), "UPDATED_AT_"),
-                without(state.taskRows(), "UPDATED_AT_"),
+                replaceColumn(state.caseRows(), "UPDATED_AT_", "after-created-at"),
+                state.planItemRows(),
+                state.taskRows(),
                 state.linkedProcessRows(),
                 state.slaRows(),
-                without(state.appliedRows(), "CLAIM_TOKEN_", "CLAIMED_AT_", "APPLIED_AT_"),
-                without(state.auditRows(), "ID_", "TS_"),
-                without(state.eventRows(), "SEQ_", "ID_", "TIME_"),
-                without(state.deliveryRows(), "ID_", "EVENT_SEQ_", "NEXT_ATTEMPT_AT_"));
+                state.appliedRows().stream().map(row -> replacing(row, Map.of(
+                        "CLAIM_TOKEN_", "generated-claim-token",
+                        "CLAIMED_AT_", "claimed-before-applied",
+                        "APPLIED_AT_", "applied-after-claim"))).toList(),
+                state.auditRows().stream().map(row -> replacing(row, Map.of(
+                        "ID_", "generated-audit-id",
+                        "TS_", "present-at-commit"))).toList(),
+                events,
+                deliveries);
     }
 
-    private static List<Map<String, Object>> without(
-            List<Map<String, Object>> rows, String... volatileColumns) {
-        Set<String> excluded = Set.of(volatileColumns);
-        return rows.stream().map(row -> {
-            Map<String, Object> stable = new LinkedHashMap<>(row);
-            excluded.forEach(stable::remove);
-            return Map.copyOf(stable);
-        }).toList();
+    private static void assertTimestampSemantics(DatabaseState state) {
+        java.util.stream.Stream.of(state.caseRows(), state.planItemRows(), state.taskRows())
+                .flatMap(List::stream)
+                .forEach(row -> {
+                    assertThat(row.get("CREATED_AT_")).isNotEqualTo(NullValue.INSTANCE);
+                    assertThat(row.get("UPDATED_AT_")).isNotEqualTo(NullValue.INSTANCE);
+                    assertThat(Instant.parse(row.get("UPDATED_AT_").toString()))
+                            .isAfterOrEqualTo(Instant.parse(row.get("CREATED_AT_").toString()));
+                });
+        state.appliedRows().forEach(row -> {
+            assertThat(row.get("CLAIM_TOKEN_")).isNotEqualTo(NullValue.INSTANCE);
+            assertThat(row.get("CLAIMED_AT_")).isNotEqualTo(NullValue.INSTANCE);
+            assertThat(row.get("APPLIED_AT_")).isNotEqualTo(NullValue.INSTANCE);
+            assertThat(Instant.parse(row.get("APPLIED_AT_").toString()))
+                    .isAfterOrEqualTo(Instant.parse(row.get("CLAIMED_AT_").toString()));
+            assertThat(row.get("FAILED_AT_")).isEqualTo(NullValue.INSTANCE);
+            assertThat(row.get("IGNORED_AT_")).isEqualTo(NullValue.INSTANCE);
+        });
+        state.auditRows().forEach(row ->
+                assertThat(row.get("TS_")).isNotEqualTo(NullValue.INSTANCE));
+        state.eventRows().forEach(row ->
+                assertThat(row.get("TIME_")).isEqualTo(OCCURRED.toString()));
+        state.deliveryRows().forEach(row -> {
+            assertThat(row.get("NEXT_ATTEMPT_AT_")).isNotEqualTo(NullValue.INSTANCE);
+            assertThat(row.get("CLAIM_TOKEN_")).isEqualTo(NullValue.INSTANCE);
+            assertThat(row.get("CLAIMED_AT_")).isEqualTo(NullValue.INSTANCE);
+            assertThat(row.get("DELIVERED_AT_")).isEqualTo(NullValue.INSTANCE);
+            assertThat(row.get("FAILED_AT_")).isEqualTo(NullValue.INSTANCE);
+        });
+    }
+
+    private static List<Map<String, Object>> replaceColumn(
+            List<Map<String, Object>> rows, String column, Object replacement) {
+        return rows.stream().map(row -> replacing(row, Map.of(column, replacement))).toList();
+    }
+
+    private static Map<String, Object> replacing(
+            Map<String, Object> row, Map<String, Object> replacements) {
+        Map<String, Object> canonical = new LinkedHashMap<>(row);
+        canonical.putAll(replacements);
+        return Map.copyOf(canonical);
     }
 
     private List<Map<String, Object>> tableRows(String table, String filterColumn,

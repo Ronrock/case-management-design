@@ -7,7 +7,6 @@ import org.casemgmt.observation.MilestoneObservation;
 import org.casemgmt.observation.LegacyPlanModelObservationHandler;
 import org.casemgmt.observation.ProcessObservation;
 import org.casemgmt.observation.UserTaskObservation;
-import org.casemgmt.projection.ActivityObservation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -138,12 +137,12 @@ class EmbeddedEngineEventBridgeTest {
 
         when(classifier.classify("definition-1", "assessment-stage"))
                 .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
-                        ActivityObservation.Kind.STAGE, null)));
+                        ProcessActivityClassifier.Kind.STAGE, null)));
         bridge.onHistory(cancelledActivity("assessment-stage", "Assessment", "stage-instance"));
 
         when(classifier.classify("definition-1", "approval-milestone"))
                 .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
-                        ActivityObservation.Kind.MILESTONE, "approved")));
+                        ProcessActivityClassifier.Kind.MILESTONE, "approved")));
         bridge.onHistory(cancelledActivity(
                 "approval-milestone", "Approval", "milestone-instance"));
 
@@ -172,13 +171,13 @@ class EmbeddedEngineEventBridgeTest {
     void capturesCanonicalStageAndMilestoneFixtures() {
         when(classifier.classify("definition-1", "assessment-stage"))
                 .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
-                        ActivityObservation.Kind.STAGE, null)));
+                        ProcessActivityClassifier.Kind.STAGE, null)));
         bridge.onExecution(execution("assessment-stage", "Assessment", "stage-instance", "start"));
         bridge.onExecution(execution("assessment-stage", "Assessment", "stage-instance", "end"));
 
         when(classifier.classify("definition-1", "approved-milestone"))
                 .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
-                        ActivityObservation.Kind.MILESTONE, "approved")));
+                        ProcessActivityClassifier.Kind.MILESTONE, "approved")));
         bridge.onExecution(execution("approved-milestone", "Approved", "milestone-instance", "end"));
 
         ArgumentCaptor<EngineObservation> observations =
@@ -233,9 +232,9 @@ class EmbeddedEngineEventBridgeTest {
     }
 
     @Test
-    void internalBodylessCancellationMarkerClassifiesTerminationWithoutBecomingUserData() {
+    void internalBodylessCancellationEnvelopeClassifiesTerminationWithoutBecomingUserData() {
         bridge.onHistory(processHistory("process-1", "definition-1", "complaint-process",
-                "tenant-a", EmbeddedEngineGateway.CASE_MANAGEMENT_CANCELLATION_MARKER, 44));
+                "tenant-a", "__casemgmt_cancel_v1__:N", 44));
 
         ArgumentCaptor<EngineObservation> observation =
                 ArgumentCaptor.forClass(EngineObservation.class);
@@ -246,6 +245,45 @@ class EmbeddedEngineEventBridgeTest {
                             ProcessObservation.EventType.TERMINATED);
                     assertThat(process.attributes()).doesNotContainKey("cancellationReason");
                 });
+    }
+
+    @Test
+    void internalReasonEnvelopeRestoresEmptyMarkerPrefixAndUnicodeReasonsExactly() {
+        bridge.onHistory(processHistory("process-1", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:S", 45));
+        bridge.onHistory(processHistory("process-2", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:SY2FzZS1tYW5hZ2VtZW50OmNhbmNlbGxlZC13aXRob3V0LXJlYXNvbg", 46));
+        bridge.onHistory(processHistory("process-3", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:SX19jYXNlbWdtdF9jYW5jZWxfdjFfXzo", 47));
+        bridge.onHistory(processHistory("process-4", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:ScmVkZW46IGtsYW50IGtvb3MgY2Fmw6kg4piV", 48));
+
+        ArgumentCaptor<EngineObservation> observations =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler, org.mockito.Mockito.times(4)).apply(observations.capture());
+        assertThat(observations.getAllValues())
+                .extracting(value -> value.attributes().get("cancellationReason"))
+                .containsExactly("", "case-management:cancelled-without-reason",
+                        "__casemgmt_cancel_v1__:", "reden: klant koos café ☕");
+    }
+
+    @Test
+    void externalLegacyMarkerAndReservedPrefixRemainUserReasons() {
+        bridge.onHistory(processHistory("process-1", "definition-1", "complaint-process",
+                "tenant-a", "case-management:cancelled-without-reason", 49));
+        bridge.onHistory(processHistory("process-2", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:", 50));
+        bridge.onHistory(processHistory("process-3", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:S%%%external", 51));
+
+        ArgumentCaptor<EngineObservation> observations =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler, org.mockito.Mockito.times(3)).apply(observations.capture());
+        assertThat(observations.getAllValues())
+                .extracting(value -> value.attributes().get("cancellationReason"))
+                .containsExactly("case-management:cancelled-without-reason",
+                        "__casemgmt_cancel_v1__:",
+                        "__casemgmt_cancel_v1__:S%%%external");
     }
 
     @Test

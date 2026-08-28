@@ -8,7 +8,6 @@ import org.casemgmt.domain.CaseState;
 import org.casemgmt.domain.PlanItemDefinition;
 import org.casemgmt.domain.PlanItemType;
 import org.casemgmt.domain.TaskState;
-import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
 import org.casemgmt.event.EventTypes;
 import org.casemgmt.observation.SlaLifecyclePort;
 import org.casemgmt.observation.EngineObservation;
@@ -39,6 +38,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.operaton.bpm.engine.ProcessEngineException;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.RuntimeService;
@@ -67,6 +69,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -460,6 +463,38 @@ class ProductionEmbeddedLifecycleIT {
         assertThat(eventData(created.id(), EventTypes.CASE_CANCELLED))
                 .singleElement()
                 .satisfies(data -> assertThat(data).containsEntry("reason", ""));
+    }
+
+    @ParameterizedTest(name = "{0} cancellation reason survives engine history")
+    @MethodSource("cancellationReasonFixtures")
+    void publicCancellationKeepsCaseAndEventReasonParityForEveryStringEdge(
+            String fixture, String reason) {
+        var created = caseService.create("production-root", TENANT,
+                "business-api-cancel-reason-" + fixture, "API cancellation reason " + fixture,
+                CasePriority.MEDIUM, Map.of(), ACTOR);
+
+        var cancelled = caseService.cancel(created.id(), cases.require(created.id()).version(),
+                reason, ACTOR);
+
+        assertThat(cancelled.state()).isEqualTo(CaseState.CANCELLED);
+        assertThat(cancelled.cancelReason()).isEqualTo(reason);
+        assertThat(cases.require(created.id()).cancelReason()).isEqualTo(reason);
+        assertThat(observationCount(created.id(), "PROCESS", "TERMINATED")).isEqualTo(1);
+        assertThat(observationCount(created.id(), "PROCESS", "COMPLETED")).isZero();
+        assertThat(eventData(created.id(), EventTypes.CASE_CANCELLED))
+                .singleElement()
+                .satisfies(data -> assertThat(data)
+                        .containsEntry("reason", reason == null ? "" : reason)
+                        .doesNotContainKey("cancellationReason"));
+    }
+
+    private static Stream<Arguments> cancellationReasonFixtures() {
+        return Stream.of(
+                Arguments.of("null", null),
+                Arguments.of("empty", ""),
+                Arguments.of("old-marker", "case-management:cancelled-without-reason"),
+                Arguments.of("reserved-prefix", "__casemgmt_cancel_v1__:"),
+                Arguments.of("unicode", "reden: klant koos café ☕"));
     }
 
     @Test

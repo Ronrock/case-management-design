@@ -1,13 +1,13 @@
 package org.casemgmt.engine.embedded;
 
-import org.casemgmt.projection.ActivityObservation;
-
 import java.util.Optional;
 import java.util.List;
 
 public interface ProcessActivityClassifier {
 
-    record Classification(ActivityObservation.Kind kind, String milestoneId) { }
+    enum Kind { STAGE, MILESTONE }
+
+    record Classification(Kind kind, String milestoneId) { }
     record TaskMetadata(List<String> candidateGroups, String formKey) {
         public TaskMetadata {
             candidateGroups = candidateGroups == null ? List.of() : List.copyOf(candidateGroups);

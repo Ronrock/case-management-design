@@ -1,4 +1,4 @@
-package org.casemgmt.engine.embedded;
+package org.casemgmt.starter;
 
 import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
 import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration;

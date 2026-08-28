@@ -1,4 +1,4 @@
-package org.casemgmt.engine.embedded;
+package org.casemgmt.starter;
 
 import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
@@ -7,7 +7,6 @@ import org.springframework.jdbc.datasource.LazyConnectionDataSourceProxy;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
-import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
 

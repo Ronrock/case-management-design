@@ -11,6 +11,8 @@ import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.event.WebhookSecretStore;
 import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.EngineProcessAuthorityLookup;
+import org.casemgmt.observation.ProcessCaseAuthority;
 import org.casemgmt.repo.IdempotencyRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
@@ -195,6 +197,8 @@ class AutoConfigurationTest {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(EmbeddedEngineEventBridge.class);
                     assertThat(context).hasSingleBean(EngineObservationHandler.class);
+                    assertThat(context).hasSingleBean(EngineProcessAuthorityLookup.class);
+                    assertThat(context).hasSingleBean(ProcessCaseAuthority.class);
                     assertThat(context.getBean(ProcessCaseCorrelation.class))
                             .isInstanceOf(PersistedProcessCaseCorrelation.class);
                 });
@@ -222,6 +226,7 @@ class AutoConfigurationTest {
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context.getBean(ProcessCaseCorrelation.class)).isSameAs(correlation);
+                    assertThat(context).doesNotHaveBean(EngineProcessAuthorityLookup.class);
                     assertThat(context.getBean(ProcessActivityClassifier.class)).isSameAs(classifier);
                     assertThat(context.getBean(EmbeddedEngineEventBridge.class)).isSameAs(bridge);
                 });

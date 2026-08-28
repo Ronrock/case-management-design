@@ -3,7 +3,7 @@ package org.casemgmt.starter;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
-import org.casemgmt.engine.embedded.EmbeddedTransactionResourceValidator;
+import org.casemgmt.engine.embedded.OperatonProcessAuthorityLookup;
 import org.casemgmt.engine.embedded.ProcessCaseCorrelation;
 import org.casemgmt.engine.embedded.PersistedProcessCaseCorrelation;
 import org.casemgmt.engine.embedded.EmbeddedOrchestrationDeploymentPort;
@@ -11,7 +11,10 @@ import org.casemgmt.engine.embedded.ProcessActivityClassifier;
 import org.casemgmt.engine.embedded.RepositoryProcessActivityClassifier;
 import org.casemgmt.orchestration.OrchestrationDeploymentPort;
 import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.EngineProcessAuthorityLookup;
 import org.casemgmt.observation.LegacyPlanModelObservationHandler;
+import org.casemgmt.observation.PersistedProcessCaseAuthority;
+import org.casemgmt.observation.ProcessCaseAuthority;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
@@ -106,15 +109,21 @@ public class EmbeddedEngineAutoConfiguration {
         }
 
         @Bean
-        @ConditionalOnMissingBean(ProcessCaseCorrelation.class)
+        @ConditionalOnMissingBean({EngineProcessAuthorityLookup.class, ProcessCaseAuthority.class})
+        EngineProcessAuthorityLookup engineProcessAuthorityLookup(
+                RuntimeService runtimeService, RepositoryService repositoryService) {
+            return new OperatonProcessAuthorityLookup(runtimeService, repositoryService);
+        }
+
+        @Bean
+        @ConditionalOnMissingBean(ProcessCaseAuthority.class)
         ProcessCaseCorrelation processCaseCorrelation(
-                RuntimeService runtimeService,
-                RepositoryService repositoryService,
+                EngineProcessAuthorityLookup engineLookup,
                 LinkedProcessRepository linkedProcesses,
                 CaseRepository cases,
                 CaseDefinitionVersionBindingRepository bindings) {
-            return new PersistedProcessCaseCorrelation(runtimeService, repositoryService,
-                    linkedProcesses, cases, bindings);
+            return new PersistedProcessCaseCorrelation(new PersistedProcessCaseAuthority(
+                    engineLookup, linkedProcesses, cases, bindings));
         }
 
         @Bean
@@ -122,7 +131,7 @@ public class EmbeddedEngineAutoConfiguration {
         EmbeddedEngineEventBridge embeddedEngineEventBridge(
                 EngineObservationHandler observations,
                 LegacyPlanModelObservationHandler planModelObservations,
-                ProcessCaseCorrelation correlation,
+                ProcessCaseAuthority correlation,
                 ProcessActivityClassifier classifier, RepositoryService repositoryService,
                 TaskService taskService, CaseManagementProperties properties) {
             // Do not guard this with @ConditionalOnBean(EngineObservationHandler.class).

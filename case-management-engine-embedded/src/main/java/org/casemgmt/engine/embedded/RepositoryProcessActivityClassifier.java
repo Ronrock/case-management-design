@@ -1,6 +1,5 @@
 package org.casemgmt.engine.embedded;
 
-import org.casemgmt.projection.ActivityObservation;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.model.bpmn.instance.SubProcess;
 import org.operaton.bpm.model.xml.instance.ModelElementInstance;
@@ -27,11 +26,11 @@ public final class RepositoryProcessActivityClassifier implements ProcessActivit
         if (element == null) return Optional.empty();
         String milestoneId = element.getAttributeValueNs(CASE_MANAGEMENT_NAMESPACE, "milestoneId");
         if (milestoneId != null && !milestoneId.isBlank()) {
-            return Optional.of(new Classification(ActivityObservation.Kind.MILESTONE, milestoneId));
+            return Optional.of(new Classification(Kind.MILESTONE, milestoneId));
         }
         String stage = element.getAttributeValueNs(CASE_MANAGEMENT_NAMESPACE, "stage");
         if (element instanceof SubProcess && "true".equalsIgnoreCase(stage)) {
-            return Optional.of(new Classification(ActivityObservation.Kind.STAGE, null));
+            return Optional.of(new Classification(Kind.STAGE, null));
         }
         return Optional.empty();
     }

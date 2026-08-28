@@ -1,6 +1,5 @@
 package org.casemgmt.engine.embedded;
 
-import org.casemgmt.projection.ActivityObservation;
 import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.model.bpmn.Bpmn;
@@ -44,10 +43,10 @@ class RepositoryProcessActivityClassifierTest {
                         List.of("reviewers", "managers"), "review-form"));
         assertThat(classifier.classify("definition", "assessment"))
                 .contains(new ProcessActivityClassifier.Classification(
-                        ActivityObservation.Kind.STAGE, null));
+                        ProcessActivityClassifier.Kind.STAGE, null));
         assertThat(classifier.classify("definition", "approved"))
                 .contains(new ProcessActivityClassifier.Classification(
-                        ActivityObservation.Kind.MILESTONE, "approved"));
+                        ProcessActivityClassifier.Kind.MILESTONE, "approved"));
     }
 
     @Test
