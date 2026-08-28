@@ -128,6 +128,29 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                       ON CM_APPLIED_ENGINE_OBSERVATION (
                         CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END,
                         TENANT_ID_, FINGERPRINT_)""");
+        } else if (partialState != PartialState.TABLE_ONLY) {
+            if (partialState != PartialState.ONLY_OLD_TIMESTAMP) {
+                String values = partialState == PartialState.ONLY_FINAL_STATUS
+                        || partialState == PartialState.BOTH_FINAL
+                        ? "'CLAIMED','APPLIED','IGNORED_STALE','FAILED'"
+                        : "'CLAIMED','APPLIED','FAILED'";
+                execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
+                        + "ADD CONSTRAINT CK_CM_AEO_STATUS CHECK (STATUS_ IN (" + values + "))");
+            }
+            if (partialState != PartialState.ONLY_FINAL_STATUS) {
+                String check = partialState == PartialState.BOTH_FINAL
+                        ? "CHECK ((STATUS_ != 'APPLIED' OR APPLIED_AT_ IS NOT NULL) "
+                        + "AND (STATUS_ != 'IGNORED_STALE' OR IGNORED_AT_ IS NOT NULL) "
+                        + "AND (STATUS_ != 'FAILED' OR FAILED_AT_ IS NOT NULL))"
+                        : "CHECK ((STATUS_ != 'APPLIED' OR APPLIED_AT_ IS NOT NULL) "
+                        + "AND (STATUS_ != 'FAILED' OR FAILED_AT_ IS NOT NULL))";
+                if (partialState == PartialState.BOTH_FINAL) {
+                    execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
+                            + "ADD IGNORED_AT_ TIMESTAMP WITH TIME ZONE");
+                }
+                execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
+                        + "ADD CONSTRAINT CK_CM_AEO_STATUS_TS " + check);
+            }
         }
     }
 
@@ -193,6 +216,23 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
             case FINAL_STATUS_CONSTRAINT_WRONG -> {
                 execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
                         + "ADD CONSTRAINT CK_CM_AEO_STATUS CHECK (STATUS_ IN ('CLAIMED'))");
+                yield null;
+            }
+            case FINAL_STATUS_CONSTRAINT_DISABLED -> {
+                execute(scenarioDataSource, "ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION "
+                        + "ADD CONSTRAINT CK_CM_AEO_STATUS CHECK (STATUS_ IN "
+                        + "('CLAIMED','APPLIED','FAILED')) DISABLE NOVALIDATE");
+                yield null;
+            }
+            case PLAN_PROCESS_INDEX_WRONG -> {
+                execute(scenarioDataSource, "CREATE INDEX IX_CM_PI_PROC_INST "
+                        + "ON CM_PLAN_ITEM(PROC_INST_ID_)");
+                yield null;
+            }
+            case TASK_PROCESS_INDEX_TRAILING -> {
+                execute(scenarioDataSource, "ALTER TABLE CM_TASK ADD PROC_INST_ID_ VARCHAR2(128)");
+                execute(scenarioDataSource, "CREATE INDEX IX_CM_TASK_PROC_INST "
+                        + "ON CM_TASK(CASE_ID_,PROC_INST_ID_,ID_)");
                 yield null;
             }
             case ENGINE_ENTITY_INDEX_TRAILING -> {
@@ -341,7 +381,11 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
     private enum PartialState {
         EMPTY_SCHEMA,
         TABLE_ONLY,
-        SOME_CONSTRAINTS_AND_INDEXES
+        SOME_CONSTRAINTS_AND_INDEXES,
+        BOTH_OLD,
+        ONLY_OLD_TIMESTAMP,
+        ONLY_FINAL_STATUS,
+        BOTH_FINAL
     }
 
     private enum MalformedState {
@@ -367,6 +411,15 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                 "cm-engine-observation-hardening-structure-guard",
                 "Engine observation hardening structure is incompatible"),
         FINAL_STATUS_CONSTRAINT_WRONG(
+                "cm-engine-observation-hardening-structure-guard",
+                "Engine observation hardening structure is incompatible"),
+        FINAL_STATUS_CONSTRAINT_DISABLED(
+                "cm-engine-observation-hardening-structure-guard",
+                "Engine observation hardening structure is incompatible"),
+        PLAN_PROCESS_INDEX_WRONG(
+                "cm-engine-observation-hardening-structure-guard",
+                "Engine observation hardening structure is incompatible"),
+        TASK_PROCESS_INDEX_TRAILING(
                 "cm-engine-observation-hardening-structure-guard",
                 "Engine observation hardening structure is incompatible"),
         ENGINE_ENTITY_INDEX_TRAILING(

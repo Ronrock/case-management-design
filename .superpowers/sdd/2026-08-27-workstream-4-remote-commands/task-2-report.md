@@ -273,3 +273,53 @@ follow-up closes the persistence review without changing dispatcher or REST beha
   `Status 503: Docker Desktop is unable to start` before Oracle/Testcontainers startup. Therefore
   the new Oracle transaction, concurrency, migration-restart, and malformed-structure methods are
   compile-verified but not runtime-executed in this environment.
+
+## Review hardening round 2
+
+Commit: `fix: make command storage fail closed`
+
+The final hash is recorded in the handoff. This follow-up addresses the second independent
+persistence review.
+
+- Submission now returns an internal `CREATED`, `REPLAY`, `IDEMPOTENCY_CONFLICT`, or
+  `OPERATION_CONFLICT` classification from the transactional callback. Domain conflict exceptions
+  are raised only after the nested REQUIRED callback returns, so catching them inside a caller's
+  outer transaction does not mark that transaction rollback-only. Oracle tests write before and
+  after both conflict types and verify the outer commit.
+- A short-lived creation token in the obsolete PoC claim column identifies the actual winner of a
+  concurrent insert and is cleared before the transaction returns. The winner is `CREATED`; exact
+  same-command and cross-source losers are `REPLAY`; every same-ID request still undergoes the
+  complete canonical intent comparison.
+- Due claims and expired recovery select base-table rows with Oracle `FOR UPDATE SKIP LOCKED`.
+  Policy rehydration and CAS persistence occur while that exact row lock is held. Tests hold one
+  candidate from another connection and prove unrelated due/recovery work proceeds, then prove the
+  skipped row is handled after unlock. Corrupt rows still fail and roll back the whole claimed batch.
+- Migrated legacy payloads use `DBMS_CRYPTO.HASH` over the full CLOB, removing the old 32,767-byte
+  prefix ambiguity. An executable migration test uses a multi-byte payload above that boundary and
+  compares Oracle's digest with Java's full UTF-8 SHA-256 before repository rehydration.
+- Rehydration now validates the complete native-versus-legacy tuple. All five old statuses are
+  checked against raw payload/error/claim evidence, old attempts, due/terminal timestamps, status
+  mapping, exact migration decision/update timestamps, and DONE-only provenance. Only a retained
+  `CLAIMED` row may carry the complete raw claim token/time pair. Native rows reject every retained
+  legacy artifact and require dispatched-time coherence. Forged fixtures cover every historical
+  status plus claim-tuple and migration-timestamp corruption.
+- Production guards now require enabled/validated constraints on the exact target table and
+  valid/visible indexes with exact ownership, uniqueness, expressions, count, and order. Guards are
+  rerun on restart so disabled/NOVALIDATE, unusable, trailing-column, and same-name/wrong-table
+  partial states halt before a create can be marked ran.
+- The Workstream 3 restart guard now accepts every truthful status-constraint deployment prefix
+  (both old, either missing, both missing, either final, or both final) while rejecting wrong,
+  disabled, or unvalidated definitions. It also validates both plan/task process indexes and all
+  later observation columns and the engine/entity index exactly.
+
+Verification:
+
+- all 95 core test sources compile;
+- focused static/policy/durable/canonical tests pass with zero failures;
+- the final focused static/policy/durable/canonical run executed 1,429 tests with zero
+  failures/errors/skips;
+- Liquibase validates the complete master changelog;
+- `git diff --check` is clean;
+- the focused Oracle repository and both restart suites were attempted with escalated Docker
+  access. Docker Desktop again returned `Status 503: Docker Desktop is unable to start` before the
+  Testcontainers/Oracle startup gate, so the new Oracle test methods remain compile-verified only.

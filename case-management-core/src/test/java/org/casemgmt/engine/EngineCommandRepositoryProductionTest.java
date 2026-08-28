@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.sql.Connection;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -55,6 +56,12 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
                 "command-c", "operation-c", "key-a", Map.of(
                         "engineTaskId", "task-a", "variables", Map.of("a", 2)))))
                 .isInstanceOf(EngineCommandRepository.IdempotencyConflictException.class);
+        assertThatThrownBy(() -> repository.submit(request(
+                "command-a", "operation-a", "key-a", Map.of("engineTaskId", "changed"))))
+                .isInstanceOf(EngineCommandRepository.IdempotencyConflictException.class);
+        assertThatThrownBy(() -> repository.submit(request(
+                "command-a", "operation-a", "different-key")))
+                .isInstanceOf(EngineCommandRepository.OperationConflictException.class);
         var differentIntent = new EngineCommandRepository.ProductionCommandRequest(
                 "command-d", "case-a", "tenant-a", "operation-d", "key-a",
                 EngineCommand.Type.CANCEL_PROCESS,
@@ -101,6 +108,45 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
                 SELECT STATUS_ || ':' || ROW_VERSION_ FROM CM_ENGINE_COMMAND WHERE ID_='command-a'
                 """).query(String.class).single();
         assertThat(row).isEqualTo("PENDING:0");
+    }
+
+    @Test
+    void claimSkipsALockedCandidateAndStillClaimsUnrelatedDueWork() throws Exception {
+        repository.submit(request("command-a", "operation-a", "key-a"));
+        repository.submit(request("command-b", "operation-b", "key-b"));
+        try (Connection blocker = dataSource().getConnection()) {
+            blocker.setAutoCommit(false);
+            blocker.prepareStatement("SELECT ID_ FROM CM_ENGINE_COMMAND "
+                    + "WHERE ID_='command-a' FOR UPDATE").executeQuery();
+
+            var claimed = repository.claimDue("worker-b", 1, NOW, Duration.ofMinutes(5));
+
+            assertThat(claimed).singleElement().satisfies(lease ->
+                    assertThat(lease.command().commandId()).isEqualTo("command-b"));
+            blocker.rollback();
+        }
+        assertThat(repository.require("tenant-a", "operation-a").state()
+                .committedDecision().status()).isEqualTo(EngineCommandStatus.PENDING);
+    }
+
+    @Test
+    void recoverySkipsALockedExpiredLeaseAndRecoversItAfterUnlock() throws Exception {
+        repository.submit(request("command-a", "operation-a", "key-a"));
+        repository.submit(request("command-b", "operation-b", "key-b"));
+        assertThat(repository.claimDue("worker-a", 2, NOW, Duration.ofMinutes(5))).hasSize(2);
+        try (Connection blocker = dataSource().getConnection()) {
+            blocker.setAutoCommit(false);
+            blocker.prepareStatement("SELECT ID_ FROM CM_ENGINE_COMMAND "
+                    + "WHERE ID_='command-a' FOR UPDATE").executeQuery();
+            assertThat(repository.recoverExpiredLeases(NOW.plusMinutes(6))).isEqualTo(1);
+            assertThat(repository.require("tenant-a", "operation-a").state()
+                    .committedDecision().status()).isEqualTo(EngineCommandStatus.DISPATCHING);
+            blocker.rollback();
+        }
+        assertThat(repository.recoverExpiredLeases(NOW.plusMinutes(6))).isEqualTo(1);
+        assertThat(repository.require("tenant-a", "operation-a").state()
+                .committedDecision().status())
+                .isEqualTo(EngineCommandStatus.AWAITING_CONFIRMATION);
     }
 
     @Test
@@ -263,10 +309,18 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
                     .isInstanceOf(EngineCommandRepository.IdempotencyConflictException.class);
             jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('after-conflict')").update();
         });
+        transaction.executeWithoutResult(status -> {
+            jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('before-operation')").update();
+            assertThatThrownBy(() -> repository.submit(request(
+                    "command-d", "operation-a", "different-key")))
+                    .isInstanceOf(EngineCommandRepository.OperationConflictException.class);
+            jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('after-operation')").update();
+        });
 
         assertThat(jdbc.sql("SELECT ID_ FROM CM_COMMAND_TX_PROBE ORDER BY ID_")
                 .query(String.class).list()).containsExactly(
-                "after-conflict", "after-replay", "before-conflict", "before-replay");
+                "after-conflict", "after-operation", "after-replay",
+                "before-conflict", "before-operation", "before-replay");
     }
 
     @Test
@@ -278,6 +332,22 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
                     request("command-a", "operation-a", "key-a", Map.of("n", 1))));
             var second = pool.submit(() -> concurrentSubmit(ready, go,
                     request("command-b", "operation-b", "key-a", Map.of("n", 1.0))));
+            ready.await();
+            go.countDown();
+            assertThat(java.util.List.of(first.get(), second.get()))
+                    .containsExactlyInAnyOrder("CREATED", "REPLAY");
+        }
+        assertThat(repository.countCommands()).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentSameCommandIdClassifiesExactlyOneLoserAsReplay() throws Exception {
+        var ready = new CountDownLatch(2);
+        var go = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(2)) {
+            var request = request("command-a", "operation-a", "key-a", Map.of("n", 1));
+            var first = pool.submit(() -> concurrentSubmit(ready, go, request));
+            var second = pool.submit(() -> concurrentSubmit(ready, go, request));
             ready.await();
             go.countDown();
             assertThat(java.util.List.of(first.get(), second.get()))

@@ -34,7 +34,8 @@ public class ProductionEngineCommandStore {
             LEGACY_MIGRATION_REF_, LEGACY_MIGRATED_AT_, LEGACY_FAILURE_COUNT_,
             LEASE_TOKEN_, LEASE_OWNER_, LEASE_EXPIRES_AT_, DISPATCHED_AT_, CONFIRMED_AT_,
             FAILED_AT_, RAW_LEGACY_PAYLOAD_, RAW_LEGACY_ERROR_, RAW_LEGACY_CLAIM_TOKEN_,
-            RAW_LEGACY_CLAIMED_AT_, ORIGINAL_STATUS_, CREATED_AT_, UPDATED_AT_""";
+            RAW_LEGACY_CLAIMED_AT_, ORIGINAL_STATUS_, ATTEMPTS_, LAST_ERROR_, CLAIM_TOKEN_,
+            CLAIMED_AT_, CREATED_AT_, UPDATED_AT_""";
 
     /** Compatibility lease used until Task 3 passes explicit lease ownership to the dispatcher. */
     static final Duration CLAIM_LEASE = Duration.ofMinutes(5);
@@ -156,9 +157,8 @@ public class ProductionEngineCommandStore {
     /** Inserts a production operation or returns the original same-payload idempotent result. */
     public Submission submit(ProductionCommandRequest request) {
         Objects.requireNonNull(request, "request");
-        return inTransaction(() -> {
-            boolean knownExisting = findByIdempotency(
-                    request.tenantId(), request.idempotencyKey()).isPresent();
+        SubmissionResult result = inTransaction(() -> {
+            String creationToken = UUID.randomUUID().toString();
             jdbc.sql("""
                         BEGIN
                         INSERT INTO CM_ENGINE_COMMAND
@@ -168,12 +168,13 @@ public class ProductionEngineCommandStore {
                            STATUS_, ATTEMPTS_, NEXT_ATTEMPT_AT_, CREATED_AT_, UPDATED_AT_,
                            DECIDED_AT_, TOTAL_DISPATCH_ATTEMPTS_, AUTO_ATTEMPTS_, BUDGET_EPOCH_,
                            AUTO_BUDGET_RESET_, ROW_VERSION_, ACTION_COUNT_, ACTION_HIGH_WATER_,
-                           ACTION_RESET_COUNT_, ACTION_CANCEL_COUNT_)
+                           ACTION_RESET_COUNT_, ACTION_CANCEL_COUNT_, CLAIM_TOKEN_)
                         VALUES
                           (:id, :caseId, :tenantId, :operationId, :idempotencyKey,
                            :payloadDigest, :type, :payload, :target, :correlation, :patch,
                            :expectedCaseVersion, 'PENDING', 0, NULL, :submittedAt,
-                           :submittedAt, :submittedAt, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+                           :submittedAt, :submittedAt, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                           :creationToken);
                         EXCEPTION WHEN DUP_VAL_ON_INDEX THEN NULL;
                         END;
                         """)
@@ -190,31 +191,52 @@ public class ProductionEngineCommandStore {
                         .param("patch", request.canonicalPatchJson())
                         .param("expectedCaseVersion", request.expectedCaseVersion())
                         .param("submittedAt", request.submittedAt())
+                        .param("creationToken", creationToken)
                         .update();
+            boolean inserted = jdbc.sql("""
+                    SELECT CLAIM_TOKEN_ FROM CM_ENGINE_COMMAND
+                    WHERE TENANT_ID_=:tenantId AND IDEMPOTENCY_KEY_=:idempotencyKey
+                    """).param("tenantId", request.tenantId())
+                    .param("idempotencyKey", request.idempotencyKey())
+                    .query(String.class).optional().filter(creationToken::equals).isPresent();
+            if (inserted) {
+                jdbc.sql("UPDATE CM_ENGINE_COMMAND SET CLAIM_TOKEN_=NULL "
+                        + "WHERE ID_=:id AND CLAIM_TOKEN_=:creationToken")
+                        .param("id", request.commandId())
+                        .param("creationToken", creationToken).update();
+            }
             Optional<StoredCommand> byIdempotency = findByIdempotency(
                     request.tenantId(), request.idempotencyKey());
             if (byIdempotency.isPresent()) {
                 StoredCommand existing = byIdempotency.orElseThrow();
-                return existing.commandId().equals(request.commandId())
-                        ? new Submission(existing, knownExisting)
-                        : replayOrConflict(existing, request);
+                if (!sameSubmission(existing, request)
+                        || existing.commandId().equals(request.commandId())
+                        && (!existing.operationId().equals(request.operationId())
+                        || !existing.idempotencyKey().equals(request.idempotencyKey()))) {
+                    return SubmissionResult.idempotencyConflict();
+                }
+                return SubmissionResult.success(new Submission(
+                        existing, !inserted));
+            }
+            Optional<StoredCommand> byCommandId = findByCommandId(request.commandId());
+            if (byCommandId.isPresent()) {
+                StoredCommand existing = byCommandId.orElseThrow();
+                return sameCommandBinding(existing, request)
+                        ? SubmissionResult.success(new Submission(existing, true))
+                        : SubmissionResult.operationConflict();
             }
             if (findByOperation(request.tenantId(), request.operationId()).isPresent()) {
-                throw new IdempotencyConflictException(
-                        "Operation ID is already bound to a different idempotency key");
+                return SubmissionResult.operationConflict();
             }
-            throw new IdempotencyConflictException(
-                    "Command ID is already bound to a different operation");
+            return SubmissionResult.operationConflict();
         });
-    }
-
-    private static Submission replayOrConflict(
-            StoredCommand existing, ProductionCommandRequest request) {
-        if (!sameSubmission(existing, request)) {
-            throw new IdempotencyConflictException(
+        return switch (result.kind()) {
+            case CREATED, REPLAY -> result.submission();
+            case IDEMPOTENCY_CONFLICT -> throw new IdempotencyConflictException(
                     "Idempotency key is already bound to a different command intent");
-        }
-        return new Submission(existing, true);
+            case OPERATION_CONFLICT -> throw new OperationConflictException(
+                    "Operation or command ID is already bound to different intent");
+        };
     }
 
     /** Atomically leases due commands; attempts and row version advance with the lease. */
@@ -231,13 +253,12 @@ public class ProductionEngineCommandStore {
         int boundedLimit = Math.clamp(limit, 1, 200);
         return inRequiredTransaction(() -> {
             List<String> candidates = jdbc.sql("""
-                    SELECT ID_ FROM (
-                      SELECT ID_ FROM CM_ENGINE_COMMAND
-                      WHERE (STATUS_='PENDING' OR
-                            (STATUS_='RETRYABLE' AND NEXT_ATTEMPT_AT_ <= :now))
-                        AND AUTO_ATTEMPTS_ < :maxAttempts
-                      ORDER BY CREATED_AT_, ID_)
-                    WHERE ROWNUM <= :limit
+                    SELECT ID_ FROM CM_ENGINE_COMMAND
+                    WHERE (STATUS_='PENDING' OR
+                          (STATUS_='RETRYABLE' AND NEXT_ATTEMPT_AT_ <= :now))
+                      AND AUTO_ATTEMPTS_ < :maxAttempts
+                      AND ROWNUM <= :limit
+                    FOR UPDATE SKIP LOCKED
                     """).param("now", decisionTime)
                     .param("maxAttempts", EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS)
                     .param("limit", boundedLimit).query(String.class).list();
@@ -272,6 +293,7 @@ public class ProductionEngineCommandStore {
                     SELECT ID_ FROM CM_ENGINE_COMMAND
                     WHERE STATUS_='DISPATCHING' AND LEASE_EXPIRES_AT_ <= :now
                     ORDER BY ID_
+                    FOR UPDATE SKIP LOCKED
                     """).param("now", decisionTime).query(String.class).list();
             int recovered = 0;
             EngineCommandPolicy policy = policyAt(decisionTime);
@@ -492,6 +514,11 @@ public class ProductionEngineCommandStore {
                 .query((rs, row) -> mapStored(rs)).optional();
     }
 
+    private Optional<StoredCommand> findByCommandId(String commandId) {
+        return jdbc.sql("SELECT " + PRODUCTION_COLUMNS + " FROM CM_ENGINE_COMMAND WHERE ID_=:id")
+                .param("id", commandId).query((rs, row) -> mapStored(rs)).optional();
+    }
+
     private static boolean sameSubmission(
             StoredCommand existing, ProductionCommandRequest request) {
         return existing.payloadDigest().equals(request.payloadDigest())
@@ -503,6 +530,15 @@ public class ProductionEngineCommandStore {
                 && Objects.equals(existing.correlationJson(), request.correlationJson())
                 && Objects.equals(existing.canonicalPatchJson(), request.canonicalPatchJson())
                 && Objects.equals(existing.expectedCaseVersion(), request.expectedCaseVersion());
+    }
+
+    private static boolean sameCommandBinding(
+            StoredCommand existing, ProductionCommandRequest request) {
+        return existing.commandId().equals(request.commandId())
+                && existing.operationId().equals(request.operationId())
+                && existing.idempotencyKey().equals(request.idempotencyKey())
+                && existing.state().command().tenantId().equals(request.tenantId())
+                && sameSubmission(existing, request);
     }
 
     private void insertActionIgnoringDuplicate(
@@ -704,6 +740,7 @@ public class ProductionEngineCommandStore {
                     "Persisted payloadDigest does not match its retained payload");
         }
         validatePersistedTuple(rs, decision);
+        validateHistoricalTuple(rs, payloadJson, decision);
         long version = rs.getLong("ROW_VERSION_");
         if (version < 0) {
             throw new IllegalArgumentException("Persisted command version must not be negative");
@@ -777,6 +814,68 @@ public class ProductionEngineCommandStore {
                 rs.getString("DECISION_REVIEW_REF_"));
         if (reviewParts != 0 && reviewParts != 3) {
             throw new IllegalArgumentException("Persisted review tuple is partial");
+        }
+    }
+
+    private static void validateHistoricalTuple(
+            java.sql.ResultSet rs, String payloadJson, EngineCommandPolicy.Decision decision)
+            throws java.sql.SQLException {
+        String original = rs.getString("ORIGINAL_STATUS_");
+        Object[] legacyFields = {
+                rs.getString("LEGACY_ROW_ID_"), rs.getString("LEGACY_STATUS_"),
+                rs.getString("LEGACY_MIGRATION_REF_"), rs.getObject("LEGACY_MIGRATED_AT_"),
+                rs.getObject("LEGACY_FAILURE_COUNT_"), rs.getString("RAW_LEGACY_PAYLOAD_"),
+                rs.getString("RAW_LEGACY_ERROR_"), rs.getString("RAW_LEGACY_CLAIM_TOKEN_"),
+                rs.getObject("RAW_LEGACY_CLAIMED_AT_")};
+        if (original == null) {
+            if (countPresent(legacyFields) != 0 || rs.getInt("ATTEMPTS_") != 0
+                    || rs.getString("LAST_ERROR_") != null
+                    || rs.getString("CLAIM_TOKEN_") != null
+                    || rs.getObject("CLAIMED_AT_") != null
+                    || (decision.totalDispatchAttempts() == 0)
+                    != (rs.getObject("DISPATCHED_AT_") == null)) {
+                throw new IllegalArgumentException("Native command retained legacy state");
+            }
+            return;
+        }
+        EngineCommandStatus mapped = switch (original) {
+            case "PENDING" -> EngineCommandStatus.PENDING;
+            case "RETRYING" -> EngineCommandStatus.RETRYABLE;
+            case "CLAIMED" -> EngineCommandStatus.AWAITING_CONFIRMATION;
+            case "DONE" -> EngineCommandStatus.CONFIRMED;
+            case "DEAD" -> EngineCommandStatus.FAILED;
+            default -> throw new IllegalArgumentException("Unknown retained legacy status");
+        };
+        int oldAttempts = rs.getInt("ATTEMPTS_");
+        long expectedAttempts = oldAttempts
+                + (original.equals("CLAIMED") || original.equals("DONE") ? 1L : 0L);
+        boolean retryDue = rs.getObject("NEXT_ATTEMPT_AT_") != null;
+        boolean claimed = original.equals("CLAIMED");
+        boolean done = original.equals("DONE");
+        OffsetDateTime createdAt = rs.getObject("CREATED_AT_", OffsetDateTime.class);
+        OffsetDateTime updatedAt = rs.getObject("UPDATED_AT_", OffsetDateTime.class);
+        OffsetDateTime migratedAt = rs.getObject("LEGACY_MIGRATED_AT_", OffsetDateTime.class);
+        boolean exact = oldAttempts >= 0
+                && decision.status() == mapped
+                && decision.totalDispatchAttempts() == expectedAttempts
+                && decision.automaticAttemptsInBudget() == expectedAttempts
+                && retryDue == original.equals("RETRYING")
+                && Objects.equals(payloadJson, rs.getString("RAW_LEGACY_PAYLOAD_"))
+                && Objects.equals(rs.getString("LAST_ERROR_"), rs.getString("RAW_LEGACY_ERROR_"))
+                && rs.getString("CLAIM_TOKEN_") == null && rs.getObject("CLAIMED_AT_") == null
+                && (rs.getString("RAW_LEGACY_CLAIM_TOKEN_") != null) == claimed
+                && (rs.getObject("RAW_LEGACY_CLAIMED_AT_") != null) == claimed
+                && rs.getObject("DISPATCHED_AT_") == null
+                && Objects.equals(updatedAt, createdAt)
+                && Objects.equals(decision.decidedAt(), done ? migratedAt : createdAt)
+                && (rs.getString("LEGACY_ROW_ID_") != null) == done
+                && (rs.getString("LEGACY_STATUS_") != null) == done
+                && (rs.getString("LEGACY_MIGRATION_REF_") != null) == done
+                && (migratedAt != null) == done
+                && (rs.getObject("LEGACY_FAILURE_COUNT_") != null) == done;
+        if (!exact) {
+            throw new IllegalArgumentException(
+                    "Persisted legacy command does not match its retained historical tuple");
         }
     }
 
@@ -998,6 +1097,23 @@ public class ProductionEngineCommandStore {
         public Submission { Objects.requireNonNull(command, "command"); }
     }
 
+    private enum SubmissionKind {
+        CREATED, REPLAY, IDEMPOTENCY_CONFLICT, OPERATION_CONFLICT
+    }
+
+    private record SubmissionResult(SubmissionKind kind, Submission submission) {
+        private static SubmissionResult success(Submission submission) {
+            return new SubmissionResult(submission.replayed()
+                    ? SubmissionKind.REPLAY : SubmissionKind.CREATED, submission);
+        }
+        private static SubmissionResult idempotencyConflict() {
+            return new SubmissionResult(SubmissionKind.IDEMPOTENCY_CONFLICT, null);
+        }
+        private static SubmissionResult operationConflict() {
+            return new SubmissionResult(SubmissionKind.OPERATION_CONFLICT, null);
+        }
+    }
+
     public record StoredCommand(
             String commandId, String operationId, String idempotencyKey, String payloadDigest,
             String caseId, java.util.Map<String, Object> payload, String expectedTargetIdentity,
@@ -1022,6 +1138,10 @@ public class ProductionEngineCommandStore {
 
     public static class IdempotencyConflictException extends IllegalStateException {
         public IdempotencyConflictException(String message) { super(message); }
+    }
+
+    public static class OperationConflictException extends IllegalStateException {
+        public OperationConflictException(String message) { super(message); }
     }
 
     public static class ActionIdentityConflictException extends IllegalStateException {

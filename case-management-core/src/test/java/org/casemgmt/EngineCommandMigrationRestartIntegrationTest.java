@@ -8,11 +8,14 @@ import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.casemgmt.engine.EngineCommandStatus;
 import org.casemgmt.repo.EngineCommandRepository;
+import org.casemgmt.repo.JsonCodec;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
@@ -22,7 +25,9 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.io.StringReader;
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -111,6 +116,67 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                 .hasMessageContaining("legacy DONE provenance");
     }
 
+    @Test
+    void hashesAndRehydratesTheEntireLegacyClobBeyondOracleVarcharLimits() throws Exception {
+        DataSource scenario = recreateBaseline();
+        String payload = "{\"raw\":\"" + "é".repeat(40_000) + "\"}";
+        try (Connection connection = scenario.getConnection();
+             var statement = connection.prepareStatement("""
+                     INSERT INTO CM_ENGINE_COMMAND
+                       (ID_,CASE_ID_,TYPE_,PAYLOAD_JSON_,STATUS_,ATTEMPTS_,CREATED_AT_)
+                     VALUES ('large','case-a','COMPLETE_TASK',?,'PENDING',0,SYSTIMESTAMP)
+                     """)) {
+            statement.setCharacterStream(1, new StringReader(payload), payload.length());
+            statement.executeUpdate();
+        }
+
+        migrate(scenario);
+        JdbcClient jdbc = JdbcClient.create(scenario);
+        assertThat(jdbc.sql("SELECT PAYLOAD_DIGEST_ FROM CM_ENGINE_COMMAND WHERE ID_='large'")
+                .query(String.class).single()).isEqualTo(JsonCodec.sha256(payload));
+        assertThat(new EngineCommandRepository(scenario)
+                .require("__legacy_unscoped__", "large").payload())
+                .containsEntry("raw", "é".repeat(40_000));
+    }
+
+    @ParameterizedTest(name = "rejects forged historical tuple: {0}")
+    @MethodSource("forgedHistoricalTuples")
+    void rejectsForgedHistoricalTupleForEveryLegacyStatus(
+            String scenarioName, String id, String mutation) throws Exception {
+        DataSource scenario = recreateBaseline();
+        JdbcClient jdbc = JdbcClient.create(scenario);
+        seedLegacyRows(jdbc);
+        migrate(scenario);
+        jdbc.sql(mutation).update();
+        assertThatThrownBy(() -> new EngineCommandRepository(scenario)
+                .require("__legacy_unscoped__", id))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    private static Stream<Arguments> forgedHistoricalTuples() {
+        return Stream.of(
+                Arguments.of("pending raw error", "pending",
+                        "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_ERROR_='other' WHERE ID_='pending'"),
+                Arguments.of("pending claim tuple", "pending",
+                        "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_CLAIM_TOKEN_='forged', "
+                                + "RAW_LEGACY_CLAIMED_AT_=SYSTIMESTAMP WHERE ID_='pending'"),
+                Arguments.of("retrying due time", "retrying",
+                        "UPDATE CM_ENGINE_COMMAND SET NEXT_ATTEMPT_AT_=NULL WHERE ID_='retrying'"),
+                Arguments.of("claimed claim tuple", "claimed",
+                        "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_CLAIM_TOKEN_=NULL, "
+                                + "RAW_LEGACY_CLAIMED_AT_=NULL WHERE ID_='claimed'"),
+                Arguments.of("done migration reference", "done",
+                        "UPDATE CM_ENGINE_COMMAND SET LEGACY_MIGRATION_REF_='other' WHERE ID_='done'"),
+                Arguments.of("dead failure time", "dead",
+                        "UPDATE CM_ENGINE_COMMAND SET FAILED_AT_=NULL WHERE ID_='dead'"),
+                Arguments.of("historical update time", "dead",
+                        "UPDATE CM_ENGINE_COMMAND SET UPDATED_AT_=UPDATED_AT_ + INTERVAL '1' SECOND "
+                                + "WHERE ID_='dead'"),
+                Arguments.of("historical decision time", "pending",
+                        "UPDATE CM_ENGINE_COMMAND SET DECIDED_AT_=DECIDED_AT_ + INTERVAL '1' SECOND "
+                                + "WHERE ID_='pending'"));
+    }
+
     @ParameterizedTest(name = "resumes after {0} production changesets")
     @ValueSource(ints = {0, 1, 2, 3, 6, 9, 13, 18, 24})
     void resumesAndRerunsAfterEveryRepresentativeOracleDdlPrefix(int prefix) throws Exception {
@@ -150,6 +216,16 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                     + "(COMMAND_ID_ VARCHAR2(64) NOT NULL)").update();
             case ACTION_DEFAULT -> jdbc.sql("ALTER TABLE CM_ENGINE_COMMAND_ACTION "
                     + "MODIFY REVIEW_FINDING_ DEFAULT 'FORGED'").update();
+            case COUNTER_CONSTRAINT_DISABLED -> jdbc.sql(
+                    "ALTER TABLE CM_ENGINE_COMMAND DISABLE NOVALIDATE CONSTRAINT CK_CM_ENGCMD_COUNTERS")
+                    .update();
+            case COUNTER_CONSTRAINT_WRONG_TABLE -> {
+                jdbc.sql("CREATE TABLE CM_WRONG_COMMAND (VALUE_ NUMBER)").update();
+                jdbc.sql("ALTER TABLE CM_WRONG_COMMAND ADD CONSTRAINT CK_CM_ENGCMD_COUNTERS "
+                        + "CHECK (VALUE_ >= 0)").update();
+            }
+            case DUE_INDEX_UNUSABLE -> jdbc.sql(
+                    "ALTER INDEX IX_CM_ENGCMD_PROD_DUE UNUSABLE").update();
             default -> jdbc.sql(malformed.ddl).update();
         }
     }
@@ -163,6 +239,10 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         STATUS_CONSTRAINT(0, null, "cm-production-engine-command-status-guard"),
         ACTION_TABLE(0, null, "cm-engine-command-action-table-guard"),
         ACTION_DEFAULT(10, null, "cm-production-engine-command-invariants-guard"),
+        COUNTER_CONSTRAINT_DISABLED(12, null,
+                "cm-production-engine-command-invariants-guard"),
+        COUNTER_CONSTRAINT_WRONG_TABLE(10, null,
+                "cm-production-engine-command-invariants-guard"),
         COUNTER_CONSTRAINT(10, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
                 + "CK_CM_ENGCMD_COUNTERS CHECK (TOTAL_DISPATCH_ATTEMPTS_ >= 0)",
                 "cm-production-engine-command-invariants-guard"),
@@ -193,6 +273,7 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                 "cm-production-engine-command-objects-guard"),
         DUE_INDEX(10, "CREATE INDEX IX_CM_ENGCMD_PROD_DUE ON CM_ENGINE_COMMAND(STATUS_)",
                 "cm-production-engine-command-objects-guard"),
+        DUE_INDEX_UNUSABLE(21, null, "cm-production-engine-command-objects-guard"),
         LEASE_INDEX(10, "CREATE INDEX IX_CM_ENGCMD_LEASE ON CM_ENGINE_COMMAND(LEASE_EXPIRES_AT_)",
                 "cm-production-engine-command-objects-guard"),
         CASE_STATUS_INDEX(10, "CREATE INDEX IX_CM_ENGCMD_CASE_STATUS "
