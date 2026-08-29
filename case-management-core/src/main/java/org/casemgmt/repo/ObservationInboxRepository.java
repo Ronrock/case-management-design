@@ -12,7 +12,8 @@ public final class ObservationInboxRepository {
 
     public boolean enqueue(String tenantId, ObservationStream stream, ObservationEnvelope envelope) {
         try {
-            return jdbc.sql("""INSERT INTO CM_REMOTE_OBS_INBOX
+            return jdbc.sql("""
+                    INSERT INTO CM_REMOTE_OBS_INBOX
                     (FINGERPRINT_, TENANT_ID_, STREAM_, PAYLOAD_, STATUS_, ATTEMPTS_, CREATED_AT_)
                     VALUES (:fingerprint, :tenant, :stream, :payload, 'PENDING', 0, SYSTIMESTAMP)""")
                     .param("fingerprint", envelope.observation().fingerprint())
