@@ -851,6 +851,7 @@ public class ProductionEngineCommandStore {
                 readClob(rs, "PAYLOAD_JSON_"), "persisted payloadJson");
         String rawPayloadJson = readClob(rs, "RAW_LEGACY_PAYLOAD_");
         java.util.Map<String, Object> payload = JsonCodec.toMap(payloadJson);
+        payload = EngineCommandPayload.validate(context, payload);
         String expectedDigest = rs.getString("ORIGINAL_STATUS_") == null
                 ? JsonCodec.canonicalSha256(payload) : JsonCodec.sha256(payloadJson);
         if (!payloadDigest.equals(expectedDigest)) {
@@ -864,7 +865,7 @@ public class ProductionEngineCommandStore {
             throw new IllegalArgumentException("Persisted command version must not be negative");
         }
         validateTransitionHistory(context, decision, version,
-                rs.getString("ORIGINAL_STATUS_"));
+                rs.getString("ORIGINAL_STATUS_"), actions);
         OffsetDateTime createdAt = Objects.requireNonNull(
                 rs.getObject("CREATED_AT_", OffsetDateTime.class), "persisted createdAt");
         OffsetDateTime updatedAt = Objects.requireNonNull(
@@ -1115,7 +1116,7 @@ public class ProductionEngineCommandStore {
     private void validateTransitionHistory(
             EngineCommandPolicy.CommandContext context,
             EngineCommandPolicy.Decision current, long currentVersion,
-            String originalStatus) {
+            String originalStatus, List<EngineCommandPolicy.ProcessedAction> actions) {
         BaselineRow baselineRow = jdbc.sql("""
                 SELECT TENANT_ID_,OPERATION_ID_,COMMAND_TYPE_,EXPECTED_TARGET_,FROM_STATUS_,
                        TO_STATUS_,OUTCOME_FORMAT_,OUTCOME_KIND_,OUTCOME_JSON_,ACTION_SEQUENCE_,
@@ -1190,7 +1191,7 @@ public class ProductionEngineCommandStore {
                     "Command row version does not match transition history length");
         }
         EngineCommandPolicy.Decision replayed = EngineCommandTransitionHistory.replay(
-                context, baseline, transitions);
+                context, baseline, transitions, actions);
         if (!replayed.equals(current)) {
             throw new IllegalArgumentException(
                     "Command row does not match replayed policy transition history");
@@ -1420,9 +1421,11 @@ public class ProductionEngineCommandStore {
             Objects.requireNonNull(commandType, "commandType");
             String canonicalPayload = JsonCodec.canonicalJson(
                     Objects.requireNonNull(payload, "payload"));
-            payload = java.util.Collections.unmodifiableMap(JsonCodec.toMap(canonicalPayload));
             expectedTargetIdentity = required(
                     expectedTargetIdentity, "expectedTargetIdentity", 255);
+            payload = EngineCommandPayload.validate(new EngineCommandPolicy.CommandContext(
+                    tenantId, operationId, commandId, commandType, expectedTargetIdentity),
+                    JsonCodec.toMap(canonicalPayload));
             correlationJson = correlationJson == null ? null
                     : JsonCodec.canonicalJson(correlationJson);
             canonicalPatchJson = canonicalPatchJson == null ? null

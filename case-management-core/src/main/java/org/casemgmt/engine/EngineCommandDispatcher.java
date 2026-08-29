@@ -131,9 +131,12 @@ public class EngineCommandDispatcher {
     private int drainProduction() {
         OffsetDateTime now = OffsetDateTime.now(clock);
         commands.recoverExpiredLeases(now);
-        List<ProductionEngineCommandStore.LeasedCommand> due = commands.claimDue(
-                workerOwner, 50, now, leaseDuration);
-        for (ProductionEngineCommandStore.LeasedCommand lease : due) {
+        int processed = 0;
+        while (processed < 50) {
+            List<ProductionEngineCommandStore.LeasedCommand> due = commands.claimDue(
+                    workerOwner, 1, now, leaseDuration);
+            if (due.isEmpty()) break;
+            ProductionEngineCommandStore.LeasedCommand lease = due.getFirst();
             ProductionEngineCommandStore.StoredCommand command = lease.command();
             CommandDispatchOutcome outcome;
             try {
@@ -147,8 +150,9 @@ public class EngineCommandDispatcher {
             }
             commands.commitLeaseOutcome(command.state().command().tenantId(),
                     command.operationId(), lease.leaseToken(), command.version(), outcome);
+            processed++;
         }
-        return due.size();
+        return processed;
     }
 
     private void execute(EngineCommand command) {

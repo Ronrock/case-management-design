@@ -7,15 +7,23 @@ import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /** Versioned, safe serialization and exact policy replay for durable command transitions. */
 public final class EngineCommandTransitionHistory {
 
     public static final int FORMAT_VERSION = 1;
+    public static final int MAX_ENCODED_CHARS = 65_536;
+    private static final long MAX_RETRY_AFTER_SECONDS = 31_536_000L;
+    private static final Set<String> OUTCOME_FIELDS = Set.of("format", "kind",
+            "transportFailure", "http", "confirmation", "review", "operatorAction");
+    private static final Set<String> BINDING_FIELDS = Set.of("tenantId", "operationId",
+            "commandId", "commandType", "expectedTargetIdentity");
 
     private EngineCommandTransitionHistory() {
     }
@@ -90,6 +98,37 @@ public final class EngineCommandTransitionHistory {
         return current;
     }
 
+    public static EngineCommandPolicy.Decision replay(
+            EngineCommandPolicy.CommandContext command,
+            EngineCommandPolicy.Decision baseline,
+            List<TransitionRow> transitions,
+            List<EngineCommandPolicy.ProcessedAction> normalizedActions) {
+        Objects.requireNonNull(normalizedActions, "normalizedActions");
+        Map<Long, EngineCommandPolicy.ProcessedAction> bySequence = new HashMap<>();
+        for (EngineCommandPolicy.ProcessedAction action : normalizedActions) {
+            if (bySequence.put(action.sequence(), action) != null) {
+                throw new IllegalArgumentException("Normalized command action sequence is duplicated");
+            }
+        }
+        for (TransitionRow row : transitions) {
+            CommandDispatchOutcome outcome = decodeOutcome(row.outcomeJson());
+            if (outcome.operatorAction() == null) {
+                if (row.actionSequence() != null) throw new IllegalArgumentException(
+                        "Non-operator transition references a normalized action");
+                continue;
+            }
+            EngineCommandPolicy.ProcessedAction expected = new EngineCommandPolicy.ProcessedAction(
+                    Objects.requireNonNull(row.actionSequence(),
+                            "operator transition action sequence"),
+                    outcome.operatorAction(), outcome.reviewEvidence());
+            if (!expected.equals(bySequence.get(row.actionSequence()))) {
+                throw new IllegalArgumentException(
+                        "Command transition action evidence differs from normalized action row");
+            }
+        }
+        return replay(command, baseline, transitions);
+    }
+
     private static EngineCommandPolicy.Decision apply(
             EngineCommandPolicy policy,
             EngineCommandPolicy.CommandContext command,
@@ -127,38 +166,61 @@ public final class EngineCommandTransitionHistory {
 
     public static EngineCommandPolicy.Decision decodeBaseline(
             EngineCommandPolicy.CommandContext command, String json) {
+        requireEncodedSize(json);
         Map<String, Object> value = JsonCodec.toMap(Objects.requireNonNull(json, "json"));
-        if (number(value, "format").intValue() != FORMAT_VERSION
+        requireFields(value, Set.of("format", "kind", "decision"), "baseline");
+        if (exactInt(value, "format") != FORMAT_VERSION
                 || !"BASELINE".equals(string(value, "kind"))) {
             throw new IllegalArgumentException("Unsupported command transition baseline format");
         }
         Map<String, Object> decision = optionalMap(value, "decision");
         if (decision == null) throw new IllegalArgumentException(
                 "Command transition baseline decision is missing");
+        requireFields(decision, Set.of("status", "decidedAt", "nextAttemptAt", "errorCode",
+                "safeSummary", "totalDispatchAttempts", "automaticAttemptsInBudget",
+                "budgetEpoch", "automaticBudgetReset", "confirmation", "legacyConfirmation",
+                "review", "appliedAction", "appliedActionPrior", "actionSummary"), "decision");
+        if (decision.get("confirmation") != null || decision.get("review") != null
+                || decision.get("appliedAction") != null
+                || decision.get("appliedActionPrior") != null) {
+            throw new IllegalArgumentException("Baseline contains unsupported live evidence");
+        }
         Map<String, Object> legacy = optionalMap(decision, "legacyConfirmation");
+        if (legacy != null) {
+            requireFields(legacy, union(BINDING_FIELDS, Set.of("legacyRowId", "oldStatus",
+                    "migrationReference", "migratedAt", "legacyFailureCount")),
+                    "legacy confirmation");
+            requireBinding(command, legacy);
+            if (!"DONE".equals(string(legacy, "oldStatus"))) throw new IllegalArgumentException(
+                    "Legacy confirmation old status must be DONE");
+        }
         EngineCommandPolicy.LegacyConfirmationEvidence legacyEvidence = legacy == null ? null
                 : new EngineCommandPolicy.LegacyConfirmationEvidence(command,
                 string(legacy, "legacyRowId"), string(legacy, "migrationReference"),
                 OffsetDateTime.parse(string(legacy, "migratedAt")),
-                number(legacy, "legacyFailureCount").intValue());
+                exactInt(legacy, "legacyFailureCount"));
         Map<String, Object> summary = optionalMap(decision, "actionSummary");
+        if (summary != null) requireFields(summary, Set.of("actionCount", "highWaterSequence",
+                "automaticBudgetResetCount", "cancellationCount"), "action summary");
         EngineCommandPolicy.ActionLedgerSummary actionSummary = summary == null
                 ? EngineCommandPolicy.ActionLedgerSummary.empty()
                 : new EngineCommandPolicy.ActionLedgerSummary(
-                number(summary, "actionCount").longValue(),
-                number(summary, "highWaterSequence").longValue(),
-                number(summary, "automaticBudgetResetCount").longValue(),
-                number(summary, "cancellationCount").longValue());
-        return new EngineCommandPolicy.Decision(
+                exactLong(summary, "actionCount"), exactLong(summary, "highWaterSequence"),
+                exactLong(summary, "automaticBudgetResetCount"),
+                exactLong(summary, "cancellationCount"));
+        EngineCommandPolicy.Decision result = new EngineCommandPolicy.Decision(
                 EngineCommandStatus.valueOf(string(decision, "status")),
                 OffsetDateTime.parse(string(decision, "decidedAt")),
                 optionalTimestamp(decision, "nextAttemptAt"),
                 optionalString(decision, "errorCode"), optionalString(decision, "safeSummary"),
-                number(decision, "totalDispatchAttempts").longValue(),
-                number(decision, "automaticAttemptsInBudget").intValue(),
-                number(decision, "budgetEpoch").longValue(),
+                exactLong(decision, "totalDispatchAttempts"),
+                exactInt(decision, "automaticAttemptsInBudget"),
+                exactLong(decision, "budgetEpoch"),
                 booleanValue(decision, "automaticBudgetReset"), null, legacyEvidence,
                 null, null, null, actionSummary);
+        if (!encodeBaseline(result).equals(json)) throw new IllegalArgumentException(
+                "Command transition baseline is not canonical");
+        return result;
     }
 
     private static Map<String, Object> decisionMap(EngineCommandPolicy.Decision decision) {
@@ -206,8 +268,10 @@ public final class EngineCommandTransitionHistory {
     }
 
     public static CommandDispatchOutcome decodeOutcome(String json) {
+        requireEncodedSize(json);
         Map<String, Object> value = JsonCodec.toMap(Objects.requireNonNull(json, "json"));
-        if (number(value, "format").intValue() != FORMAT_VERSION) {
+        requireFields(value, OUTCOME_FIELDS, "outcome");
+        if (exactInt(value, "format") != FORMAT_VERSION) {
             throw new IllegalArgumentException("Unsupported command transition outcome format");
         }
         CommandDispatchOutcome.Kind kind = CommandDispatchOutcome.Kind.valueOf(
@@ -217,18 +281,30 @@ public final class EngineCommandTransitionHistory {
         CommandDispatchOutcome.HttpResult http = null;
         Map<String, Object> httpMap = optionalMap(value, "http");
         if (httpMap != null) {
-            Number seconds = optionalNumber(httpMap, "retryAfterSeconds");
-            Number nanos = optionalNumber(httpMap, "retryAfterNanos");
-            Duration retryAfter = seconds == null ? null
-                    : Duration.ofSeconds(seconds.longValue(), nanos.longValue());
-            http = new CommandDispatchOutcome.HttpResult(number(httpMap, "status").intValue(),
+            requireFields(httpMap, Set.of("status", "acceptance", "retryAfterSeconds",
+                    "retryAfterNanos"), "HTTP result");
+            Long seconds = optionalExactLong(httpMap, "retryAfterSeconds");
+            Integer nanos = optionalExactInt(httpMap, "retryAfterNanos");
+            if ((seconds == null) != (nanos == null)) throw new IllegalArgumentException(
+                    "Retry-After seconds and nanos must both be present or absent");
+            if (seconds != null && (seconds < 0 || seconds > MAX_RETRY_AFTER_SECONDS)) {
+                throw new IllegalArgumentException("Retry-After seconds are outside the safe range");
+            }
+            if (nanos != null && (nanos < 0 || nanos > 999_999_999)) {
+                throw new IllegalArgumentException("Retry-After nanos are outside the valid range");
+            }
+            Duration retryAfter = seconds == null ? null : Duration.ofSeconds(seconds, nanos);
+            http = new CommandDispatchOutcome.HttpResult(exactInt(httpMap, "status"),
                     CommandDispatchOutcome.Acceptance.valueOf(string(httpMap, "acceptance")),
                     retryAfter);
         }
-        return new CommandDispatchOutcome(kind, transport, http,
+        CommandDispatchOutcome result = new CommandDispatchOutcome(kind, transport, http,
                 confirmation(optionalMap(value, "confirmation")),
                 review(optionalMap(value, "review")),
                 operator(optionalMap(value, "operatorAction")));
+        if (!encodeOutcome(result).equals(json)) throw new IllegalArgumentException(
+                "Command transition outcome is not canonical");
+        return result;
     }
 
     private static Map<String, Object> confirmationMap(
@@ -312,6 +388,8 @@ public final class EngineCommandTransitionHistory {
     private static CommandDispatchOutcome.ConfirmationEvidence confirmation(
             Map<String, Object> value) {
         if (value == null) return null;
+        requireFields(value, union(BINDING_FIELDS, Set.of("remoteIdentity", "remoteState",
+                "source", "evidenceReference")), "confirmation");
         return new CommandDispatchOutcome.ConfirmationEvidence(
                 string(value, "tenantId"), string(value, "operationId"),
                 string(value, "commandId"), EngineCommand.Type.valueOf(
@@ -324,6 +402,8 @@ public final class EngineCommandTransitionHistory {
 
     private static CommandDispatchOutcome.ReviewEvidence review(Map<String, Object> value) {
         if (value == null) return null;
+        requireFields(value, union(BINDING_FIELDS,
+                Set.of("finding", "source", "evidenceReference")), "review");
         return new CommandDispatchOutcome.ReviewEvidence(
                 string(value, "tenantId"), string(value, "operationId"),
                 string(value, "commandId"), EngineCommand.Type.valueOf(
@@ -335,6 +415,9 @@ public final class EngineCommandTransitionHistory {
 
     private static CommandDispatchOutcome.OperatorAction operator(Map<String, Object> value) {
         if (value == null) return null;
+        requireFields(value, union(BINDING_FIELDS, Set.of("actionType", "actionId",
+                "auditReference", "performedAt", "overrideAutomaticAttemptCap")),
+                "operator action");
         return new CommandDispatchOutcome.OperatorAction(
                 string(value, "tenantId"), string(value, "operationId"),
                 string(value, "commandId"), EngineCommand.Type.valueOf(
@@ -389,6 +472,41 @@ public final class EngineCommandTransitionHistory {
         return number;
     }
 
+    private static long exactLong(Map<String, Object> map, String field) {
+        Long value = optionalExactLong(map, field);
+        if (value == null) throw new IllegalArgumentException(
+                "Transition field " + field + " must be numeric");
+        return value;
+    }
+
+    private static Long optionalExactLong(Map<String, Object> map, String field) {
+        Number value = optionalNumber(map, field);
+        if (value == null) return null;
+        try {
+            return new java.math.BigDecimal(value.toString()).longValueExact();
+        } catch (ArithmeticException | NumberFormatException ex) {
+            throw new IllegalArgumentException(
+                    "Transition field " + field + " must be an integral 64-bit number", ex);
+        }
+    }
+
+    private static int exactInt(Map<String, Object> map, String field) {
+        Integer value = optionalExactInt(map, field);
+        if (value == null) throw new IllegalArgumentException(
+                "Transition field " + field + " must be numeric");
+        return value;
+    }
+
+    private static Integer optionalExactInt(Map<String, Object> map, String field) {
+        Long value = optionalExactLong(map, field);
+        if (value == null) return null;
+        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                    "Transition field " + field + " is outside the 32-bit range");
+        }
+        return value.intValue();
+    }
+
     @SuppressWarnings("unchecked")
     private static Map<String, Object> optionalMap(Map<String, Object> map, String field) {
         Object value = map.get(field);
@@ -408,7 +526,42 @@ public final class EngineCommandTransitionHistory {
     private static <E extends Enum<E>> E optionalEnum(
             Map<String, Object> map, String field, Class<E> type) {
         Object value = map.get(field);
-        return value == null ? null : Enum.valueOf(type, value.toString());
+        if (value == null) return null;
+        if (!(value instanceof String text)) throw new IllegalArgumentException(
+                "Transition field " + field + " must be text");
+        return Enum.valueOf(type, text);
+    }
+
+    private static void requireEncodedSize(String json) {
+        if (json == null || json.length() == 0 || json.length() > MAX_ENCODED_CHARS) {
+            throw new IllegalArgumentException("Command transition encoded size is invalid");
+        }
+    }
+
+    private static void requireFields(
+            Map<String, Object> value, Set<String> expected, String node) {
+        if (!value.keySet().equals(expected)) {
+            throw new IllegalArgumentException("Command transition " + node
+                    + " fields differ from the versioned contract");
+        }
+    }
+
+    private static Set<String> union(Set<String> left, Set<String> right) {
+        java.util.HashSet<String> result = new java.util.HashSet<>(left);
+        result.addAll(right);
+        return Set.copyOf(result);
+    }
+
+    private static void requireBinding(
+            EngineCommandPolicy.CommandContext command, Map<String, Object> value) {
+        if (!command.tenantId().equals(string(value, "tenantId"))
+                || !command.operationId().equals(string(value, "operationId"))
+                || !command.commandId().equals(string(value, "commandId"))
+                || !command.commandType().name().equals(string(value, "commandType"))
+                || !command.expectedTargetIdentity().equals(
+                        string(value, "expectedTargetIdentity"))) {
+            throw new IllegalArgumentException("Command transition evidence binding differs");
+        }
     }
 
     public record TransitionRow(

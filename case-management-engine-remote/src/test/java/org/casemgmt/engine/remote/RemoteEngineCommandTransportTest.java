@@ -48,7 +48,7 @@ class RemoteEngineCommandTransportTest {
             assertThat(evidence.operationId()).isEqualTo("operation-1");
             assertThat(evidence.commandId()).isEqualTo("command-1");
             assertThat(evidence.commandType()).isEqualTo(type);
-            assertThat(evidence.expectedTargetIdentity()).isEqualTo("target-1");
+            assertThat(evidence.expectedTargetIdentity()).isEqualTo(target(type, payload(type)));
             assertThat(evidence.evidenceReference())
                     .isEqualTo("http:" + expectedStatus + ":command-1");
         });
@@ -138,8 +138,21 @@ class RemoteEngineCommandTransportTest {
         when(command.payload()).thenReturn(payload);
         when(command.state()).thenReturn(state);
         when(state.command()).thenReturn(new EngineCommandPolicy.CommandContext(
-                "tenant-1", "operation-1", "command-1", type, "target-1"));
+                "tenant-1", "operation-1", "command-1", type, target(type, payload)));
         return command;
+    }
+
+    private static String target(EngineCommand.Type type, Map<String, Object> payload) {
+        return switch (type) {
+            case CREATE_TASK -> (String) payload.get("planItemId");
+            case CLAIM_TASK, COMPLETE_TASK -> (String) payload.get("engineTaskId");
+            case START_PROCESS -> "ID".equals(payload.get("selectionType"))
+                    ? (String) payload.get("processDefinitionId")
+                    : (String) payload.get("processDefinitionKey");
+            case CANCEL_PROCESS -> (String) payload.get("processInstanceId");
+            case DEPLOY_ORCHESTRATION -> (String) payload.get("definitionKey");
+            case CORRELATE_MESSAGE -> (String) payload.get("messageName");
+        };
     }
 
     private static Map<String, Object> payload(EngineCommand.Type type) {

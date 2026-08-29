@@ -36,7 +36,9 @@ class JsonCodecCanonicalizationTest {
     void requestRejectsCallerSuppliedDigestThatDoesNotMatchCanonicalPayload() {
         assertThatThrownBy(() -> new EngineCommandRepository.ProductionCommandRequest(
                 "command", "case", "tenant", "operation", "key",
-                "0".repeat(64), EngineCommand.Type.START_PROCESS, Map.of("n", 1.0),
+                "0".repeat(64), EngineCommand.Type.START_PROCESS,
+                Map.of("selectionType", "ID", "processDefinitionId", "definition",
+                        "variables", Map.of()),
                 "definition", null, null, null, OffsetDateTime.parse("2026-08-28T12:00:00Z")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("does not match canonical payload");
@@ -46,7 +48,9 @@ class JsonCodecCanonicalizationTest {
     void requestCanonicalizesItsPersistedTimestampBeforeJdbcRoundTrip() {
         var request = new EngineCommandRepository.ProductionCommandRequest(
                 "command", "case", "tenant", "operation", "key",
-                EngineCommand.Type.START_PROCESS, Map.of("n", 1),
+                EngineCommand.Type.START_PROCESS,
+                Map.of("selectionType", "ID", "processDefinitionId", "definition",
+                        "variables", Map.of()),
                 "definition", null, null, null,
                 OffsetDateTime.parse("2026-08-28T14:00:00.123456789+02:00"));
 

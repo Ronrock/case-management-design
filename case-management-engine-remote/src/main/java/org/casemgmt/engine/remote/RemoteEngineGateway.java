@@ -12,7 +12,9 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
 import java.time.OffsetDateTime;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
@@ -49,17 +51,24 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             .toFormatter();
 
     private final RestClient client;
+    private final Clock clock;
 
     public RemoteEngineGateway(RestClient client) {
-        this.client = client;
+        this(client, Clock.systemUTC());
+    }
+
+    public RemoteEngineGateway(RestClient client, Clock clock) {
+        this.client = Objects.requireNonNull(client, "client");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     /** Production outbox delivery. All failures are reduced to safe policy facts. */
     @Override
     public CommandDispatchOutcome dispatch(ProductionEngineCommandStore.StoredCommand command) {
         Objects.requireNonNull(command, "command");
-        Map<String, Object> payload = command.payload();
         try {
+            Map<String, Object> payload = EngineCommandPayload.validate(
+                    command.state().command(), command.payload());
             RemoteResult result = switch (command.state().command().commandType()) {
                 case CREATE_TASK -> {
                     EngineTaskRef ref = createHumanTask(new HumanTaskRequest(
@@ -136,7 +145,7 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         }
     }
 
-    private static CommandDispatchOutcome classifyHttpFailure(
+    private CommandDispatchOutcome classifyHttpFailure(
             ProductionEngineCommandStore.StoredCommand command,
             RestClientResponseException response) {
         int status = response.getStatusCode().value();
@@ -150,7 +159,7 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         return CommandDispatchOutcome.http(status, acceptance, retryAfter(response), null);
     }
 
-    private static Duration retryAfter(RestClientResponseException response) {
+    private Duration retryAfter(RestClientResponseException response) {
         String value = response.getResponseHeaders() == null ? null
                 : response.getResponseHeaders().getFirst("Retry-After");
         if (value == null || value.isBlank()) return null;
@@ -159,7 +168,7 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             return seconds < 0 ? null : Duration.ofSeconds(seconds);
         } catch (NumberFormatException ignored) {
             try {
-                Duration result = Duration.between(java.time.Instant.now(),
+                Duration result = Duration.between(Instant.now(clock),
                         ZonedDateTime.parse(value, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant());
                 return result.isNegative() ? Duration.ZERO : result;
             } catch (java.time.DateTimeException invalid) {

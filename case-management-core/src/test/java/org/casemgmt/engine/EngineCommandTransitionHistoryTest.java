@@ -134,6 +134,58 @@ class EngineCommandTransitionHistoryTest {
                 .isEqualTo(legacyDone);
     }
 
+    @Test
+    void outcomeCodecRejectsUnknownNonCanonicalFractionalAndOversizedEvidence() {
+        String canonical = EngineCommandTransitionHistory.encodeOutcome(
+                CommandDispatchOutcome.http(429,
+                        CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED,
+                        Duration.ofSeconds(30, 12), null));
+        String unknown = canonical.substring(0, canonical.length() - 1) + ",\"unknown\":null}";
+        String fractionalStatus = canonical.replace("\"status\":429", "\"status\":429.5");
+        String invalidNanos = canonical.replace("\"retryAfterNanos\":12",
+                "\"retryAfterNanos\":1000000000");
+
+        assertThatThrownBy(() -> EngineCommandTransitionHistory.decodeOutcome(unknown))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("fields");
+        assertThatThrownBy(() -> EngineCommandTransitionHistory.decodeOutcome(" " + canonical))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("canonical");
+        assertThatThrownBy(() -> EngineCommandTransitionHistory.decodeOutcome(fractionalStatus))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("integral");
+        assertThatThrownBy(() -> EngineCommandTransitionHistory.decodeOutcome(invalidNanos))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("nanos");
+        assertThatThrownBy(() -> EngineCommandTransitionHistory.decodeOutcome(
+                canonical + " ".repeat(EngineCommandTransitionHistory.MAX_ENCODED_CHARS)))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("size");
+    }
+
+    @Test
+    void replayRequiresEveryOperatorTransitionToMatchItsNormalizedActionRowExactly() {
+        EngineCommandPolicy.Decision baseline = pending(T0);
+        CommandDispatchOutcome.OperatorAction cancelAction = action(
+                CommandDispatchOutcome.ActionType.CANCEL, false);
+        CommandDispatchOutcome cancelOutcome = CommandDispatchOutcome.cancelUnsent(cancelAction);
+        var cancel = EngineCommandTransitionHistory.record(COMMAND, 1, baseline,
+                cancelOutcome, T0.plusSeconds(3));
+        EngineCommandPolicy.ProcessedAction exact = new EngineCommandPolicy.ProcessedAction(
+                1, cancelAction, null);
+        EngineCommandPolicy.ProcessedAction tampered = new EngineCommandPolicy.ProcessedAction(
+                1, new CommandDispatchOutcome.OperatorAction(
+                        cancelAction.tenantId(), cancelAction.operationId(),
+                        cancelAction.commandId(), cancelAction.commandType(),
+                        cancelAction.expectedTargetIdentity(), cancelAction.actionType(),
+                        cancelAction.actionId(), "different-audit", cancelAction.performedAt(),
+                        cancelAction.overrideAutomaticAttemptCap()), null);
+
+        assertThat(EngineCommandTransitionHistory.replay(COMMAND, baseline,
+                List.of(cancel.row()), List.of(exact))).isEqualTo(cancel.nextDecision());
+        assertThatThrownBy(() -> EngineCommandTransitionHistory.replay(COMMAND, baseline,
+                List.of(cancel.row()), List.of()))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("action");
+        assertThatThrownBy(() -> EngineCommandTransitionHistory.replay(COMMAND, baseline,
+                List.of(cancel.row()), List.of(tampered)))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("action");
+    }
+
     private static EngineCommandPolicy.Decision pending(OffsetDateTime at) {
         return new EngineCommandPolicy.Decision(EngineCommandStatus.PENDING, at, null,
                 null, null, 0, 0, 0, false, null, null, null,
