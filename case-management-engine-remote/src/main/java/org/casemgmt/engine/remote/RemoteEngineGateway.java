@@ -684,8 +684,9 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         Map<String, Object> missing = new LinkedHashMap<>();
         expected.forEach((name, expectedValue) -> {
             Object raw = actual.get(name);
-            Object actualValue = raw instanceof Map<?, ?> value ? value.get("value") : null;
-            if (!org.casemgmt.repo.JsonCodec.canonicalJson(
+            boolean hasValue = raw instanceof Map<?, ?> value && value.containsKey("value");
+            Object actualValue = hasValue ? ((Map<?, ?>) raw).get("value") : null;
+            if (!hasValue || !org.casemgmt.repo.JsonCodec.canonicalJson(
                             java.util.Collections.singletonMap("value", expectedValue))
                     .equals(org.casemgmt.repo.JsonCodec.canonicalJson(
                             java.util.Collections.singletonMap("value", actualValue)))) {
@@ -1113,18 +1114,22 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
                 processDefinitionKey, caseId);
     }
 
-    /** engine-rest wants {"name": {"value": v, "type": "String"}} rather than plain values. */
+    /** engine-rest wants typed value descriptors rather than plain values. */
     private Map<String, Object> typed(Map<String, Object> variables) {
         Map<String, Object> typed = new LinkedHashMap<>();
-        variables.forEach((k, v) -> typed.put(k, Map.of(
-                "value", v == null ? "" : v,
-                "type", switch (v) {
+        variables.forEach((k, v) -> {
+            Map<String, Object> descriptor = new LinkedHashMap<>();
+            descriptor.put("value", v);
+            descriptor.put("type", switch (v) {
                     case Integer i -> "Integer";
                     case Long l -> "Long";
                     case Boolean b -> "Boolean";
                     case Double d -> "Double";
-                    case null, default -> "String";
-                })));
+                    case null -> "Null";
+                    default -> "String";
+                });
+            typed.put(k, descriptor);
+        });
         return typed;
     }
 }

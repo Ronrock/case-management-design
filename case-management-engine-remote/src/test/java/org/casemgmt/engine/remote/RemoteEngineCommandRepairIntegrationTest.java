@@ -17,10 +17,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
@@ -30,7 +32,7 @@ class RemoteEngineCommandRepairIntegrationTest extends OracleTestBase {
     private static final Instant NOW = Instant.parse("2026-08-29T08:00:00Z");
 
     @Test
-    void dispatcherPersistsLeasesRepairsAndConfirmsAPartiallyCreatedTask() {
+    void dispatcherPersistsLeasesAndRepairsNullAndNonNullVariablesBeforeConfirmation() {
         RestClient.Builder builder = RestClient.builder().baseUrl("http://engine.test");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         String taskId = "cm-command-command-1";
@@ -60,12 +62,20 @@ class RemoteEngineCommandRepairIntegrationTest extends OracleTestBase {
                         {"caseId":{"value":"case-1","type":"String"}}
                         """, MediaType.APPLICATION_JSON));
         server.expect(requestTo("http://engine.test/task/" + taskId + "/variables"))
+                .andExpect(content().json("""
+                        {"modifications":{
+                          "planItemId":{"value":"plan-1","type":"String"},
+                          "priority":{"value":"high","type":"String"},
+                          "optional":{"value":null,"type":"Null"}
+                        }}
+                        """))
                 .andRespond(withStatus(HttpStatus.NO_CONTENT));
         server.expect(requestTo("http://engine.test/task/" + taskId + "/variables"))
                 .andRespond(withSuccess("""
                         {"caseId":{"value":"case-1","type":"String"},
                          "planItemId":{"value":"plan-1","type":"String"},
-                         "priority":{"value":"high","type":"String"}}
+                         "priority":{"value":"high","type":"String"},
+                         "optional":{"value":null,"type":"Null"}}
                         """, MediaType.APPLICATION_JSON));
         server.expect(requestTo("http://engine.test/task/" + taskId))
                 .andRespond(withSuccess("{\"id\":\"" + taskId
@@ -74,12 +84,15 @@ class RemoteEngineCommandRepairIntegrationTest extends OracleTestBase {
 
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         EngineCommandRepository repository = new EngineCommandRepository(dataSource(), clock);
+        Map<String, Object> variables = new LinkedHashMap<>();
+        variables.put("priority", "high");
+        variables.put("optional", null);
         repository.submit(new ProductionEngineCommandStore.ProductionCommandRequest(
                 "command-1", "case-1", "tenant-1", "operation-1", "idem-1",
                 EngineCommand.Type.CREATE_TASK,
                 Map.of("planItemId", "plan-1", "name", "Review",
                         "candidateGroups", List.of("reviewers"),
-                        "variables", Map.of("priority", "high")),
+                        "variables", variables),
                 "plan-1", null, null, null,
                 OffsetDateTime.ofInstant(NOW, ZoneOffset.UTC)));
         EngineCommandDispatcher dispatcher = new EngineCommandDispatcher(
