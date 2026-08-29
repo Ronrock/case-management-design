@@ -3,7 +3,7 @@
                   xmlns:operaton="http://operaton.org/schema/1.0/bpmn"
                   xmlns:casemgmt="https://casemgmt.org/bpmn"
                   id="complaint-bpmn-definitions" targetNamespace="https://casemgmt.org/poc">
-  <bpmn:process id="complaint-bpmn" name="Complaint handling (BPMN)" isExecutable="true"
+  <bpmn:process id="complaint" name="Complaint handling (BPMN)" isExecutable="true"
                 operaton:historyTimeToLive="180">
     <bpmn:startEvent id="start"/>
     <bpmn:sequenceFlow id="to-intake" sourceRef="start" targetRef="intake"/>

@@ -180,16 +180,8 @@ Stages, milestones, repeated activity occurrences, assignments, and completion a
 engine observations. Inspect `projectionStatus`, `lastEngineUpdateAt`, and `lastProjectedAt` before
 making freshness-sensitive decisions.
 
-Plan-item mutation endpoints still serve legacy and discretionary work:
-
-```http
-POST /case-api/v2/cases/{caseId}/plan-items/{itemId}/enable
-POST /case-api/v2/cases/{caseId}/plan-items/{itemId}/start
-POST /case-api/v2/cases/{caseId}/plan-items/{itemId}/complete
-POST /case-api/v2/cases/{caseId}/plan-items/{itemId}/terminate
-```
-
-Do not manually advance a BPMN-derived plan item unless its returned actions explicitly permit it.
+Plan-item rows are read-only engine projections. BPMN transitions are requested through the BPMN
+process itself; this API never manually advances a projected plan item.
 
 ## Execute an ad-hoc action
 

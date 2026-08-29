@@ -83,7 +83,7 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
     }
 
     @Test
-    void embeddedHistoryResolvesOnlyOneExactIdentityAndSeparatesPendingRootCorrelation()
+    void embeddedHistoryResolvesOnlyOneExactIdentity()
             throws Exception {
         DataSource local = schemaDataSource(LOCAL_SCHEMA);
         applyPreWs2Master(local);
@@ -131,11 +131,6 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
                 .param("diagnostic", REPAIR_DIAGNOSTIC)
                 .query(Integer.class).single()).isEqualTo(1);
 
-        assertThat(rootCase(jdbc, "case-pending"))
-                .isEqualTo(new RootState(null, "correlation-pending"));
-        assertThat(rootLink(jdbc, "link-pending"))
-                .isEqualTo(new LinkedRootState(null, "correlation-pending", 1));
-
         assertEveryWs2ChangesetAppliedOnce(jdbc);
     }
 
@@ -171,15 +166,35 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
     }
 
     @Test
-    void activeLegacyDefinitionsHaltTheBpmnOnlyUpgradeWithARemediationCode() throws Exception {
+    void activeRetiredAndFailedLegacyHistoryHaltsTheBpmnOnlyUpgradeWithARemediationCode()
+            throws Exception {
         DataSource legacy = schemaDataSource(LEGACY_SCHEMA);
         applyPreWs2Master(legacy);
         JdbcClient jdbc = JdbcClient.create(legacy);
-        insertCaseDefinition(jdbc, "legacy:1", "legacy", "tenant-r", "PLAN_MODEL");
+        insertCaseDefinition(jdbc, "legacy-active:1", "legacy-active", "tenant-r", "PLAN_MODEL");
+        insertCaseDefinition(jdbc, "legacy-retired:1", "legacy-retired", "tenant-r", "PLAN_MODEL");
+        insertCaseDefinition(jdbc, "legacy-failed:1", "legacy-failed", "tenant-r", "PLAN_MODEL");
+        insertSharedArtifactReleases(jdbc, "tenant-r");
+        insertHistoricalOrchestrationRelease(jdbc, "legacy-active-release", "legacy-active",
+                "tenant-r", null);
+        insertHistoricalOrchestrationRelease(jdbc, "legacy-retired-release", "legacy-retired",
+                "tenant-r", null);
+        insertHistoricalOrchestrationRelease(jdbc, "legacy-failed-release", "legacy-failed",
+                "tenant-r", null);
+        insertHistoricalBinding(jdbc, "legacy-active:1", "legacy-active-release");
+        insertHistoricalBinding(jdbc, "legacy-retired:1", "legacy-retired-release");
+        insertHistoricalBinding(jdbc, "legacy-failed:1", "legacy-failed-release");
+
+        applyThroughWs2ChangeSet(legacy, "cm-bpmn-binding-lifecycle-identity");
+        jdbc.sql("UPDATE CM_CASE_DEF_BINDING SET STATUS_ = 'RETIRED', RETIRED_AT_ = SYSTIMESTAMP "
+                + "WHERE CASE_DEF_ID_ = 'legacy-retired:1'").update();
+        jdbc.sql("UPDATE CM_CASE_DEF_BINDING SET STATUS_ = 'FAILED', "
+                + "FAILURE_DETAIL_ = 'historical failure' "
+                + "WHERE CASE_DEF_ID_ = 'legacy-failed:1'").update();
 
         assertThatThrownBy(() -> applyRemainingMasterTwice(legacy))
-                .hasMessageContaining("CM-BPMN-ONLY-LEGACY-ACTIVE")
-                .hasMessageContaining("retire or migrate legacy PLAN_MODEL definitions");
+                .hasMessageContaining("CM-BPMN-ONLY-LEGACY-DATA")
+                .hasMessageContaining("archive, remove, or migrate all retained PLAN_MODEL");
     }
 
     private static void applyPreWs2Master(DataSource dataSource) throws Exception {
@@ -208,6 +223,27 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
             liquibase.update(new Contexts(), new LabelExpression());
             liquibase.update(new Contexts(), new LabelExpression());
             liquibase.validate();
+        });
+    }
+
+    private static void applyThroughWs2ChangeSet(DataSource dataSource, String changeSetId)
+            throws Exception {
+        withLiquibase(dataSource, liquibase -> {
+            List<ChangeSet> changes = liquibase.getDatabaseChangeLog().getChangeSets();
+            int firstWs2 = -1;
+            int changeSetIndex = -1;
+            for (int index = 0; index < changes.size(); index++) {
+                if (FIRST_WS2_CHANGESET.equals(changes.get(index).getId())) {
+                    firstWs2 = index;
+                }
+                if (changeSetId.equals(changes.get(index).getId())) {
+                    changeSetIndex = index;
+                }
+            }
+            assertThat(firstWs2).isPositive();
+            assertThat(changeSetIndex).isGreaterThanOrEqualTo(firstWs2);
+            liquibase.update(changeSetIndex - firstWs2 + 1,
+                    new Contexts(), new LabelExpression());
         });
     }
 
@@ -270,19 +306,6 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
         insertHistoricalBinding(jdbc, "invoice:2", "release-exact-newer");
         insertHistoricalBinding(jdbc, "claim:1", "release-ambiguous");
 
-        jdbc.sql("""
-                INSERT INTO CM_CASE
-                  (ID_, ENGINE_ID_, TENANT_ID_, CASE_DEF_ID_, CASE_DEF_KEY_, CASE_DEF_VER_,
-                   STATE_, ROOT_PROC_INST_ID_)
-                VALUES
-                  ('case-pending', 'remote-engine', 'tenant-a', 'invoice:1', 'invoice', 1,
-                   'ACTIVE', 'correlation-pending')""").update();
-        jdbc.sql("""
-                INSERT INTO CM_LINKED_PROCESS
-                  (ID_, CASE_ID_, PROC_INST_ID_, PROC_DEF_KEY_, ENGINE_SYNC_)
-                VALUES
-                  ('link-pending', 'case-pending', 'correlation-pending', 'invoice', 'PENDING')""")
-                .update();
     }
 
     private static void seedRemoteHistory(JdbcClient jdbc) {
@@ -452,29 +475,6 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
                 .single();
     }
 
-    private static RootState rootCase(JdbcClient jdbc, String caseId) {
-        return jdbc.sql("""
-                SELECT ROOT_PROC_INST_ID_, ROOT_CORRELATION_ID_
-                FROM CM_CASE WHERE ID_ = :caseId""")
-                .param("caseId", caseId)
-                .query((rs, row) -> new RootState(
-                        rs.getString("ROOT_PROC_INST_ID_"),
-                        rs.getString("ROOT_CORRELATION_ID_")))
-                .single();
-    }
-
-    private static LinkedRootState rootLink(JdbcClient jdbc, String linkId) {
-        return jdbc.sql("""
-                SELECT PROC_INST_ID_, CORRELATION_ID_, IS_CASE_ROOT_
-                FROM CM_LINKED_PROCESS WHERE ID_ = :linkId""")
-                .param("linkId", linkId)
-                .query((rs, row) -> new LinkedRootState(
-                        rs.getString("PROC_INST_ID_"),
-                        rs.getString("CORRELATION_ID_"),
-                        rs.getInt("IS_CASE_ROOT_")))
-                .single();
-    }
-
     private static Integer nullableInteger(java.sql.ResultSet resultSet, String column)
             throws SQLException {
         int value = resultSet.getInt(column);
@@ -543,11 +543,6 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
             String tenantId, String failureDetail) { }
 
     private record BindingAuthority(String caseDefinitionKey, String tenantId, String status) { }
-
-    private record RootState(String processInstanceId, String correlationId) { }
-
-    private record LinkedRootState(
-            String processInstanceId, String correlationId, int caseRoot) { }
 
     private record AppliedChangeSet(String id, int occurrences) { }
 }

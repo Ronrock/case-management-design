@@ -5,15 +5,19 @@
                        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
 
   <!--
-    A row with this historical mode was startable by the previous application.  Stop before
-    changing any constraint so an operator can explicitly retire or migrate the definition;
-    this migration never reinterprets or deletes business data.
+    Any retained legacy row is incompatible with the BPMN-only library. Stop before changing any
+    constraint so an operator can explicitly archive, remove, or migrate the data; this migration
+    never reinterprets or deletes business data.
   -->
   <changeSet id="cm-bpmn-only-legacy-preflight" author="casemgmt">
     <preConditions onFail="HALT" onError="HALT"
-                     onFailMessage="CM-BPMN-ONLY-LEGACY-ACTIVE: retire or migrate legacy PLAN_MODEL definitions before upgrading to the BPMN-only release">
+                     onFailMessage="CM-BPMN-ONLY-LEGACY-DATA: archive, remove, or migrate all retained PLAN_MODEL definitions and bindings before upgrading to the BPMN-only release">
       <sqlCheck expectedResult="0">
-        SELECT COUNT(*) FROM CM_CASE_DEF WHERE ORCHESTRATION_MODE_ = 'PLAN_MODEL'
+        SELECT COUNT(*) FROM (
+          SELECT 1 FROM CM_CASE_DEF WHERE ORCHESTRATION_MODE_ = 'PLAN_MODEL'
+          UNION ALL
+          SELECT 1 FROM CM_CASE_DEF_BINDING WHERE ORCHESTRATION_MODE_ = 'PLAN_MODEL'
+        )
       </sqlCheck>
     </preConditions>
     <sql splitStatements="false">BEGIN NULL; END;</sql>

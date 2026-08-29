@@ -200,7 +200,7 @@ public abstract class EngineGatewayContract {
     }
 
     @Test
-    void legacyPlanModelStartByKeyRemainsExplicitAndSelectsTheLatestVersion() {
+    void explicitStartByKeySelectsTheLatestVersionForLinkedProcesses() {
         DeployedProcess v1 = deployTestProcess(1);
         DeployedProcess v2 = deployTestProcess(2);
         assertThat(v1.key()).isEqualTo(v2.key());

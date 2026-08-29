@@ -23,9 +23,9 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.casemgmt.rules.PlanModelFixtures.definition;
-import static org.casemgmt.rules.PlanModelFixtures.item;
-import static org.casemgmt.rules.PlanModelFixtures.snapshot;
+import static org.casemgmt.rules.CaseFixtures.definition;
+import static org.casemgmt.rules.CaseFixtures.item;
+import static org.casemgmt.rules.CaseFixtures.snapshot;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;

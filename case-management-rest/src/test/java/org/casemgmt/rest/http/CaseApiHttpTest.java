@@ -422,7 +422,7 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
      *
      * <p>The row is inserted through {@code MilestoneRepository} — the production writer — rather
      * than driven through the plan model, because this fixture's milestone completes the instant
-     * it enters ({@code PlanModelEvaluator.targetOnEntry}), so the model never leaves one
+     * it enters, so the model never leaves one
      * unachieved for long enough to read.
      */
     @Test

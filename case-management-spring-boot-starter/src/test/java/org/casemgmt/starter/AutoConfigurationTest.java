@@ -184,6 +184,7 @@ class AutoConfigurationTest {
                     assertThat(context).doesNotHaveBean("planModelInstantiator");
                     assertThat(context).doesNotHaveBean("planModelOrchestration");
                     assertThat(context).doesNotHaveBean("legacyPlanModelObservationHandler");
+                    assertThat(context).doesNotHaveBean("planItemService");
                 });
     }
 

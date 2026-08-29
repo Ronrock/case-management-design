@@ -2,7 +2,6 @@ package org.casemgmt.poc;
 
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.SlaRepository;
-import org.casemgmt.service.CaseDefinitionService;
 import org.casemgmt.service.CaseDefinitionReleaseService;
 import org.casemgmt.service.CaseDefinitionVersionService;
 import org.casemgmt.release.ReleaseKind;
@@ -14,7 +13,6 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -36,14 +34,13 @@ public class PocBootstrap {
 
     @Bean
     public ApplicationRunner seed(IdentityService identity, RepositoryService repository,
-                                  CaseDefinitionService definitions, CaseDefinitionRepository defRepo,
+                                  CaseDefinitionRepository defRepo,
                                   CaseDefinitionReleaseService releases,
                                   CaseDefinitionVersionService versions, SlaRepository sla) {
         return args -> {
             seedUsers(identity);
             seedProcesses(repository);
             seedSla(sla);
-            seedDefinition(definitions, defRepo);
             seedBpmnDefinition(defRepo, releases, versions);
         };
     }
@@ -153,27 +150,11 @@ public class PocBootstrap {
         }
     }
 
-    /**
-     * Deviation D2: {@code CaseDefinitionService.deploy} takes a {@code tenantId} as its third
-     * argument (Task 24 fix round 2 moved it out of the document body — see that class's
-     * Javadoc), which the brief's own two-argument call does not compile against. The document's
-     * own {@code "tenantId": "t1"} field is harmless but now ignored by the service; passed
-     * {@link #TENANT_ID} explicitly instead so the two can never silently disagree.
-     */
-    private void seedDefinition(CaseDefinitionService definitions, CaseDefinitionRepository repo) throws Exception {
-        if (repo.findLatest("complaint", TENANT_ID).isPresent()) {
-            return;
-        }
-        String json = new String(new ClassPathResource("definitions/complaint-v1.json")
-                .getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        definitions.deploy(json, "system", TENANT_ID);
-    }
-
-    /** Scenario-A/BPMN demonstration while the original plan-model complaint remains compatible. */
+    /** Seeds the PoC's sole runnable complaint type through the BPMN release-binding path. */
     private void seedBpmnDefinition(CaseDefinitionRepository definitions,
                                     CaseDefinitionReleaseService releases,
                                     CaseDefinitionVersionService versions) throws Exception {
-        String key = "complaint-bpmn";
+        String key = "complaint";
         if (definitions.findLatest(key, TENANT_ID).isPresent()) {
             return;
         }

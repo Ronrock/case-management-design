@@ -11,7 +11,6 @@ import org.casemgmt.event.EventTypes;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
-import org.casemgmt.repo.PlanItemRepository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
@@ -21,9 +20,8 @@ import java.util.Map;
 /**
  * Worklist, claim and complete for {@code CM_TASK} rows — the human side of the case (spec
  * §4.5/§4.6). Completing a task validates its payload against the declared form schema, tells
- * the engine, marks the row COMPLETED, and completes the plan item behind it so the lifecycle
- * re-evaluates (a task never outlives its plan item, and the plan item supplies its lifecycle
- * context).
+ * the engine, and marks the row COMPLETED. Engine observations remain the sole authority for
+ * the associated plan-item projection.
  *
  * <p><b>Claim/complete legality must agree with {@code ActionPolicy.listForTask}</b>
  * (case-management-rest, Task 23) — checked directly against it while writing this class:
@@ -37,15 +35,14 @@ import java.util.Map;
  *   ever advertises {@code complete} for a {@code CLAIMED} task assigned to the calling user —
  *   this class enforces the state half of that (the identity half — "assigned to the calling
  *   user" — is authorization, which is {@code ActionPolicy}'s job at the REST boundary, the same
- *   division {@code PlanItemService} uses for its own actions). Requiring {@code CLAIMED} here
+ *   division used by the REST authorization boundary). Requiring {@code CLAIMED} here
  *   (not merely "not already ended") keeps the service exactly as permissive as the policy that
  *   gates it: the policy never offers {@code complete} on an {@code OPEN} task, so the service
  *   must not silently accept one either.</li>
  * </ul>
  *
  * <p><b>Completion order (brief, spec §4.6):</b> validate the payload -&gt; complete the engine
- * task -&gt; mark {@code CM_TASK} completed -&gt; complete the backing plan item -&gt; re-evaluate
- * (the last two happen inside {@link PlanItemService#complete}). If the engine call fails, the
+ * task -&gt; mark {@code CM_TASK} completed. If the engine call fails, the
  * whole transaction rolls back in embedded mode; in remote mode the command outbox retries it,
  * and the task stays {@code CLAIMED} until it succeeds.
  */
@@ -56,21 +53,16 @@ public class CaseTaskService {
     private final CaseDefinitionRepository definitions;
     private final EngineGateway engine;
     private final FormValidator formValidator;
-    private final PlanItemService planItems;
-    private final PlanItemRepository planItemRepo;
     private final EventPublisher publisher;
 
     public CaseTaskService(CaseTaskRepository tasks, CaseRepository cases,
                            CaseDefinitionRepository definitions, EngineGateway engine,
-                           FormValidator formValidator, PlanItemService planItems,
-                           PlanItemRepository planItemRepo, EventPublisher publisher) {
+                           FormValidator formValidator, EventPublisher publisher) {
         this.tasks = tasks;
         this.cases = cases;
         this.definitions = definitions;
         this.engine = engine;
         this.formValidator = formValidator;
-        this.planItems = planItems;
-        this.planItemRepo = planItemRepo;
         this.publisher = publisher;
     }
 

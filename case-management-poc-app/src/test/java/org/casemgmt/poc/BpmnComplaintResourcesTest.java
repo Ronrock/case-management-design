@@ -18,10 +18,10 @@ class BpmnComplaintResourcesTest {
     @Test
     void complaintBpmnAndScenarioAMetadataAreStructurallyLoadable() throws Exception {
         byte[] process = bytes("processes/complaint-bpmn.bpmn");
-        var index = BpmnReleaseValidator.validate("complaint-bpmn", process,
+        var index = BpmnReleaseValidator.validate("complaint", process,
                 "application/bpmn+xml");
 
-        assertThat(index.processIds()).contains("complaint-bpmn");
+        assertThat(index.processIds()).contains("complaint");
         assertThat(index.formRefs()).contains("registerForm", "assessForm", "closeForm");
         assertThat(index.milestoneIds()).contains("acknowledged", "decided");
         assertThat(index.candidateGroups()).contains("intake", "handlers");
@@ -31,7 +31,7 @@ class BpmnComplaintResourcesTest {
 
         var contract = JsonCodec.toMap(text("definitions/complaint-bpmn-contract.json"));
         var presentation = JsonCodec.toMap(text("definitions/complaint-bpmn-presentation.json"));
-        assertThat(contract.get("key")).isEqualTo("complaint-bpmn");
+        assertThat(contract.get("key")).isEqualTo("complaint");
         assertThat(presentation.get("version")).isEqualTo("1.0");
     }
 
@@ -45,11 +45,11 @@ class BpmnComplaintResourcesTest {
     @Test
     void complaintContractPassesPublicationValidationAndResolvesEveryBpmnReference() throws Exception {
         ValidatedCaseContract contract = new JsonSchemaCaseContractValidator()
-                .validate("complaint-bpmn", bytes("definitions/complaint-bpmn-contract.json"));
+                .validate("complaint", bytes("definitions/complaint-bpmn-contract.json"));
 
         assertThat(contract.orchestrationMode()).isEqualTo(OrchestrationMode.BPMN);
 
-        var index = BpmnReleaseValidator.validate("complaint-bpmn",
+        var index = BpmnReleaseValidator.validate("complaint",
                 bytes("processes/complaint-bpmn.bpmn"), "application/bpmn+xml");
 
         assertThat(contract.forms().keySet()).containsAll(index.formRefs());

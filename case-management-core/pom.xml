@@ -99,7 +99,6 @@
               <includes>
                 <include>org/casemgmt/engine/EngineGatewayContract*</include>
                 <include>org/casemgmt/OracleTestBase.class</include>
-                <include>org/casemgmt/rules/PlanModelFixtures.class</include>
                 <include>definitions/test-definition.json</include>
               </includes>
             </configuration>

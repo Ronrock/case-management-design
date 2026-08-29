@@ -51,7 +51,6 @@ import org.casemgmt.service.DocumentService;
 import org.casemgmt.service.FormValidator;
 import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.service.MilestoneService;
-import org.casemgmt.service.PlanItemService;
 import org.casemgmt.service.TransitionApplier;
 import org.casemgmt.service.WebhookService;
 import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
@@ -221,19 +220,10 @@ public class CaseApiTestConfig {
     }
 
     @Bean
-    public PlanItemService planItemService(PlanItemRepository planItems, CaseService cases,
-                                           TransitionApplier applier, EventPublisher publisher,
-                                           StageCompletion stageCompletion) {
-        return new PlanItemService(planItems, cases, applier, publisher, stageCompletion);
-    }
-
-    @Bean
     public CaseTaskService caseTaskService(CaseTaskRepository tasks, CaseRepository cases,
                                             CaseDefinitionRepository definitions, EngineGateway engine,
-                                            FormValidator formValidator, PlanItemService planItems,
-                                            PlanItemRepository planItemRepo, EventPublisher publisher) {
-        return new CaseTaskService(tasks, cases, definitions, engine, formValidator, planItems,
-                planItemRepo, publisher);
+                                            FormValidator formValidator, EventPublisher publisher) {
+        return new CaseTaskService(tasks, cases, definitions, engine, formValidator, publisher);
     }
 
     @Bean

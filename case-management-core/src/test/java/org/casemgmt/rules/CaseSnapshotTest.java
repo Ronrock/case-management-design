@@ -8,13 +8,13 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.casemgmt.rules.PlanModelFixtures.*;
+import static org.casemgmt.rules.CaseFixtures.*;
 
 class CaseSnapshotTest {
 
     @Test
     void latestBreaksIdenticalCreatedAtTiesByRepetitionNo() {
-        // PlanModelInstantiator.repeat() stamps each repeat instance with an independent
+        // Each repeat instance carries an independent
         // OffsetDateTime.now(); two repeats created within the same clock tick can share a
         // createdAt. repetitionNo is the monotonic key that actually orders instances of a
         // defKey — createdAt alone must not be trusted to break the tie.

@@ -12,7 +12,7 @@ import org.testcontainers.oracle.OracleContainer;
  * <p>Deliberately not reusable across separate {@code mvn test} invocations: {@code
  * PocBootstrap.seedDefinition} is idempotent ("does complaint v1 already exist? skip if so"), so
  * a container reused from an earlier local run would silently keep serving a stale {@code
- * complaint-v1.json} to every test through a whole edit-rerun cycle during development, with no
+ * BPMN complaint release to every test through a whole edit-rerun cycle during development, with no
  * signal that the fixture on disk and the fixture actually exercised had diverged. A fresh
  * container per test-JVM run removes that whole class of self-inflicted staleness, at the cost of
  * the one-time startup above.

@@ -10,8 +10,8 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.casemgmt.rules.PlanModelFixtures.caseInstance;
-import static org.casemgmt.rules.PlanModelFixtures.definition;
+import static org.casemgmt.rules.CaseFixtures.caseInstance;
+import static org.casemgmt.rules.CaseFixtures.definition;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;

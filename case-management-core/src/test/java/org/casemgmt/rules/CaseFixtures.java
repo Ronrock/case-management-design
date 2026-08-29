@@ -6,15 +6,11 @@ import java.time.OffsetDateTime;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 
-/** Domain-free plan models for evaluator tests. No case type appears here. */
-public final class PlanModelFixtures {
+/** Domain-neutral case and projection fixtures. */
+public final class CaseFixtures {
 
-    private PlanModelFixtures() {}
+    private CaseFixtures() {}
 
-    // Each item() call gets a strictly later createdAt than the previous one. Without this,
-    // CaseSnapshot.latest(defKey) — which orders by createdAt — would see ties resolved
-    // nondeterministically by whatever order the JVM's clock or list happens to produce,
-    // and repetition-style tests (several PlanItems sharing a defKey) would flake.
     private static final OffsetDateTime BASE = OffsetDateTime.now();
     private static final AtomicLong SEQUENCE = new AtomicLong();
 

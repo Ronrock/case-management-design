@@ -97,12 +97,8 @@ All endpoints are under `/case-api/v2`. The authoritative contract is
 | Method | Path |
 |---|---|
 | `GET` | `/cases/{caseId}/plan-items` |
-| `POST` | `/cases/{caseId}/plan-items/{itemId}/enable` |
-| `POST` | `/cases/{caseId}/plan-items/{itemId}/start` |
-| `POST` | `/cases/{caseId}/plan-items/{itemId}/complete` |
-| `POST` | `/cases/{caseId}/plan-items/{itemId}/terminate` |
 
-All four actions funnel through a single `act` method — the only route to `PlanItemService`.
+The rows are read-only BPMN engine projections; the API exposes no manual transition endpoint.
 
 ### 3.3 Tasks — `TaskController`
 
@@ -256,7 +252,7 @@ stateDiagram-v2
 
 ### 5.3 Services
 
-`CaseService`, `PlanItemService`, `CaseTaskService`, `CommentService`, `DocumentService`,
+`CaseService`, `CaseTaskService`, `CommentService`, `DocumentService`,
 `MilestoneService`, `LinkedProcessService`, `WebhookService`, `CaseDefinitionService`,
 `SlaService`.
 

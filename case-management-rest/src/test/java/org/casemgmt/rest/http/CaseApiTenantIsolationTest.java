@@ -375,7 +375,7 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
         deployDefinition();
 
         // t2 deploys the SAME key with a distinguishable plan item. The distinguisher is the
-        // defKey, not the display name: PlanModelInstantiator sets PlanItem.name from defKey, so
+        // defKey, not the display name, so
         // renaming only the "name" field would produce identical plan items and the assertion
         // below would be unfalsifiable. Renaming the milestone is safe — nothing declares it as
         // a parentStageKey, and its entry criterion refers to "review", which is unchanged.

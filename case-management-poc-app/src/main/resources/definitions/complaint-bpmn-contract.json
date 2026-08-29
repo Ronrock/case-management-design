@@ -1,5 +1,5 @@
 {
-  "key": "complaint-bpmn",
+  "key": "complaint",
   "orchestrationMode": "BPMN",
   "name": "Complaint Handling (BPMN)",
   "version": "1.0",

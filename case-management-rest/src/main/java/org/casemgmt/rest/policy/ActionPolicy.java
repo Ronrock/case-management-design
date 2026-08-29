@@ -3,7 +3,6 @@ package org.casemgmt.rest.policy;
 import org.casemgmt.domain.*;
 import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.rules.CaseSnapshot;
-import org.casemgmt.rules.StageCompletion;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,8 +30,6 @@ public class ActionPolicy {
      */
     private static final Set<String> ADMIN_GROUPS = Set.of("admin");
 
-    private final StageCompletion stageCompletion = new StageCompletion();
-
     public List<AvailableAction> listForCase(CaseSnapshot snapshot, Set<String> callerRoles) {
         List<AvailableAction> actions = new ArrayList<>();
         String base = "/cases/" + snapshot.caseInstance().id();
@@ -48,51 +45,10 @@ public class ActionPolicy {
         return actions;
     }
 
-    /**
-     * <p><b>Consults {@link StageCompletion} — final whole-branch review, Important 2.</b> This
-     * method used to be a bare state-transition table, written without reference to
-     * {@code StageCompletion} at all, while {@code PlanItemService} enforced the same bare
-     * table. So the API advertised {@code complete} on a stage with live required children (the
-     * generic consumer hit exactly that: it force-completed a stage, orphaned the worklist task
-     * beneath it, and had to start excluding {@code STAGE} by TYPE to stay out of the way), and
-     * advertised {@code enable} on a child of a stage that had never started.
-     *
-     * <p>The enforcement now lives in {@code PlanItemService.assertModelInvariants} — a client
-     * POSTing the URL directly never reads this projection, so a fix here alone would fix
-     * nothing. This mirror is what keeps the promise the class Javadoc above makes: one set of
-     * rules behind both surfaces, so the API never offers an action the server then refuses.
-     * The two conditions are literally the same two calls the service makes.
-     */
+    /** Engine-projected plan items are read-only in the BPMN-only runtime. */
     public List<AvailableAction> listForPlanItem(CaseSnapshot snapshot, PlanItem item,
                                                   Set<String> callerRoles) {
-        List<AvailableAction> actions = new ArrayList<>();
-        if (!mayMutate(callerRoles) || item.state().isEnded()) {
-            return actions;
-        }
-        String base = "/cases/" + item.caseId() + "/plan-items/" + item.id();
-        boolean contained = stageCompletion.isContained(snapshot, item);
-        switch (item.state()) {
-            case AVAILABLE -> {
-                if (contained) {
-                    actions.add(AvailableAction.post("enable", base + "/enable"));
-                }
-                actions.add(AvailableAction.post("terminate", base + "/terminate"));
-            }
-            case ENABLED -> {
-                if (contained) {
-                    actions.add(AvailableAction.post("start", base + "/start"));
-                }
-                actions.add(AvailableAction.post("terminate", base + "/terminate"));
-            }
-            case ACTIVE -> {
-                if (stageCompletion.blockingItems(snapshot, item).isEmpty()) {
-                    actions.add(AvailableAction.post("complete", base + "/complete"));
-                }
-                actions.add(AvailableAction.post("terminate", base + "/terminate"));
-            }
-            default -> { }
-        }
-        return actions;
+        return List.of();
     }
 
     public List<AvailableAction> listForTask(CaseTask task, String callerUserId,
@@ -264,17 +220,6 @@ public class ActionPolicy {
                     "Action '" + action + "' is not available on case "
                             + snapshot.caseInstance().id() + " in state "
                             + snapshot.caseInstance().state(),
-                    allowed.stream().map(AvailableAction::action).toList());
-        }
-    }
-
-    public void assertAllowedOnPlanItem(CaseSnapshot snapshot, PlanItem item, Set<String> callerRoles,
-                                         String action) {
-        List<AvailableAction> allowed = listForPlanItem(snapshot, item, callerRoles);
-        if (allowed.stream().noneMatch(a -> a.action().equals(action))) {
-            throw new CaseConflictException("action-not-available",
-                    "Action '" + action + "' is not available on plan item " + item.id()
-                            + " in state " + item.state(),
                     allowed.stream().map(AvailableAction::action).toList());
         }
     }

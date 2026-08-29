@@ -12,7 +12,7 @@ import java.time.OffsetDateTime;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** H2 proof of the exact-row atomic definition claim used for migrated PLAN_MODEL links. */
+/** H2 proof of the exact-row atomic definition claim used for linked-process starts. */
 class LinkedProcessDefinitionClaimTest {
 
     private JdbcClient jdbc;

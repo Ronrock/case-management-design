@@ -43,7 +43,6 @@ import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.service.CaseDataMappingService;
 import org.casemgmt.service.ContractCaseDataMappingService;
 import org.casemgmt.service.MilestoneService;
-import org.casemgmt.service.PlanItemService;
 import org.casemgmt.service.TransitionApplier;
 import org.casemgmt.service.AdHocActionService;
 import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
@@ -200,19 +199,10 @@ public class CaseManagementServiceConfiguration {
     }
 
     @Bean
-    public PlanItemService planItemService(PlanItemRepository planItems, CaseService cases,
-                                           TransitionApplier applier, EventPublisher publisher,
-                                           StageCompletion stageCompletion) {
-        return new PlanItemService(planItems, cases, applier, publisher, stageCompletion);
-    }
-
-    @Bean
     public CaseTaskService caseTaskService(CaseTaskRepository tasks, CaseRepository cases,
                                            CaseDefinitionRepository definitions, EngineGateway engine,
-                                           FormValidator validator, PlanItemService planItems,
-                                           PlanItemRepository planItemRepo, EventPublisher publisher) {
-        return new CaseTaskService(tasks, cases, definitions, engine, validator, planItems,
-                planItemRepo, publisher);
+                                           FormValidator validator, EventPublisher publisher) {
+        return new CaseTaskService(tasks, cases, definitions, engine, validator, publisher);
     }
 
     @Bean
