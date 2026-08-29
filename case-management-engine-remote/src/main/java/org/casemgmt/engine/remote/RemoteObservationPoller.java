@@ -97,8 +97,8 @@ public final class RemoteObservationPoller {
     }
 
     private int observeActivities(OffsetDateTime from, OffsetDateTime observedAt) {
-        List<Map<String, Object>> rows = getList("/history/activity-instance?startedAfter="
-                + encoded(from) + "&maxResults=500&sortBy=startTime&sortOrder=asc");
+        List<Map<String, Object>> rows = historyRows("/history/activity-instance?startedAfter="
+                + encoded(from), "startTime");
         int count = 0;
         for (Map<String, Object> row : rows) {
             String processDefinitionId = string(row.get("processDefinitionId"));
@@ -127,8 +127,8 @@ public final class RemoteObservationPoller {
 
     @SuppressWarnings("unchecked")
     private int observeTasks(OffsetDateTime from, OffsetDateTime observedAt) {
-        List<Map<String, Object>> rows = getList("/history/task?startedAfter=" + encoded(from)
-                + "&maxResults=500&sortBy=startTime&sortOrder=asc");
+        List<Map<String, Object>> rows = historyRows("/history/task?startedAfter=" + encoded(from),
+                "startTime");
         int count = 0;
         for (Map<String, Object> row : rows) {
             String processInstanceId = string(row.get("processInstanceId"));
@@ -163,9 +163,8 @@ public final class RemoteObservationPoller {
     }
 
     private int observeCompletedProcesses(OffsetDateTime from, OffsetDateTime observedAt) {
-        List<Map<String, Object>> rows = getList("/history/process-instance?finished=true"
-                + "&finishedAfter=" + encoded(from) + "&maxResults=500"
-                + "&sortBy=endTime&sortOrder=asc");
+        List<Map<String, Object>> rows = historyRows("/history/process-instance?finished=true"
+                + "&finishedAfter=" + encoded(from), "endTime");
         int count = 0;
         for (Map<String, Object> row : rows) {
             String caseId = string(row.get("businessKey"));
@@ -188,6 +187,33 @@ public final class RemoteObservationPoller {
         } catch (RestClientException e) {
             throw new EngineException("Remote history process lookup failed: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Never advance the poll checkpoint after only the engine default's first 500 rows.  Operaton
+     * accepts {@code firstResult}/{@code maxResults}; every page is collected before its stream
+     * is projected, then locally ordered by the immutable timestamp/id pair for equal-time rows.
+     */
+    private List<Map<String, Object>> historyRows(String path, String timestampField) {
+        return RemoteHistoryPagination.readAll(500, (firstResult, maxResults) -> {
+            List<Map<String, Object>> page = getList(path + "&firstResult=" + firstResult
+                    + "&maxResults=" + maxResults + "&sortBy=" + timestampField
+                    + "&sortOrder=asc");
+            return page.stream().map(row -> new RemoteHistoryPagination.Row<>(
+                    timestamp(row, timestampField).toInstant(), requiredHistoryId(row), row)).toList();
+        }).stream().map(RemoteHistoryPagination.Row::value).toList();
+    }
+
+    private static OffsetDateTime timestamp(Map<String, Object> row, String field) {
+        OffsetDateTime value = parseTime(row.get(field));
+        if (value == null) throw new EngineException("Remote history row has no " + field);
+        return value;
+    }
+
+    private static String requiredHistoryId(Map<String, Object> row) {
+        String id = firstString(row.get("id"), row.get("activityInstanceId"));
+        if (id == null) throw new EngineException("Remote history row has no stable id");
+        return id;
     }
 
     @SuppressWarnings("unchecked")

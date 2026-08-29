@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+  <!-- A cursor is separate for every tenant/feed. The ordered pair prevents equal timestamps
+       from collapsing into one global watermark. Inbox delivery is added with its handler slice;
+       this table first closes the history-loss gap. -->
+  <changeSet id="cm-remote-observation-checkpoint" author="casemgmt">
+    <createTable tableName="CM_REMOTE_OBS_CHECKPOINT">
+      <column name="TENANT_ID_" type="VARCHAR2(64 BYTE)"><constraints nullable="false"/></column>
+      <column name="STREAM_" type="VARCHAR2(32 BYTE)"><constraints nullable="false"/></column>
+      <column name="EVENT_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="EVENT_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="UPDATED_AT_" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="SYSTIMESTAMP"><constraints nullable="false"/></column>
+    </createTable>
+    <addPrimaryKey tableName="CM_REMOTE_OBS_CHECKPOINT" columnNames="TENANT_ID_,STREAM_"
+                   constraintName="PK_CM_REMOTE_OBS_CP"/>
+  </changeSet>
+  <changeSet id="cm-remote-observation-checkpoint-stream-check" author="casemgmt">
+    <sql>ALTER TABLE CM_REMOTE_OBS_CHECKPOINT ADD CONSTRAINT CK_CM_REMOTE_OBS_CP_STREAM
+      CHECK (STREAM_ IN ('TASKS','ACTIVITIES','PROCESSES'))</sql>
+  </changeSet>
+</databaseChangeLog>

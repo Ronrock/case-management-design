@@ -19,4 +19,5 @@
   <include file="db/changelog/cm-engine-observation-effects.xml"/>
   <include file="db/changelog/cm-production-engine-command.xml"/>
   <include file="db/changelog/cm-bpmn-only.xml"/>
+  <include file="db/changelog/cm-remote-observation-inbox.xml"/>
 </databaseChangeLog>
