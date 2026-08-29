@@ -619,6 +619,47 @@ class EngineCommandPolicyTest {
                 null, null, null));
     }
 
+    @Test
+    void aBoundCreateTaskPartialEffectIsImmediatelyDueForIdempotentRepair() {
+        var evidence = new CommandDispatchOutcome.RepairEvidence(
+                "tenant-a", "operation-a", "command-a", EngineCommand.Type.CREATE_TASK,
+                "plan-item-a", "cm-command-command-a", 204,
+                CommandDispatchOutcome.RepairSource.PRIMARY_HTTP_RESPONSE,
+                "create:command-a");
+        var outcome = CommandDispatchOutcome.repairablePartialEffect(
+                evidence, new CommandDispatchOutcome.HttpResult(
+                        429, POSSIBLY_ACCEPTED, Duration.ofSeconds(30)));
+
+        EngineCommandPolicy.Decision repaired = transition(
+                state(EngineCommand.Type.CREATE_TASK, EngineCommandStatus.DISPATCHING), outcome);
+
+        assertThat(repaired.status()).isEqualTo(EngineCommandStatus.RETRYABLE);
+        assertThat(repaired.nextAttemptAt()).isEqualTo(NOW_OFFSET);
+        assertThat(repaired.errorCode()).isEqualTo("create_task.repair_pending");
+        assertThat(repaired.safeSummary())
+                .isEqualTo("Created task requires idempotent postcondition repair");
+        assertThat(repaired.totalDispatchAttempts()).isEqualTo(TOTAL);
+        assertThat(repaired.automaticAttemptsInBudget()).isEqualTo(BUDGET_ATTEMPTS);
+    }
+
+    @Test
+    void repairEvidenceCannotReclassifyAnotherCommandOrAnUnboundRemoteTask() {
+        assertThatThrownBy(() -> new CommandDispatchOutcome.RepairEvidence(
+                "tenant-a", "operation-a", "command-a", EngineCommand.Type.COMPLETE_TASK,
+                "task-a", "cm-command-command-a", 204,
+                CommandDispatchOutcome.RepairSource.PRIMARY_HTTP_RESPONSE,
+                "create:command-a"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("CREATE_TASK");
+        assertThatThrownBy(() -> new CommandDispatchOutcome.RepairEvidence(
+                "tenant-a", "operation-a", "command-a", EngineCommand.Type.CREATE_TASK,
+                "plan-item-a", "some-other-task", 204,
+                CommandDispatchOutcome.RepairSource.PRIMARY_HTTP_RESPONSE,
+                "create:command-a"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("deterministic");
+    }
+
     private static Arguments mismatch(
             String label, String tenant, String operation, String commandId,
             EngineCommand.Type type, String target, String remoteIdentity,

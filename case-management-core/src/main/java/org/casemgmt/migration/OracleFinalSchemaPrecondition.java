@@ -53,7 +53,7 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
         add(columns, "CM_ENGINE_COMMAND", false,
                 v("ID_",64,false,null), v("CASE_ID_",140,false,null),
                 v("TYPE_",30,false,null), clob("PAYLOAD_JSON_",true,null),
-                v("STATUS_",20,false,"PENDING"), num("ATTEMPTS_",3,false,"0"),
+                v("STATUS_",32,false,"PENDING"), num("ATTEMPTS_",3,false,"0"),
                 ts("NEXT_ATTEMPT_AT_",true,null), v("LAST_ERROR_",2000,true,null),
                 ts("CREATED_AT_",false,"SYSTIMESTAMP"), v("CLAIM_TOKEN_",64,true,null),
                 ts("CLAIMED_AT_",true,null), v("OPERATION_ID_",64,false,null),
@@ -95,7 +95,7 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                 v("COMMAND_ID_",64,false,null), num("VERSION_",19,false,null),
                 v("TENANT_ID_",64,false,null), v("OPERATION_ID_",64,false,null),
                 v("COMMAND_TYPE_",30,false,null), v("EXPECTED_TARGET_",255,false,null),
-                v("FROM_STATUS_",20,false,null), v("TO_STATUS_",20,false,null),
+                v("FROM_STATUS_",32,false,null), v("TO_STATUS_",32,false,null),
                 num("OUTCOME_FORMAT_",3,false,null), v("OUTCOME_KIND_",40,false,null),
                 clob("OUTCOME_JSON_",false,null), num("ACTION_SEQUENCE_",19,true,null),
                 ts("DECIDED_AT_",false,null), v("PREVIOUS_DECISION_DIGEST_",64,true,null),
@@ -131,7 +131,7 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                 new ConstraintContract("CK_CM_ENGCMD_LEASE","CM_ENGINE_COMMAND","C",null,null,
                         "(STATUS_='DISPATCHING'ANDLEASE_TOKEN_ISNOTNULLANDLEASE_OWNER_ISNOTNULLANDLEASE_EXPIRES_AT_ISNOTNULL)OR(STATUS_<>'DISPATCHING'ANDLEASE_TOKEN_ISNULLANDLEASE_OWNER_ISNULLANDLEASE_EXPIRES_AT_ISNULL)"),
                 new ConstraintContract("CK_CM_ENGCMD_TEMPORAL","CM_ENGINE_COMMAND","C",null,null,
-                        "((STATUS_='RETRYABLE'ANDNEXT_ATTEMPT_AT_ISNOTNULLANDNEXT_ATTEMPT_AT_>DECIDED_AT_)OR(STATUS_<>'RETRYABLE'ANDNEXT_ATTEMPT_AT_ISNULL))AND((STATUS_='DISPATCHING'ANDLEASE_EXPIRES_AT_>DECIDED_AT_)ORSTATUS_<>'DISPATCHING')AND((STATUS_='CONFIRMED'ANDCONFIRMED_AT_=DECIDED_AT_)OR(STATUS_<>'CONFIRMED'ANDCONFIRMED_AT_ISNULL))AND((STATUS_='FAILED'ANDFAILED_AT_=DECIDED_AT_)OR(STATUS_<>'FAILED'ANDFAILED_AT_ISNULL))AND(DISPATCHED_AT_ISNULLOR(DISPATCHED_AT_>=CREATED_AT_ANDDISPATCHED_AT_<=DECIDED_AT_))AND(TOTAL_DISPATCH_ATTEMPTS_>0ORDISPATCHED_AT_ISNULL)"),
+                        "((STATUS_='RETRYABLE'ANDNEXT_ATTEMPT_AT_ISNOTNULLANDNEXT_ATTEMPT_AT_>=DECIDED_AT_)OR(STATUS_<>'RETRYABLE'ANDNEXT_ATTEMPT_AT_ISNULL))AND((STATUS_='DISPATCHING'ANDLEASE_EXPIRES_AT_>DECIDED_AT_)ORSTATUS_<>'DISPATCHING')AND((STATUS_='CONFIRMED'ANDCONFIRMED_AT_=DECIDED_AT_)OR(STATUS_<>'CONFIRMED'ANDCONFIRMED_AT_ISNULL))AND((STATUS_='FAILED'ANDFAILED_AT_=DECIDED_AT_)OR(STATUS_<>'FAILED'ANDFAILED_AT_ISNULL))AND(DISPATCHED_AT_ISNULLOR(DISPATCHED_AT_>=CREATED_AT_ANDDISPATCHED_AT_<=DECIDED_AT_))AND(TOTAL_DISPATCH_ATTEMPTS_>0ORDISPATCHED_AT_ISNULL)"),
                 new ConstraintContract("CK_CM_ECA_INVARIANTS","CM_ENGINE_COMMAND_ACTION","C",null,null,
                         "SEQUENCE_>0ANDOVERRIDE_AUTO_CAP_IN(0,1)AND((REVIEW_FINDING_ISNULLANDREVIEW_SOURCE_ISNULLANDREVIEW_REFERENCE_ISNULL)OR(REVIEW_FINDING_ISNOTNULLANDREVIEW_SOURCE_ISNOTNULLANDREVIEW_REFERENCE_ISNOTNULL))"),
                 new ConstraintContract("FK_CM_ECA_COMMAND","CM_ENGINE_COMMAND_ACTION","R",
@@ -142,7 +142,7 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                         List.of("COMMAND_ID_","VERSION_"),null,null),
                 new ConstraintContract("CK_CM_ECT_INVARIANTS","CM_ENGINE_COMMAND_TRANSITION","C",
                         null,null,
-                        "OUTCOME_FORMAT_=1AND((VERSION_=0ANDPREVIOUS_DECISION_DIGEST_ISNULLANDFROM_STATUS_=TO_STATUS_ANDACTION_SEQUENCE_ISNULL)OR(VERSION_>0ANDPREVIOUS_DECISION_DIGEST_ISNOTNULL))AND(ACTION_SEQUENCE_ISNULLORACTION_SEQUENCE_>0)"),
+                        "OUTCOME_FORMAT_IN(1,2)AND((VERSION_=0ANDPREVIOUS_DECISION_DIGEST_ISNULLANDFROM_STATUS_=TO_STATUS_ANDACTION_SEQUENCE_ISNULL)OR(VERSION_>0ANDPREVIOUS_DECISION_DIGEST_ISNOTNULL))AND(ACTION_SEQUENCE_ISNULLORACTION_SEQUENCE_>0)"),
                 new ConstraintContract("FK_CM_ECT_COMMAND","CM_ENGINE_COMMAND_TRANSITION","R",
                         List.of("COMMAND_ID_"),"CM_ENGINE_COMMAND:ID_",null),
                 new ConstraintContract("FK_CM_ECT_ACTION","CM_ENGINE_COMMAND_TRANSITION","R",
@@ -152,17 +152,21 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
 
     private static List<IndexContract> productionIndexes() {
         return List.of(
-                ix("IX_CM_ENGCMD_DUE","CM_ENGINE_COMMAND",false,"STATUS_","NEXT_ATTEMPT_AT_"),
+                ix("IX_CM_ENGCMD_DUE","CM_ENGINE_COMMAND",false,"STATUS_",
+                        "SYS_EXTRACT_UTC(NEXT_ATTEMPT_AT_)"),
                 ix("IX_CM_ENGCMD_CLAIM","CM_ENGINE_COMMAND",false,"CLAIM_TOKEN_"),
                 ix("UQ_CM_ENGCMD_OPERATION","CM_ENGINE_COMMAND",true,
                         "CASEWHENTENANT_ID_ISNULLTHEN1ELSE0END","TENANT_ID_","OPERATION_ID_"),
                 ix("UQ_CM_ENGCMD_IDEMPOTENCY","CM_ENGINE_COMMAND",true,
                         "CASEWHENTENANT_ID_ISNULLTHEN1ELSE0END","TENANT_ID_","IDEMPOTENCY_KEY_"),
                 ix("IX_CM_ENGCMD_PROD_DUE","CM_ENGINE_COMMAND",false,
-                        "STATUS_","NEXT_ATTEMPT_AT_","CREATED_AT_"),
-                ix("IX_CM_ENGCMD_LEASE","CM_ENGINE_COMMAND",false,"STATUS_","LEASE_EXPIRES_AT_"),
+                        "STATUS_","SYS_EXTRACT_UTC(NEXT_ATTEMPT_AT_)",
+                        "SYS_EXTRACT_UTC(CREATED_AT_)"),
+                ix("IX_CM_ENGCMD_LEASE","CM_ENGINE_COMMAND",false,"STATUS_",
+                        "SYS_EXTRACT_UTC(LEASE_EXPIRES_AT_)"),
                 ix("IX_CM_ENGCMD_CASE_STATUS","CM_ENGINE_COMMAND",false,"TENANT_ID_","CASE_ID_","STATUS_"),
-                ix("IX_CM_ENGCMD_REVIEW","CM_ENGINE_COMMAND",false,"STATUS_","UPDATED_AT_"),
+                ix("IX_CM_ENGCMD_REVIEW","CM_ENGINE_COMMAND",false,"STATUS_",
+                        "SYS_EXTRACT_UTC(UPDATED_AT_)"),
                 ix("UQ_CM_ECA_ACTION","CM_ENGINE_COMMAND_ACTION",true,"COMMAND_ID_","ACTION_ID_"),
                 ix("UQ_CM_ECA_SEQUENCE","CM_ENGINE_COMMAND_ACTION",true,"COMMAND_ID_","SEQUENCE_"),
                 ix("PK_CM_ECT","CM_ENGINE_COMMAND_TRANSITION",true,"COMMAND_ID_","VERSION_"));
@@ -181,7 +185,7 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                 ix("UQ_CM_AEO_AUTH_FINGERPRINT","CM_APPLIED_ENGINE_OBSERVATION",true,
                         "CASEWHENTENANT_ID_ISNULLTHEN1ELSE0END","TENANT_ID_","FINGERPRINT_"),
                 ix("IX_CM_AEO_STATUS","CM_APPLIED_ENGINE_OBSERVATION",false,
-                        "STATUS_","CLAIMED_AT_"),
+                        "STATUS_","SYS_EXTRACT_UTC(CLAIMED_AT_)"),
                 ix("IX_CM_AEO_ENGINE_ENTITY","CM_APPLIED_ENGINE_OBSERVATION",false,
                         "TENANT_ID_","ENGINE_ID_","CASE_ID_","PROCESS_INSTANCE_ID_",
                         "OBSERVATION_KIND_","ENTITY_ID_","STATUS_"),
@@ -201,7 +205,8 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
         return new ColumnContract(null,name,"NUMBER",precision,0,nullable,defaultValue,false);
     }
     private static ColumnContract ts(String name, boolean nullable, String defaultValue) {
-        return new ColumnContract(null,name,"TIMESTAMP WITH TIME ZONE",null,6,nullable,defaultValue,false);
+        return new ColumnContract(null,name,"TIMESTAMP(6) WITH TIME ZONE",null,6,
+                nullable,defaultValue,false);
     }
     private static ColumnContract clob(String name, boolean nullable, String defaultValue) {
         return new ColumnContract(null,name,"CLOB",null,null,nullable,defaultValue,false);
@@ -315,20 +320,39 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
         private void verifyIndexes(Connection connection, List<String> differences)
                 throws SQLException {
             for (IndexContract expected : indexes) {
-                try (var statement = connection.prepareStatement("""
-                        SELECT TABLE_OWNER,TABLE_NAME,UNIQUENESS,STATUS,VISIBILITY
-                        FROM USER_INDEXES WHERE INDEX_NAME=?
-                        """)) {
-                    statement.setString(1, expected.name());
-                    try (ResultSet row = statement.executeQuery()) {
-                        if (!row.next() || !currentSchema(connection).equalsIgnoreCase(row.getString(1))
-                                || !expected.table().equals(row.getString(2))
-                                || !(expected.unique()?"UNIQUE":"NONUNIQUE").equals(row.getString(3))
-                                || !"VALID".equals(row.getString(4)) || !"VISIBLE".equals(row.getString(5))
-                                || !expected.entries().equals(indexEntries(connection, expected.name()))) {
-                            differences.add(expected.name()+" index");
-                        }
-                    }
+                if (!indexMatches(connection, expected)) {
+                    differences.add(expected.name()+" index");
+                }
+            }
+        }
+
+        static boolean indexExists(Connection connection, String name) throws SQLException {
+            try (var statement = connection.prepareStatement(
+                    "SELECT COUNT(*) FROM USER_INDEXES WHERE INDEX_NAME=?")) {
+                statement.setString(1, name);
+                try (ResultSet row = statement.executeQuery()) {
+                    row.next();
+                    return row.getInt(1) == 1;
+                }
+            }
+        }
+
+        static boolean indexMatches(Connection connection, IndexContract expected)
+                throws SQLException {
+            try (var statement = connection.prepareStatement("""
+                    SELECT TABLE_OWNER,TABLE_NAME,UNIQUENESS,STATUS,VISIBILITY
+                    FROM USER_INDEXES WHERE INDEX_NAME=?
+                    """)) {
+                statement.setString(1, expected.name());
+                try (ResultSet row = statement.executeQuery()) {
+                    return row.next()
+                            && currentSchema(connection).equalsIgnoreCase(row.getString(1))
+                            && expected.table().equals(row.getString(2))
+                            && (expected.unique()?"UNIQUE":"NONUNIQUE").equals(row.getString(3))
+                            && "VALID".equals(row.getString(4))
+                            && "VISIBLE".equals(row.getString(5))
+                            && expected.entries().equals(indexEntries(connection, expected.name()))
+                            && !row.next();
                 }
             }
         }
@@ -456,7 +480,7 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                         && "B".equals(charUsed) && precision==null && scale==null;
                 case "NUMBER" -> Objects.equals(expected.size(),precision)
                         && Objects.equals(expected.scale(),scale) && charUsed==null;
-                case "TIMESTAMP WITH TIME ZONE" -> Objects.equals(expected.scale(),scale)
+                case "TIMESTAMP(6) WITH TIME ZONE" -> Objects.equals(expected.scale(),scale)
                         && precision==null && charUsed==null;
                 case "CLOB" -> precision==null && scale==null && charUsed==null;
                 default -> false;

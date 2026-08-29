@@ -17,11 +17,15 @@ import java.util.Set;
 /** Versioned, safe serialization and exact policy replay for durable command transitions. */
 public final class EngineCommandTransitionHistory {
 
+    /** Baseline format remains stable because its durable shape did not change. */
     public static final int FORMAT_VERSION = 1;
+    public static final int OUTCOME_FORMAT_VERSION = 2;
     public static final int MAX_ENCODED_CHARS = 65_536;
     private static final long MAX_RETRY_AFTER_SECONDS = 31_536_000L;
-    private static final Set<String> OUTCOME_FIELDS = Set.of("format", "kind",
+    private static final Set<String> OUTCOME_FIELDS_V1 = Set.of("format", "kind",
             "transportFailure", "http", "confirmation", "review", "operatorAction");
+    private static final Set<String> OUTCOME_FIELDS_V2 = union(OUTCOME_FIELDS_V1,
+            Set.of("repair"));
     private static final Set<String> BINDING_FIELDS = Set.of("tenantId", "operationId",
             "commandId", "commandType", "expectedTargetIdentity");
 
@@ -250,9 +254,19 @@ public final class EngineCommandTransitionHistory {
     }
 
     public static String encodeOutcome(CommandDispatchOutcome outcome) {
+        return encodeOutcome(outcome, OUTCOME_FORMAT_VERSION);
+    }
+
+    private static String encodeOutcome(CommandDispatchOutcome outcome, int format) {
         Objects.requireNonNull(outcome, "outcome");
+        if (format != 1 && format != OUTCOME_FORMAT_VERSION) {
+            throw new IllegalArgumentException("Unsupported command transition outcome format");
+        }
+        if (format == 1 && outcome.repairEvidence() != null) {
+            throw new IllegalArgumentException("Format one cannot encode repair evidence");
+        }
         Map<String, Object> value = new LinkedHashMap<>();
-        value.put("format", FORMAT_VERSION);
+        value.put("format", format);
         value.put("kind", outcome.kind().name());
         value.put("transportFailure", name(outcome.transportFailure()));
         if (outcome.httpResult() != null) {
@@ -270,16 +284,20 @@ public final class EngineCommandTransitionHistory {
         value.put("confirmation", confirmationMap(outcome.confirmationEvidence()));
         value.put("review", reviewMap(outcome.reviewEvidence()));
         value.put("operatorAction", operatorMap(outcome.operatorAction()));
+        if (format == OUTCOME_FORMAT_VERSION) {
+            value.put("repair", repairMap(outcome.repairEvidence()));
+        }
         return JsonCodec.canonicalJson(value);
     }
 
     public static CommandDispatchOutcome decodeOutcome(String json) {
         requireEncodedSize(json);
         Map<String, Object> value = JsonCodec.toMap(Objects.requireNonNull(json, "json"));
-        requireFields(value, OUTCOME_FIELDS, "outcome");
-        if (exactInt(value, "format") != FORMAT_VERSION) {
+        int format = exactInt(value, "format");
+        if (!supportsOutcomeFormat(format)) {
             throw new IllegalArgumentException("Unsupported command transition outcome format");
         }
+        requireFields(value, format == 1 ? OUTCOME_FIELDS_V1 : OUTCOME_FIELDS_V2, "outcome");
         CommandDispatchOutcome.Kind kind = CommandDispatchOutcome.Kind.valueOf(
                 string(value, "kind"));
         CommandDispatchOutcome.TransportFailure transport = optionalEnum(value,
@@ -307,10 +325,24 @@ public final class EngineCommandTransitionHistory {
         CommandDispatchOutcome result = new CommandDispatchOutcome(kind, transport, http,
                 confirmation(optionalMap(value, "confirmation")),
                 review(optionalMap(value, "review")),
-                operator(optionalMap(value, "operatorAction")));
-        if (!encodeOutcome(result).equals(json)) throw new IllegalArgumentException(
+                operator(optionalMap(value, "operatorAction")),
+                format == 1 ? null : repair(optionalMap(value, "repair")));
+        if (!encodeOutcome(result, format).equals(json)) throw new IllegalArgumentException(
                 "Command transition outcome is not canonical");
         return result;
+    }
+
+    public static boolean supportsOutcomeFormat(int format) {
+        return format == 1 || format == OUTCOME_FORMAT_VERSION;
+    }
+
+    public static int outcomeFormat(String json) {
+        requireEncodedSize(json);
+        int format = exactInt(JsonCodec.toMap(Objects.requireNonNull(json, "json")), "format");
+        if (!supportsOutcomeFormat(format)) {
+            throw new IllegalArgumentException("Unsupported command transition outcome format");
+        }
+        return format;
     }
 
     private static Map<String, Object> confirmationMap(
@@ -343,6 +375,17 @@ public final class EngineCommandTransitionHistory {
         Map<String, Object> value = bindingMap(evidence.tenantId(), evidence.operationId(),
                 evidence.commandId(), evidence.commandType(), evidence.expectedTargetIdentity());
         value.put("finding", evidence.finding().name());
+        value.put("source", evidence.source().name());
+        value.put("evidenceReference", evidence.evidenceReference());
+        return value;
+    }
+
+    private static Map<String, Object> repairMap(CommandDispatchOutcome.RepairEvidence evidence) {
+        if (evidence == null) return null;
+        Map<String, Object> value = bindingMap(evidence.tenantId(), evidence.operationId(),
+                evidence.commandId(), evidence.commandType(), evidence.expectedTargetIdentity());
+        value.put("remoteIdentity", evidence.remoteIdentity());
+        value.put("primaryHttpStatus", evidence.primaryHttpStatus());
         value.put("source", evidence.source().name());
         value.put("evidenceReference", evidence.evidenceReference());
         return value;
@@ -416,6 +459,19 @@ public final class EngineCommandTransitionHistory {
                         string(value, "commandType")), string(value, "expectedTargetIdentity"),
                 CommandDispatchOutcome.ReviewFinding.valueOf(string(value, "finding")),
                 CommandDispatchOutcome.ReviewSource.valueOf(string(value, "source")),
+                string(value, "evidenceReference"));
+    }
+
+    private static CommandDispatchOutcome.RepairEvidence repair(Map<String, Object> value) {
+        if (value == null) return null;
+        requireFields(value, union(BINDING_FIELDS, Set.of("remoteIdentity",
+                "primaryHttpStatus", "source", "evidenceReference")), "repair evidence");
+        return new CommandDispatchOutcome.RepairEvidence(
+                string(value, "tenantId"), string(value, "operationId"),
+                string(value, "commandId"), EngineCommand.Type.valueOf(
+                        string(value, "commandType")), string(value, "expectedTargetIdentity"),
+                string(value, "remoteIdentity"), exactInt(value, "primaryHttpStatus"),
+                CommandDispatchOutcome.RepairSource.valueOf(string(value, "source")),
                 string(value, "evidenceReference"));
     }
 

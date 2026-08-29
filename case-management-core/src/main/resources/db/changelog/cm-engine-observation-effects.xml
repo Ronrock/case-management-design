@@ -26,10 +26,10 @@
               (COLUMN_NAME = 'ENTITY_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
               (COLUMN_NAME = 'ENTITY_REVISION_' AND DATA_TYPE = 'NUMBER' AND DATA_PRECISION = 19 AND NVL(DATA_SCALE, 0) = 0 AND NULLABLE = 'Y') OR
               (COLUMN_NAME = 'EVENT_TYPE_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 64 AND NULLABLE = 'N') OR
-              (COLUMN_NAME = 'ENGINE_OCCURRED_AT_' AND DATA_TYPE = 'TIMESTAMP WITH TIME ZONE' AND NULLABLE = 'N') OR
-              (COLUMN_NAME = 'CLAIMED_AT_' AND DATA_TYPE = 'TIMESTAMP WITH TIME ZONE' AND NULLABLE = 'N') OR
-              (COLUMN_NAME = 'APPLIED_AT_' AND DATA_TYPE = 'TIMESTAMP WITH TIME ZONE' AND NULLABLE = 'Y') OR
-              (COLUMN_NAME = 'FAILED_AT_' AND DATA_TYPE = 'TIMESTAMP WITH TIME ZONE' AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'ENGINE_OCCURRED_AT_' AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'CLAIMED_AT_' AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'APPLIED_AT_' AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'FAILED_AT_' AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'Y') OR
               (COLUMN_NAME = 'FAILURE_DETAIL_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 2000 AND NULLABLE = 'Y'))
         ]]></sqlCheck>
       </or>
@@ -97,29 +97,13 @@
              runAlways="true">
     <preConditions onFail="HALT" onError="HALT"
                    onFailMessage="UQ_CM_AEO_AUTH_FINGERPRINT has an incompatible structure">
-      <or>
-        <not><indexExists tableName="CM_APPLIED_ENGINE_OBSERVATION"
-                          indexName="UQ_CM_AEO_AUTH_FINGERPRINT"/></not>
-        <sqlCheck expectedResult="1"><![CDATA[
-          SELECT COUNT(*) FROM USER_INDEXES I
-          WHERE I.INDEX_NAME = 'UQ_CM_AEO_AUTH_FINGERPRINT'
-            AND I.TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
-            AND I.UNIQUENESS = 'UNIQUE'
-            AND I.STATUS = 'VALID' AND I.VISIBILITY = 'VISIBLE'
-            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
-                 WHERE C.INDEX_NAME = I.INDEX_NAME) = 3
-            AND (SELECT COUNT(*) FROM USER_IND_EXPRESSIONS E
-                 WHERE E.INDEX_NAME = I.INDEX_NAME AND E.COLUMN_POSITION = 1
-                   AND REGEXP_REPLACE(UPPER(E.COLUMN_EXPRESSION), '[[:space:]\"]', '') =
-                       'CASEWHENTENANT_ID_ISNULLTHEN1ELSE0END') = 1
-            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
-                 WHERE C.INDEX_NAME = I.INDEX_NAME AND C.COLUMN_POSITION = 2
-                   AND C.COLUMN_NAME = 'TENANT_ID_') = 1
-            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
-                 WHERE C.INDEX_NAME = I.INDEX_NAME AND C.COLUMN_POSITION = 3
-                   AND C.COLUMN_NAME = 'FINGERPRINT_') = 1
-        ]]></sqlCheck>
-      </or>
+      <customPrecondition className="org.casemgmt.migration.OracleOptionalIndexPrecondition">
+        <param name="name" value="UQ_CM_AEO_AUTH_FINGERPRINT"/>
+        <param name="table" value="CM_APPLIED_ENGINE_OBSERVATION"/>
+        <param name="unique" value="true"/>
+        <param name="entries"
+               value="CASEWHENTENANT_ID_ISNULLTHEN1ELSE0END|TENANT_ID_|FINGERPRINT_"/>
+      </customPrecondition>
     </preConditions>
     <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
@@ -141,25 +125,12 @@
              runAlways="true">
     <preConditions onFail="HALT" onError="HALT"
                    onFailMessage="IX_CM_AEO_STATUS has an incompatible structure">
-      <or>
-        <not><indexExists tableName="CM_APPLIED_ENGINE_OBSERVATION"
-                          indexName="IX_CM_AEO_STATUS"/></not>
-        <sqlCheck expectedResult="1"><![CDATA[
-          SELECT COUNT(*) FROM USER_INDEXES I
-          WHERE I.INDEX_NAME = 'IX_CM_AEO_STATUS'
-            AND I.TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
-            AND I.UNIQUENESS = 'NONUNIQUE'
-            AND I.STATUS = 'VALID' AND I.VISIBILITY = 'VISIBLE'
-            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
-                 WHERE C.INDEX_NAME = I.INDEX_NAME) = 2
-            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
-                 WHERE C.INDEX_NAME = I.INDEX_NAME AND C.COLUMN_POSITION = 1
-                   AND C.COLUMN_NAME = 'STATUS_') = 1
-            AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C
-                 WHERE C.INDEX_NAME = I.INDEX_NAME AND C.COLUMN_POSITION = 2
-                   AND C.COLUMN_NAME = 'CLAIMED_AT_') = 1
-        ]]></sqlCheck>
-      </or>
+      <customPrecondition className="org.casemgmt.migration.OracleOptionalIndexPrecondition">
+        <param name="name" value="IX_CM_AEO_STATUS"/>
+        <param name="table" value="CM_APPLIED_ENGINE_OBSERVATION"/>
+        <param name="unique" value="false"/>
+        <param name="entries" value="STATUS_|SYS_EXTRACT_UTC(CLAIMED_AT_)"/>
+      </customPrecondition>
     </preConditions>
     <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
@@ -189,7 +160,7 @@
              AND REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC),'[[:space:]'']','')='LEGACY'))
           AND (NOT EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='IGNORED_AT_') OR
            EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='IGNORED_AT_'
-             AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='Y' AND DATA_DEFAULT IS NULL))
+             AND DATA_TYPE='TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE='Y' AND DATA_DEFAULT IS NULL))
           AND EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_PLAN_ITEM' AND COLUMN_NAME='PROC_INST_ID_'
              AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH IN (64,128) AND NULLABLE='Y' AND DATA_DEFAULT IS NULL)
           AND (NOT EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_TASK' AND COLUMN_NAME='PROC_INST_ID_') OR

@@ -61,7 +61,8 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
                 .isInstanceOf(EngineCommandRepository.IdempotencyConflictException.class);
         assertThatThrownBy(() -> repository.submit(request(
                 "command-a", "operation-a", "key-a", Map.of("engineTaskId", "changed"))))
-                .isInstanceOf(EngineCommandRepository.IdempotencyConflictException.class);
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("immutable command target");
         assertThatThrownBy(() -> repository.submit(request(
                 "command-a", "operation-a", "different-key")))
                 .isInstanceOf(EngineCommandRepository.OperationConflictException.class);
@@ -457,7 +458,7 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
         transaction.executeWithoutResult(status -> {
             jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('before-conflict')").update();
             assertThatThrownBy(() -> repository.submit(request(
-                    "command-c", "operation-c", "key-a", Map.of("engineTaskId", "different"))))
+                    "command-c", "operation-c", "key-a", completionPayload(2))))
                     .isInstanceOf(EngineCommandRepository.IdempotencyConflictException.class);
             jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('after-conflict')").update();
         });
@@ -481,10 +482,10 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
         var go = new CountDownLatch(1);
         try (var pool = Executors.newFixedThreadPool(2)) {
             var first = pool.submit(() -> concurrentSubmit(ready, go,
-                    request("command-a", "operation-a", "key-a", Map.of("n", 1))));
+                    request("command-a", "operation-a", "key-a", completionPayload(1))));
             var second = pool.submit(() -> concurrentSubmit(ready, go,
-                    request("command-b", "operation-b", "key-a", Map.of("n", 1.0))));
-            ready.await();
+                    request("command-b", "operation-b", "key-a", completionPayload(1.0))));
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
             go.countDown();
             assertThat(java.util.List.of(first.get(), second.get()))
                     .containsExactlyInAnyOrder("CREATED", "REPLAY");
@@ -497,10 +498,10 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
         var ready = new CountDownLatch(2);
         var go = new CountDownLatch(1);
         try (var pool = Executors.newFixedThreadPool(2)) {
-            var request = request("command-a", "operation-a", "key-a", Map.of("n", 1));
+            var request = request("command-a", "operation-a", "key-a", completionPayload(1));
             var first = pool.submit(() -> concurrentSubmit(ready, go, request));
             var second = pool.submit(() -> concurrentSubmit(ready, go, request));
-            ready.await();
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
             go.countDown();
             assertThat(java.util.List.of(first.get(), second.get()))
                     .containsExactlyInAnyOrder("CREATED", "REPLAY");
@@ -514,10 +515,10 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
         var go = new CountDownLatch(1);
         try (var pool = Executors.newFixedThreadPool(2)) {
             var first = pool.submit(() -> concurrentSubmit(ready, go,
-                    request("command-a", "operation-a", "key-a", Map.of("n", 1))));
+                    request("command-a", "operation-a", "key-a", completionPayload(1))));
             var second = pool.submit(() -> concurrentSubmit(ready, go,
-                    request("command-b", "operation-b", "key-a", Map.of("n", 2))));
-            ready.await();
+                    request("command-b", "operation-b", "key-a", completionPayload(2))));
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
             go.countDown();
             assertThat(java.util.List.of(first.get(), second.get()))
                     .containsExactlyInAnyOrder("CREATED", "CONFLICT");
@@ -592,7 +593,14 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
     }
 
     private void makePendingRowLookLikeAnExactLegacyBaseline(String commandId) {
-        JdbcClient.create(dataSource()).sql("""
+        var baseline = new EngineCommandPolicy.Decision(
+                EngineCommandStatus.PENDING, NOW, null, null, null,
+                0, 0, 0, false, null, null, null, null, null,
+                EngineCommandPolicy.ActionLedgerSummary.empty());
+        var baselineJson = EngineCommandTransitionHistory.encodeBaseline(baseline);
+        var baselineDigest = EngineCommandTransitionHistory.digestDecision(baseline);
+        var jdbc = JdbcClient.create(dataSource());
+        jdbc.sql("""
                 UPDATE CM_ENGINE_COMMAND SET
                   TENANT_ID_='__legacy_unscoped__',
                   OPERATION_ID_=ID_,
@@ -606,6 +614,15 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
                   MIGRATION_BASELINE_ACTIVE_=1
                 WHERE ID_=:commandId
                 """).param("commandId", commandId).update();
+        jdbc.sql("""
+                UPDATE CM_ENGINE_COMMAND_TRANSITION SET
+                  TENANT_ID_='__legacy_unscoped__', OPERATION_ID_=:commandId,
+                  OUTCOME_KIND_='BASELINE_LEGACY', OUTCOME_JSON_=:baselineJson,
+                  NEXT_DECISION_DIGEST_=:baselineDigest
+                WHERE COMMAND_ID_=:commandId AND VERSION_=0
+                """).param("commandId", commandId)
+                .param("baselineJson", baselineJson)
+                .param("baselineDigest", baselineDigest).update();
     }
 
     private CommandDispatchOutcome.ConfirmationEvidence confirmation(
@@ -698,5 +715,9 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
                 commandId, "case-a", "tenant-a", operationId, key,
                 EngineCommand.Type.COMPLETE_TASK, payload,
                 "task-a", null, null, null, NOW);
+    }
+
+    private static Map<String, Object> completionPayload(Number value) {
+        return Map.of("engineTaskId", "task-a", "variables", Map.of("n", value));
     }
 }

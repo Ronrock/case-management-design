@@ -77,7 +77,7 @@ class RemoteEngineGatewayTest {
     }
 
     @Test
-    void createTaskFailureAfterPrimaryEffectIsUncertainAndRetryRepairsEverySideEffect() {
+    void createTaskFailureAfterPrimaryEffectPersistsBoundRepairEvidence() {
         RestClient.Builder builder = RestClient.builder().baseUrl("http://engine.test");
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         String taskId = "cm-command-command-1";
@@ -86,27 +86,74 @@ class RemoteEngineGatewayTest {
         server.expect(requestTo("http://engine.test/task/create"))
                 .andRespond(withStatus(HttpStatus.NO_CONTENT));
         server.expect(requestTo("http://engine.test/task/" + taskId + "/identity-links"))
-                .andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS));
-        server.expect(requestTo("http://engine.test/task/" + taskId))
-                .andRespond(withSuccess("{\"id\":\"" + taskId + "\",\"name\":\"Review\"}",
+                .andRespond(withSuccess("[]",
                         org.springframework.http.MediaType.APPLICATION_JSON));
         server.expect(requestTo("http://engine.test/task/" + taskId + "/identity-links"))
-                .andRespond(withStatus(HttpStatus.NO_CONTENT));
-        server.expect(requestTo("http://engine.test/task/" + taskId + "/variables"))
-                .andRespond(withStatus(HttpStatus.NO_CONTENT));
-        server.expect(requestTo("http://engine.test/task/" + taskId))
-                .andRespond(withSuccess("{\"id\":\"" + taskId + "\",\"name\":\"Review\"}",
-                        org.springframework.http.MediaType.APPLICATION_JSON));
+                .andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS));
         RemoteEngineGateway gateway = new RemoteEngineGateway(builder.build());
         ProductionEngineCommandStore.StoredCommand command = createTaskCommand();
 
         CommandDispatchOutcome interrupted = gateway.dispatch(command);
-        CommandDispatchOutcome repaired = gateway.dispatch(command);
 
+        assertThat(interrupted.kind())
+                .isEqualTo(CommandDispatchOutcome.Kind.REPAIRABLE_PARTIAL_EFFECT);
         assertThat(interrupted.httpResult()).isEqualTo(new CommandDispatchOutcome.HttpResult(
                 429, CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED, null));
-        assertThat(repaired.confirmationEvidence()).isNotNull();
+        assertThat(interrupted.repairEvidence()).isEqualTo(
+                new CommandDispatchOutcome.RepairEvidence(
+                        "tenant-1", "operation-1", "command-1",
+                        EngineCommand.Type.CREATE_TASK, "plan-1", taskId, 204,
+                        CommandDispatchOutcome.RepairSource.PRIMARY_HTTP_RESPONSE,
+                        "create:command-1"));
         server.verify();
+    }
+
+    @Test
+    void existingCommandTaskRepairsMissingGroupsAndVariablesBeforeConfirmation() {
+        RestClient.Builder builder = RestClient.builder().baseUrl("http://engine.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        String taskId = "cm-command-command-1";
+        server.expect(requestTo("http://engine.test/task/" + taskId))
+                .andRespond(withSuccess("{\"id\":\"" + taskId
+                                + "\",\"name\":\"Review\",\"assignee\":null}",
+                        org.springframework.http.MediaType.APPLICATION_JSON));
+        server.expect(requestTo("http://engine.test/task/" + taskId + "/identity-links"))
+                .andRespond(withSuccess("[]",
+                        org.springframework.http.MediaType.APPLICATION_JSON));
+        server.expect(requestTo("http://engine.test/task/" + taskId + "/identity-links"))
+                .andRespond(withStatus(HttpStatus.NO_CONTENT));
+        server.expect(requestTo("http://engine.test/task/" + taskId + "/identity-links"))
+                .andRespond(withSuccess("""
+                        [{"groupId":"reviewers","type":"candidate"}]
+                        """, org.springframework.http.MediaType.APPLICATION_JSON));
+        server.expect(requestTo("http://engine.test/task/" + taskId + "/variables"))
+                .andRespond(withSuccess("""
+                        {"caseId":{"value":"case-1","type":"String"}}
+                        """, org.springframework.http.MediaType.APPLICATION_JSON));
+        server.expect(requestTo("http://engine.test/task/" + taskId + "/variables"))
+                .andRespond(withStatus(HttpStatus.NO_CONTENT));
+        server.expect(requestTo("http://engine.test/task/" + taskId + "/variables"))
+                .andRespond(withSuccess("""
+                        {"caseId":{"value":"case-1","type":"String"},
+                         "planItemId":{"value":"plan-1","type":"String"},
+                         "priority":{"value":"high","type":"String"}}
+                        """, org.springframework.http.MediaType.APPLICATION_JSON));
+        server.expect(requestTo("http://engine.test/task/" + taskId))
+                .andRespond(withSuccess("{\"id\":\"" + taskId
+                                + "\",\"name\":\"Review\",\"assignee\":null}",
+                        org.springframework.http.MediaType.APPLICATION_JSON));
+
+        CommandDispatchOutcome repaired = new RemoteEngineGateway(builder.build())
+                .dispatch(createTaskCommand());
+
+        server.verify();
+        assertThat(repaired.httpResult()).isEqualTo(new CommandDispatchOutcome.HttpResult(
+                200, CommandDispatchOutcome.Acceptance.ACCEPTED, null));
+        assertThat(repaired.confirmationEvidence()).satisfies(evidence -> {
+            assertThat(evidence.remoteIdentity()).isEqualTo(taskId);
+            assertThat(evidence.remoteState())
+                    .isEqualTo(CommandDispatchOutcome.RemoteState.TASK_CREATED);
+        });
     }
 
     private static ProductionEngineCommandStore.StoredCommand createTaskCommand() {
@@ -116,7 +163,8 @@ class RemoteEngineGatewayTest {
         when(command.commandId()).thenReturn("command-1");
         when(command.caseId()).thenReturn("case-1");
         when(command.payload()).thenReturn(Map.of("planItemId", "plan-1", "name", "Review",
-                "candidateGroups", java.util.List.of("reviewers"), "variables", Map.of()));
+                "candidateGroups", java.util.List.of("reviewers"),
+                "variables", Map.of("priority", "high")));
         when(command.state()).thenReturn(state);
         when(state.command()).thenReturn(new EngineCommandPolicy.CommandContext(
                 "tenant-1", "operation-1", "command-1", EngineCommand.Type.CREATE_TASK,

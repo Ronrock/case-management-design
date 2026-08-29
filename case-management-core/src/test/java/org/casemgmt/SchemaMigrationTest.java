@@ -9,6 +9,7 @@ import org.casemgmt.projection.RemotePollingCheckpointRepository;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
+import java.sql.Types;
 import java.time.OffsetDateTime;
 import java.util.List;
 
@@ -26,9 +27,10 @@ class SchemaMigrationTest extends OracleTestBase {
                 .query(Integer.class).single();
         // 25 from db-design.sql + CM_ENGINE_COMMAND, CM_EVENT_APPEND_LOCK,
         // CM_CASE_DEF_RELEASE, CM_CASE_DEF_BINDING, and CM_ENGINE_POLL_CHECKPOINT from changesets.
-        // CM_APPLIED_ENGINE_OBSERVATION is the WS3 lifecycle-effect claim ledger.
+        // CM_APPLIED_ENGINE_OBSERVATION is the WS3 lifecycle-effect claim ledger; the normalized
+        // command action and transition ledgers add the remaining two tables.
         // DATABASECHANGELOG* do not match the CM_ prefix.
-        assertThat(tables).isEqualTo(32);
+        assertThat(tables).isEqualTo(33);
     }
 
     @Test
@@ -289,11 +291,11 @@ class SchemaMigrationTest extends OracleTestBase {
                 .param("content", "<definitions/>".getBytes(java.nio.charset.StandardCharsets.UTF_8))
                 .param("sha", String.format("%064d", Math.abs(id.hashCode())))
                 .param("status", status)
-                .param("deploymentId", deploymentId)
-                .param("processDefinitionId", processDefinitionId)
-                .param("processDefinitionKey", processDefinitionKey)
-                .param("processDefinitionVersion", processDefinitionVersion)
-                .param("engineTenantId", engineTenantId)
+                .param("deploymentId", deploymentId, Types.VARCHAR)
+                .param("processDefinitionId", processDefinitionId, Types.VARCHAR)
+                .param("processDefinitionKey", processDefinitionKey, Types.VARCHAR)
+                .param("processDefinitionVersion", processDefinitionVersion, Types.NUMERIC)
+                .param("engineTenantId", engineTenantId, Types.VARCHAR)
                 .update();
     }
 
@@ -367,11 +369,11 @@ class SchemaMigrationTest extends OracleTestBase {
                 .param("legacyStatus", "ACTIVE".equals(status) ? "ACTIVE" : "FAILED")
                 .param("orchestrationMode", orchestrationMode)
                 .param("status", status)
-                .param("deploymentId", deploymentId)
-                .param("processDefinitionId", processDefinitionId)
-                .param("processDefinitionKey", processDefinitionKey)
-                .param("processDefinitionVersion", processDefinitionVersion)
-                .param("engineTenantId", engineTenantId)
+                .param("deploymentId", deploymentId, Types.VARCHAR)
+                .param("processDefinitionId", processDefinitionId, Types.VARCHAR)
+                .param("processDefinitionKey", processDefinitionKey, Types.VARCHAR)
+                .param("processDefinitionVersion", processDefinitionVersion, Types.NUMERIC)
+                .param("engineTenantId", engineTenantId, Types.VARCHAR)
                 .update();
     }
 

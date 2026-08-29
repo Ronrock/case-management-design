@@ -86,6 +86,8 @@ public final class EngineCommandPolicy {
                     diagnostic(committed, EngineCommandStatus.AWAITING_CONFIRMATION,
                             "response.malformed",
                             "Remote response was not valid confirmation evidence", null));
+            case REPAIRABLE_PARTIAL_EFFECT -> requireDispatching(committed, outcome,
+                    repairableCreateTaskRetry(committed));
             case DUPLICATE_RESPONSE -> requireDispatching(committed, outcome,
                     outcome.confirmationEvidence() == null
                             ? diagnostic(committed, EngineCommandStatus.CONFLICT,
@@ -410,6 +412,20 @@ public final class EngineCommandPolicy {
                 committed.actionLedgerSummary());
     }
 
+    private Decision repairableCreateTaskRetry(Decision committed) {
+        if (committed.automaticAttemptsInBudget() >= MAX_AUTOMATIC_ATTEMPTS) {
+            return diagnostic(committed, EngineCommandStatus.FAILED,
+                    "attempts.exhausted",
+                    "Remote command exhausted automatic dispatch attempts", null);
+        }
+        return new Decision(EngineCommandStatus.RETRYABLE, now(), now(),
+                "create_task.repair_pending",
+                "Created task requires idempotent postcondition repair",
+                committed.totalDispatchAttempts(), committed.automaticAttemptsInBudget(),
+                committed.budgetEpoch(), false, null, null, null, null,
+                null, committed.actionLedgerSummary());
+    }
+
     private static void validateCommittedState(CommandContext command, Decision committed) {
         if (committed.terminalConfirmation() != null) {
             validateConfirmationFields(command, committed.terminalConfirmation());
@@ -452,6 +468,23 @@ public final class EngineCommandPolicy {
         if (outcome.operatorAction() != null) {
             validateOperator(command, outcome.operatorAction());
         }
+        if (outcome.repairEvidence() != null) {
+            validateRepair(command, outcome.repairEvidence());
+        }
+    }
+
+    private static void validateRepair(
+            CommandContext command, CommandDispatchOutcome.RepairEvidence evidence) {
+        same(command.tenantId(), evidence.tenantId(), "tenant");
+        same(command.operationId(), evidence.operationId(), "operation");
+        same(command.commandId(), evidence.commandId(), "command");
+        if (command.commandType() != EngineCommand.Type.CREATE_TASK
+                || evidence.commandType() != command.commandType()) {
+            throw new IllegalArgumentException("Repair evidence command type mismatch");
+        }
+        same(command.expectedTargetIdentity(), evidence.expectedTargetIdentity(), "target");
+        same(CommandDispatchOutcome.deterministicCreateTaskIdentity(command.commandId()),
+                evidence.remoteIdentity(), "remote identity");
     }
 
     private void validateConfirmation(CommandContext command, CommandDispatchOutcome outcome) {
@@ -956,6 +989,8 @@ public final class EngineCommandPolicy {
         TRANSPORT_POSSIBLY_SENT("transport.possibly_sent", "Remote request may have been sent"),
         RESPONSE_MALFORMED("response.malformed",
                 "Remote response was not valid confirmation evidence"),
+        CREATE_TASK_REPAIR_PENDING("create_task.repair_pending",
+                "Created task requires idempotent postcondition repair"),
         RESPONSE_DUPLICATE("response.duplicate",
                 "Duplicate response lacked matching confirmation evidence"),
         DISPATCH_LEASE_EXPIRED("dispatch.lease_expired",

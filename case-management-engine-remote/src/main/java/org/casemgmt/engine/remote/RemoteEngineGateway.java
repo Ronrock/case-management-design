@@ -74,58 +74,69 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             }
             RemoteResult result = switch (command.state().command().commandType()) {
                 case CREATE_TASK -> {
-                    EngineTaskRef ref = createHumanTask(new HumanTaskRequest(
+                    TaskDispatchResult task = createHumanTaskForDispatch(new HumanTaskRequest(
                             command.caseId(), text(payload, "planItemId"), text(payload, "name"),
                             nullable(payload, "assignee"), strings(payload.get("candidateGroups")),
                             nullable(payload, "formKey"), map(payload.get("variables")),
                             command.commandId()));
-                    yield new RemoteResult(ref.engineTaskId(),
-                            CommandDispatchOutcome.RemoteState.TASK_CREATED, 200);
+                    yield new RemoteResult(task.task().engineTaskId(),
+                            CommandDispatchOutcome.RemoteState.TASK_CREATED,
+                            task.primaryHttpStatus());
                 }
                 case CLAIM_TASK -> {
                     String id = text(payload, "engineTaskId");
-                    claimTask(id, text(payload, "userId"));
-                    yield new RemoteResult(id, CommandDispatchOutcome.RemoteState.TASK_CLAIMED, 204);
+                    DispatchHttpResponse response = postSuccessStatus("claimTask",
+                            "/task/" + id + "/claim",
+                            Map.of("userId", text(payload, "userId")));
+                    yield new RemoteResult(id, CommandDispatchOutcome.RemoteState.TASK_CLAIMED,
+                            response.status());
                 }
                 case COMPLETE_TASK -> throw new IllegalStateException("handled before dispatch switch");
                 case START_PROCESS -> {
-                    EngineProcessRef ref;
+                    ProcessDispatchResult process;
                     if ("ID".equals(text(payload, "selectionType"))) {
-                        ref = startProcess(new StartProcessRequest(command.caseId(),
+                        process = startProcessForDispatch(new StartProcessRequest(command.caseId(),
                                 nullable(payload, "planItemId"),
                                 text(payload, "processDefinitionId"),
                                 nullable(payload, "processDefinitionKey"),
                                 nullable(payload, "tenantId"), map(payload.get("variables")),
                                 nullable(payload, "correlationId")));
                     } else {
-                        ref = startProcessByKey(new StartProcessByKeyRequest(command.caseId(),
+                        process = startProcessByKeyForDispatch(new StartProcessByKeyRequest(command.caseId(),
                                 nullable(payload, "planItemId"),
                                 text(payload, "processDefinitionKey"),
                                 map(payload.get("variables")), nullable(payload, "correlationId"),
                                 nullable(payload, "tenantId")));
                     }
-                    yield new RemoteResult(ref.processInstanceId(),
-                            CommandDispatchOutcome.RemoteState.PROCESS_STARTED, 200);
+                    yield new RemoteResult(process.process().processInstanceId(),
+                            CommandDispatchOutcome.RemoteState.PROCESS_STARTED,
+                            process.httpStatus());
                 }
                 case CANCEL_PROCESS -> {
                     String id = text(payload, "processInstanceId");
-                    cancelProcess(id, nullable(payload, "reason"));
+                    DispatchHttpResponse response = cancelProcessForDispatch(id);
                     yield new RemoteResult(id,
-                            CommandDispatchOutcome.RemoteState.PROCESS_CANCELLED, 204);
+                            CommandDispatchOutcome.RemoteState.PROCESS_CANCELLED,
+                            response.status());
                 }
                 case DEPLOY_ORCHESTRATION -> {
-                    EngineDeploymentIdentity identity = deploy(text(payload, "releaseId"),
+                    DeploymentDispatchResult deployment = deployForDispatch(
+                            text(payload, "releaseId"),
                             text(payload, "definitionKey"), nullable(payload, "tenantId"),
                             Base64.getDecoder().decode(text(payload, "contentBase64")),
                             text(payload, "mediaType"));
-                    yield new RemoteResult(identity.deploymentId(),
-                            CommandDispatchOutcome.RemoteState.ORCHESTRATION_DEPLOYED, 200);
+                    yield new RemoteResult(deployment.identity().deploymentId(),
+                            CommandDispatchOutcome.RemoteState.ORCHESTRATION_DEPLOYED,
+                            deployment.httpStatus());
                 }
                 case CORRELATE_MESSAGE -> {
-                    correlateMessage(new MessageCorrelationRequest(command.caseId(),
-                            text(payload, "messageName"), map(payload.get("variables"))));
+                    DispatchHttpResponse response = correlateMessageForDispatch(
+                            new MessageCorrelationRequest(command.caseId(),
+                                    text(payload, "messageName"),
+                                    map(payload.get("variables"))));
                     yield new RemoteResult(command.expectedTargetIdentity(),
-                            CommandDispatchOutcome.RemoteState.MESSAGE_CORRELATED, 204);
+                            CommandDispatchOutcome.RemoteState.MESSAGE_CORRELATED,
+                            response.status());
                 }
             };
             return CommandDispatchOutcome.http(result.httpStatus(),
@@ -133,11 +144,26 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
                     result.httpStatus() == 202 ? null : confirmation(command, result,
                             "http:" + result.httpStatus() + ":" + command.commandId()));
         } catch (PartiallyCreatedTaskException partial) {
+            EngineCommandPolicy.CommandContext context = command.state().command();
+            var evidence = new CommandDispatchOutcome.RepairEvidence(
+                    context.tenantId(), context.operationId(), context.commandId(),
+                    context.commandType(), context.expectedTargetIdentity(), partial.taskId,
+                    partial.primaryHttpStatus, partial.repairSource,
+                    "create:" + context.commandId());
             RestClientResponseException response = responseCause(partial);
-            if (response != null) return classifyHttpFailure(new DispatchHttpResponse(
-                    response.getStatusCode().value(), response.getResponseHeaders()), true);
-            return CommandDispatchOutcome.transportFailure(
-                    CommandDispatchOutcome.TransportFailure.UNKNOWN);
+            if (response != null) {
+                DispatchHttpResponse failure = new DispatchHttpResponse(
+                        response.getStatusCode().value(), response.getResponseHeaders());
+                return CommandDispatchOutcome.repairablePartialEffect(evidence,
+                        new CommandDispatchOutcome.HttpResult(failure.status(),
+                                CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED,
+                                retryAfter(failure.headers())));
+            }
+            RestClientException transport = transportCause(partial);
+            return transport == null
+                    ? CommandDispatchOutcome.repairablePartialEffect(evidence)
+                    : CommandDispatchOutcome.repairablePartialEffect(
+                            evidence, classifyTransport(transport));
         } catch (EngineException failure) {
             RestClientResponseException response = responseCause(failure);
             if (response != null) return classifyHttpFailure(command, response);
@@ -292,9 +318,32 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         }
     }
 
+    private record TaskDispatchResult(
+            EngineTaskRef task, int primaryHttpStatus,
+            CommandDispatchOutcome.RepairSource repairSource) {
+    }
+
+    private record ProcessDispatchResult(EngineProcessRef process, int httpStatus) {
+    }
+
+    private record DeploymentDispatchResult(
+            EngineDeploymentIdentity identity, int httpStatus) {
+    }
+
+    private record BodyDispatchResponse(
+            Map<String, Object> body, int status,
+            org.springframework.http.HttpHeaders headers) {
+    }
+
     @Override
     public EngineDeploymentIdentity deploy(String releaseId, String definitionKey, String tenantId,
                                            byte[] content, String mediaType) {
+        return deployForDispatch(releaseId, definitionKey, tenantId, content, mediaType).identity();
+    }
+
+    private DeploymentDispatchResult deployForDispatch(
+            String releaseId, String definitionKey, String tenantId,
+            byte[] content, String mediaType) {
         DeploymentResourceManifest approved = approvedManifest(
                 definitionKey, content, mediaType);
         String fileName = definitionKey + ("application/zip".equals(mediaType) ? ".zip" : ".bpmn");
@@ -313,16 +362,20 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             }
         });
         try {
-            Map<String, Object> response = client.post().uri("/deployment/create")
+            org.springframework.http.ResponseEntity<Map> response = client.post()
+                    .uri("/deployment/create")
                     .contentType(MediaType.MULTIPART_FORM_DATA)
                     .body(body)
                     .retrieve()
-                    .body(Map.class);
-            Object id = response == null ? null : response.get("id");
+                    .toEntity(Map.class);
+            Map<?, ?> responseBody = response.getBody();
+            Object id = responseBody == null ? null : responseBody.get("id");
             if (id == null || id.toString().isBlank()) {
                 throw new EngineException("deployOrchestration returned no deployment id");
             }
-            return verifyDeployment(id.toString(), definitionKey, tenantId, approved);
+            return new DeploymentDispatchResult(
+                    verifyDeployment(id.toString(), definitionKey, tenantId, approved),
+                    response.getStatusCode().value());
         } catch (RestClientResponseException e) {
             throw new EngineException("deployOrchestration (POST /deployment/create) failed: "
                     + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
@@ -508,6 +561,10 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
 
     @Override
     public EngineTaskRef createHumanTask(HumanTaskRequest request) {
+        return createHumanTaskForDispatch(request).task();
+    }
+
+    private TaskDispatchResult createHumanTaskForDispatch(HumanTaskRequest request) {
         // POST /task/create returns 204 No Content — no body, so the created task's id
         // cannot be read back from the response. It DOES accept a client-supplied "id",
         // however, so a client-generated id is used and then confirmed by reading the task
@@ -518,9 +575,12 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         // a fresh id. Operaton's client-supplied task id makes duplicate delivery fail closed
         // against the same engine resource instead of creating another one.
         String taskId = request.requestId() == null
-                ? UUID.randomUUID().toString() : "cm-command-" + request.requestId();
+                ? UUID.randomUUID().toString()
+                : CommandDispatchOutcome.deterministicCreateTaskIdentity(request.requestId());
+        int primaryHttpStatus;
+        CommandDispatchOutcome.RepairSource repairSource;
         if (request.requestId() != null) {
-            Map<String, Object> existing = getIfPresent("/task/" + taskId);
+            BodyDispatchResponse existing = getIfPresentForDispatch("/task/" + taskId);
             if (existing == null) {
                 Map<String, Object> createBody = new LinkedHashMap<>();
                 createBody.put("id", taskId);
@@ -528,7 +588,13 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
                 if (request.assignee() != null) {
                     createBody.put("assignee", request.assignee());
                 }
-                post("createHumanTask", "/task/create", createBody);
+                DispatchHttpResponse created = postSuccessStatus(
+                        "createHumanTask", "/task/create", createBody);
+                primaryHttpStatus = created.status();
+                repairSource = CommandDispatchOutcome.RepairSource.PRIMARY_HTTP_RESPONSE;
+            } else {
+                primaryHttpStatus = existing.status();
+                repairSource = CommandDispatchOutcome.RepairSource.IDEMPOTENCY_LOOKUP;
             }
         } else {
             Map<String, Object> createBody = new LinkedHashMap<>();
@@ -537,28 +603,105 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             if (request.assignee() != null) {
                 createBody.put("assignee", request.assignee());
             }
-            post("createHumanTask", "/task/create", createBody);
+            DispatchHttpResponse created = postSuccessStatus(
+                    "createHumanTask", "/task/create", createBody);
+            primaryHttpStatus = created.status();
+            repairSource = CommandDispatchOutcome.RepairSource.PRIMARY_HTTP_RESPONSE;
         }
 
         try {
-            if (request.candidateGroups() != null) {
-                for (String group : request.candidateGroups()) {
-                    post("createHumanTask (candidate group)", "/task/" + taskId
-                                    + "/identity-links",
-                            Map.of("groupId", group, "type", "candidate"));
-                }
-            }
-            Map<String, Object> variables = new LinkedHashMap<>(
-                    request.variables() == null ? Map.of() : request.variables());
-            variables.put(CASE_ID_VARIABLE, request.caseId());
-            variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
-            post("createHumanTask (variables)", "/task/" + taskId + "/variables",
-                    Map.of("modifications", typed(variables)));
+            repairCandidateGroups(taskId, request.candidateGroups());
+            repairTaskVariables(taskId, request);
 
             Map<String, Object> readBack = get("createHumanTask (read-back)", "/task/" + taskId);
-            return toRef(readBack, request.caseId());
+            verifyTaskReadBack(readBack, taskId, request);
+            return new TaskDispatchResult(toRef(readBack, request.caseId()),
+                    primaryHttpStatus, repairSource);
         } catch (EngineException afterPrimaryEffect) {
-            throw new PartiallyCreatedTaskException(taskId, afterPrimaryEffect);
+            throw new PartiallyCreatedTaskException(taskId, primaryHttpStatus,
+                    repairSource, afterPrimaryEffect);
+        }
+    }
+
+    private void repairCandidateGroups(String taskId, List<String> candidateGroups) {
+        LinkedHashSet<String> expected = new LinkedHashSet<>(
+                candidateGroups == null ? List.of() : candidateGroups);
+        Set<String> present = candidateGroups(
+                getList("createHumanTask (candidate groups read-back)",
+                        "/task/" + taskId + "/identity-links"));
+        for (String group : expected) {
+            if (!present.contains(group)) {
+                postSuccessStatus("createHumanTask (candidate group)",
+                        "/task/" + taskId + "/identity-links",
+                        Map.of("groupId", group, "type", "candidate"));
+            }
+        }
+        if (!present.containsAll(expected)) {
+            Set<String> repaired = candidateGroups(
+                    getList("createHumanTask (candidate groups verification)",
+                            "/task/" + taskId + "/identity-links"));
+            if (!repaired.containsAll(expected)) {
+                throw new EngineException(
+                        "createHumanTask candidate-group verification was incomplete");
+            }
+        }
+    }
+
+    private void repairTaskVariables(String taskId, HumanTaskRequest request) {
+        Map<String, Object> expected = new LinkedHashMap<>(
+                request.variables() == null ? Map.of() : request.variables());
+        expected.put(CASE_ID_VARIABLE, request.caseId());
+        expected.put(PLAN_ITEM_VARIABLE, request.planItemId());
+        Map<String, Object> present = get("createHumanTask (variables read-back)",
+                "/task/" + taskId + "/variables");
+        Map<String, Object> missing = missingVariables(expected, present);
+        if (!missing.isEmpty()) {
+            postSuccessStatus("createHumanTask (variables)",
+                    "/task/" + taskId + "/variables",
+                    Map.of("modifications", typed(missing)));
+            Map<String, Object> repaired = get("createHumanTask (variables verification)",
+                    "/task/" + taskId + "/variables");
+            if (!missingVariables(expected, repaired).isEmpty()) {
+                throw new EngineException(
+                        "createHumanTask variable verification was incomplete");
+            }
+        }
+    }
+
+    private static Set<String> candidateGroups(List<Map<String, Object>> links) {
+        LinkedHashSet<String> result = new LinkedHashSet<>();
+        for (Map<String, Object> link : links) {
+            if ("candidate".equals(string(link.get("type")))) {
+                String group = string(link.get("groupId"));
+                if (group != null && !group.isBlank()) result.add(group);
+            }
+        }
+        return result;
+    }
+
+    private static Map<String, Object> missingVariables(
+            Map<String, Object> expected, Map<String, Object> actual) {
+        Map<String, Object> missing = new LinkedHashMap<>();
+        expected.forEach((name, expectedValue) -> {
+            Object raw = actual.get(name);
+            Object actualValue = raw instanceof Map<?, ?> value ? value.get("value") : null;
+            if (!org.casemgmt.repo.JsonCodec.canonicalJson(
+                            java.util.Collections.singletonMap("value", expectedValue))
+                    .equals(org.casemgmt.repo.JsonCodec.canonicalJson(
+                            java.util.Collections.singletonMap("value", actualValue)))) {
+                missing.put(name, expectedValue);
+            }
+        });
+        return missing;
+    }
+
+    private static void verifyTaskReadBack(
+            Map<String, Object> task, String taskId, HumanTaskRequest request) {
+        if (!taskId.equals(string(task.get("id")))
+                || !request.name().equals(string(task.get("name")))
+                || !Objects.equals(request.assignee(), string(task.get("assignee")))) {
+            throw new EngineException(
+                    "createHumanTask task read-back did not match the command");
         }
     }
 
@@ -582,6 +725,10 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
 
     @Override
     public EngineProcessRef startProcess(StartProcessRequest request) {
+        return startProcessForDispatch(request).process();
+    }
+
+    private ProcessDispatchResult startProcessForDispatch(StartProcessRequest request) {
         Map<String, Object> definition = getExactDefinition(request.processDefinitionId());
         if (!Objects.equals(string(definition.get("tenantId")), request.tenantId())) {
             throw new EngineException("Process definition " + request.processDefinitionId()
@@ -597,31 +744,43 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
 
-        Map<String, Object> response = postExactStart(request.processDefinitionId(),
+        BodyDispatchResponse response = postExactStartForDispatch(request.processDefinitionId(),
                 Map.of("businessKey", request.caseId(), "variables", typed(variables)));
 
-        return processRef(response, request.processDefinitionId(),
-                string(definition.get("key")), request.caseId(), false);
+        return new ProcessDispatchResult(processRef(response.body(), request.processDefinitionId(),
+                string(definition.get("key")), request.caseId(), false), response.status());
     }
 
     @Override
     public EngineProcessRef startProcessByKey(StartProcessByKeyRequest request) {
+        return startProcessByKeyForDispatch(request).process();
+    }
+
+    private ProcessDispatchResult startProcessByKeyForDispatch(StartProcessByKeyRequest request) {
         Map<String, Object> variables = new LinkedHashMap<>(request.variables());
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
 
-        Map<String, Object> response = postKeyStart(
+        BodyDispatchResponse response = postKeyStartForDispatch(
                 request.processDefinitionKey(), request.tenantId(),
                 Map.of("businessKey", request.caseId(), "variables", typed(variables)));
 
-        return processRef(response, null, request.processDefinitionKey(), request.caseId(), true);
+        return new ProcessDispatchResult(processRef(response.body(), null,
+                request.processDefinitionKey(), request.caseId(), true), response.status());
     }
 
     @Override
     public void cancelProcess(String processInstanceId, String reason) {
+        cancelProcessForDispatch(processInstanceId);
+    }
+
+    private DispatchHttpResponse cancelProcessForDispatch(String processInstanceId) {
         String path = "/process-instance/" + processInstanceId + "?skipCustomListeners=false";
         try {
-            client.delete().uri(path).retrieve().toBodilessEntity();
+            org.springframework.http.ResponseEntity<Void> response =
+                    client.delete().uri(path).retrieve().toBodilessEntity();
+            return new DispatchHttpResponse(
+                    response.getStatusCode().value(), response.getHeaders());
         } catch (RestClientResponseException e) {
             throw new EngineException("cancelProcess (DELETE " + path + ") failed: "
                     + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
@@ -637,7 +796,11 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
 
     @Override
     public void correlateMessage(MessageCorrelationRequest request) {
-        post("correlateMessage", "/message", Map.of(
+        correlateMessageForDispatch(request);
+    }
+
+    private DispatchHttpResponse correlateMessageForDispatch(MessageCorrelationRequest request) {
+        return postSuccessStatus("correlateMessage", "/message", Map.of(
                 "messageName", request.messageName(),
                 "businessKey", request.caseId(),
                 "processVariables", typed(request.variables() == null
@@ -757,6 +920,21 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> getList(String operation, String path) {
+        try {
+            List<Map<String, Object>> result = client.get().uri(path)
+                    .retrieve().body(List.class);
+            return result == null ? List.of() : result;
+        } catch (RestClientResponseException e) {
+            throw new EngineException(operation + " (GET " + path + ") failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException(operation + " (GET " + path + ") failed: "
+                    + e.getMessage(), e);
+        }
+    }
+
     private Map<String, Object> getExactDefinition(String processDefinitionId) {
         try {
             return client.get().uri(builder -> builder
@@ -773,9 +951,12 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         }
     }
 
-    private Map<String, Object> getIfPresent(String path) {
+    private BodyDispatchResponse getIfPresentForDispatch(String path) {
         try {
-            return client.get().uri(path).retrieve().body(Map.class);
+            org.springframework.http.ResponseEntity<Map> response =
+                    client.get().uri(path).retrieve().toEntity(Map.class);
+            return new BodyDispatchResponse(response.getBody(),
+                    response.getStatusCode().value(), response.getHeaders());
         } catch (RestClientResponseException e) {
             if (e.getStatusCode().value() == 404) {
                 return null;
@@ -806,6 +987,25 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         }
     }
 
+    private DispatchHttpResponse postSuccessStatus(
+            String operation, String path, Object body) {
+        try {
+            org.springframework.http.ResponseEntity<Void> response = client.post().uri(path)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .toBodilessEntity();
+            return new DispatchHttpResponse(
+                    response.getStatusCode().value(), response.getHeaders());
+        } catch (RestClientResponseException e) {
+            throw new EngineException(operation + " (POST " + path + ") failed: "
+                    + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
+        } catch (RestClientException e) {
+            throw new EngineException(operation + " (POST " + path + ") failed: "
+                    + e.getMessage(), e);
+        }
+    }
+
     private DispatchHttpResponse postForDispatch(String path, Object body) {
         try {
             return client.post().uri(path)
@@ -824,21 +1024,34 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
     }
 
     private static final class PartiallyCreatedTaskException extends EngineException {
-        private PartiallyCreatedTaskException(String taskId, EngineException cause) {
+        private final String taskId;
+        private final int primaryHttpStatus;
+        private final CommandDispatchOutcome.RepairSource repairSource;
+
+        private PartiallyCreatedTaskException(
+                String taskId, int primaryHttpStatus,
+                CommandDispatchOutcome.RepairSource repairSource, EngineException cause) {
             super("createHumanTask primary task '" + taskId
                     + "' was created before a later side effect failed", cause);
+            this.taskId = taskId;
+            this.primaryHttpStatus = primaryHttpStatus;
+            this.repairSource = repairSource;
         }
     }
 
-    private Map<String, Object> postExactStart(String processDefinitionId, Object body) {
+    private BodyDispatchResponse postExactStartForDispatch(
+            String processDefinitionId, Object body) {
         try {
-            return client.post().uri(builder -> builder
+            org.springframework.http.ResponseEntity<Map> response = client.post()
+                    .uri(builder -> builder
                             .path("/process-definition/{processDefinitionId}/start")
                             .build(processDefinitionId))
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(body)
                     .retrieve()
-                    .body(Map.class);
+                    .toEntity(Map.class);
+            return new BodyDispatchResponse(response.getBody(),
+                    response.getStatusCode().value(), response.getHeaders());
         } catch (RestClientResponseException e) {
             throw new EngineException("startProcess (POST exact " + processDefinitionId + ") failed: "
                     + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);
@@ -848,14 +1061,15 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         }
     }
 
-    private Map<String, Object> postKeyStart(String processDefinitionKey,
-                                             String tenantId, Object body) {
+    private BodyDispatchResponse postKeyStartForDispatch(
+            String processDefinitionKey, String tenantId, Object body) {
         boolean tenantQualified = tenantId != null && !tenantId.isBlank();
         String diagnostic = tenantQualified
                 ? "/process-definition/key/{key}/tenant-id/{tenant}/start"
                 : "/process-definition/key/{key}/start";
         try {
-            return client.post().uri(builder -> tenantQualified
+            org.springframework.http.ResponseEntity<Map> response = client.post()
+                    .uri(builder -> tenantQualified
                             ? builder.path("/process-definition/key/{key}/tenant-id/{tenant}/start")
                                     .build(processDefinitionKey, tenantId)
                             : builder.path("/process-definition/key/{key}/start")
@@ -863,7 +1077,9 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(body)
                     .retrieve()
-                    .body(Map.class);
+                    .toEntity(Map.class);
+            return new BodyDispatchResponse(response.getBody(),
+                    response.getStatusCode().value(), response.getHeaders());
         } catch (RestClientResponseException e) {
             throw new EngineException("startProcessByKey (POST " + diagnostic + ") failed: "
                     + e.getStatusCode() + " " + e.getResponseBodyAsString(), e);

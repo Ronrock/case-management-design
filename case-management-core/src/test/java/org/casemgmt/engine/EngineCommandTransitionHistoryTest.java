@@ -191,6 +191,47 @@ class EngineCommandTransitionHistoryTest {
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("unmatched");
     }
 
+    @Test
+    void replaysAlreadyPersistedFormatOneHistoryFollowedByFormatTwoRepairEvidence() {
+        EngineCommandPolicy.CommandContext create = new EngineCommandPolicy.CommandContext(
+                "tenant-a", "operation-a", "command-a", EngineCommand.Type.CREATE_TASK,
+                "plan-item-a");
+        EngineCommandPolicy.Decision baseline = pending(T0);
+        var currentDispatch = EngineCommandTransitionHistory.record(create, 1, baseline,
+                CommandDispatchOutcome.dispatchRequested(), T0.plusSeconds(1));
+        String persistedFormatOne = "{\"confirmation\":null,\"format\":1,\"http\":null,"
+                + "\"kind\":\"DISPATCH_REQUESTED\",\"operatorAction\":null,\"review\":null,"
+                + "\"transportFailure\":null}";
+        var oldDispatch = new EngineCommandTransitionHistory.TransitionRow(
+                currentDispatch.row().commandId(), currentDispatch.row().tenantId(),
+                currentDispatch.row().operationId(), currentDispatch.row().commandType(),
+                currentDispatch.row().expectedTargetIdentity(), currentDispatch.row().version(),
+                currentDispatch.row().fromStatus(), currentDispatch.row().toStatus(),
+                persistedFormatOne, currentDispatch.row().actionSequence(),
+                currentDispatch.row().decidedAt(), currentDispatch.row().previousDecisionDigest(),
+                currentDispatch.row().nextDecisionDigest());
+        var repairEvidence = new CommandDispatchOutcome.RepairEvidence(
+                "tenant-a", "operation-a", "command-a", EngineCommand.Type.CREATE_TASK,
+                "plan-item-a", "cm-command-command-a", 204,
+                CommandDispatchOutcome.RepairSource.PRIMARY_HTTP_RESPONSE,
+                "create:command-a");
+        CommandDispatchOutcome repair = CommandDispatchOutcome.repairablePartialEffect(
+                repairEvidence, new CommandDispatchOutcome.HttpResult(
+                        429, CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED, null));
+        var currentRepair = EngineCommandTransitionHistory.record(create, 2,
+                currentDispatch.nextDecision(), repair, T0.plusSeconds(2));
+
+        assertThat(EngineCommandTransitionHistory.decodeOutcome(persistedFormatOne))
+                .isEqualTo(CommandDispatchOutcome.dispatchRequested());
+        assertThat(currentRepair.row().outcomeJson()).contains("\"format\":2")
+                .contains("\"repair\":");
+        assertThat(EngineCommandTransitionHistory.replay(create, baseline,
+                List.of(oldDispatch, currentRepair.row())))
+                .isEqualTo(currentRepair.nextDecision())
+                .extracting(EngineCommandPolicy.Decision::status)
+                .isEqualTo(EngineCommandStatus.RETRYABLE);
+    }
+
     private static EngineCommandPolicy.Decision pending(OffsetDateTime at) {
         return new EngineCommandPolicy.Decision(EngineCommandStatus.PENDING, at, null,
                 null, null, 0, 0, 0, false, null, null, null,

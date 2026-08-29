@@ -1,6 +1,7 @@
 package org.casemgmt.engine;
 
 import org.casemgmt.repo.JsonCodec;
+import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
 import org.springframework.jdbc.core.SqlParameterValue;
@@ -10,6 +11,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.Reader;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Types;
 import java.time.Duration;
 import java.time.Clock;
@@ -47,12 +52,14 @@ public class ProductionEngineCommandStore {
     static final Duration CLAIM_LEASE = Duration.ofMinutes(5);
 
     private final JdbcClient jdbc;
+    private final DataSource dataSource;
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final Runnable beforeDecisionCas;
 
     public ProductionEngineCommandStore(JdbcClient jdbc) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
+        this.dataSource = null;
         this.transactions = null;
         this.clock = Clock.systemUTC();
         this.beforeDecisionCas = () -> { };
@@ -74,6 +81,7 @@ public class ProductionEngineCommandStore {
         while (resource instanceof TransactionAwareDataSourceProxy proxy) {
             resource = Objects.requireNonNull(proxy.getTargetDataSource(), "targetDataSource");
         }
+        this.dataSource = resource;
         this.jdbc = JdbcClient.create(dataSource);
         this.transactions = new TransactionTemplate(new DataSourceTransactionManager(resource));
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -253,16 +261,7 @@ public class ProductionEngineCommandStore {
                 now, "claim time");
         int boundedLimit = Math.clamp(limit, 1, 200);
         return inRequiredTransaction(() -> {
-            List<String> candidates = jdbc.sql("""
-                    SELECT ID_ FROM CM_ENGINE_COMMAND
-                    WHERE (STATUS_='PENDING' OR
-                          (STATUS_='RETRYABLE' AND NEXT_ATTEMPT_AT_ <= :now))
-                      AND AUTO_ATTEMPTS_ < :maxAttempts
-                      AND ROWNUM <= :limit
-                    FOR UPDATE SKIP LOCKED
-                    """).param("now", decisionTime)
-                    .param("maxAttempts", EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS)
-                    .param("limit", boundedLimit).query(String.class).list();
+            List<String> candidates = lockDueCandidates(decisionTime, boundedLimit);
             List<LeasedCommand> claimed = new java.util.ArrayList<>();
             EngineCommandPolicy policy = policyAt(decisionTime);
             for (String commandId : candidates) {
@@ -282,6 +281,42 @@ public class ProductionEngineCommandStore {
             }
             return List.copyOf(claimed);
         });
+    }
+
+    /**
+     * Oracle applies a SQL {@code ROWNUM} stop-key before {@code SKIP LOCKED}; a locked first row
+     * can therefore make a due queue look empty. Limit the JDBC cursor instead and fetch one row
+     * at a time so Oracle scans past locked rows without pre-locking work beyond this lease batch.
+     */
+    private List<String> lockDueCandidates(OffsetDateTime decisionTime, int limit) {
+        if (dataSource == null) {
+            throw new IllegalStateException("Production claim requires a transactional DataSource");
+        }
+        Connection connection = DataSourceUtils.getConnection(dataSource);
+        try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT ID_ FROM CM_ENGINE_COMMAND
+                WHERE (STATUS_='PENDING' OR
+                      (STATUS_='RETRYABLE' AND NEXT_ATTEMPT_AT_ <= ?))
+                  AND AUTO_ATTEMPTS_ < ?
+                ORDER BY CREATED_AT_, ID_
+                FOR UPDATE SKIP LOCKED
+                """)) {
+            statement.setObject(1, decisionTime);
+            statement.setInt(2, EngineCommandPolicy.MAX_AUTOMATIC_ATTEMPTS);
+            statement.setFetchSize(1);
+            statement.setMaxRows(limit);
+            var ids = new java.util.ArrayList<String>(limit);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) ids.add(rows.getString(1));
+            }
+            return List.copyOf(ids);
+        } catch (SQLException failure) {
+            throw new org.springframework.jdbc.UncategorizedSQLException(
+                    "Failed to lock due engine commands", "SELECT ... FOR UPDATE SKIP LOCKED",
+                    failure);
+        } finally {
+            DataSourceUtils.releaseConnection(connection, dataSource);
+        }
     }
 
     /** Quarantines expired possibly-sent work; it is never made due for a blind resend. */
@@ -749,7 +784,7 @@ public class ProductionEngineCommandStore {
                 .param("target", row.expectedTargetIdentity())
                 .param("fromStatus", row.fromStatus().name())
                 .param("toStatus", row.toStatus().name())
-                .param("format", EngineCommandTransitionHistory.FORMAT_VERSION)
+                .param("format", EngineCommandTransitionHistory.OUTCOME_FORMAT_VERSION)
                 .param("kind", outcome.kind().name())
                 .param("outcome", clobParameter(row.outcomeJson()))
                 .param("actionSequence", row.actionSequence())
@@ -929,7 +964,7 @@ public class ProductionEngineCommandStore {
         if (!validTemporalDecision(decision.status(), decidedAt, decision.nextAttemptAt(),
                 leaseExpiresAt)) {
             throw new IllegalArgumentException(
-                    "Persisted retry/lease time must be strictly after its decision time");
+                    "Persisted retry time cannot precede its decision and lease expiry must follow it");
         }
         OffsetDateTime confirmedAt = rs.getObject("CONFIRMED_AT_", OffsetDateTime.class);
         OffsetDateTime failedAt = rs.getObject("FAILED_AT_", OffsetDateTime.class);
@@ -1162,12 +1197,18 @@ public class ProductionEngineCommandStore {
                 FROM CM_ENGINE_COMMAND_TRANSITION
                 WHERE COMMAND_ID_=:commandId AND VERSION_>0 ORDER BY VERSION_
                 """).param("commandId", context.commandId()).query((rs, n) -> {
-                    if (rs.getInt("OUTCOME_FORMAT_")
-                            != EngineCommandTransitionHistory.FORMAT_VERSION) {
+                    int persistedFormat = rs.getInt("OUTCOME_FORMAT_");
+                    if (!EngineCommandTransitionHistory.supportsOutcomeFormat(
+                            persistedFormat)) {
                         throw new IllegalArgumentException(
                                 "Unsupported command transition history format");
                     }
                     String outcomeJson = readClob(rs, "OUTCOME_JSON_");
+                    if (EngineCommandTransitionHistory.outcomeFormat(outcomeJson)
+                            != persistedFormat) {
+                        throw new IllegalArgumentException(
+                                "Command transition format differs from its evidence");
+                    }
                     CommandDispatchOutcome outcome =
                             EngineCommandTransitionHistory.decodeOutcome(outcomeJson);
                     if (!outcome.kind().name().equals(rs.getString("OUTCOME_KIND_"))) {
@@ -1216,7 +1257,7 @@ public class ProductionEngineCommandStore {
             EngineCommandStatus status, OffsetDateTime decidedAt,
             OffsetDateTime nextAttemptAt, OffsetDateTime leaseExpiresAt) {
         boolean retryTime = status == EngineCommandStatus.RETRYABLE
-                ? nextAttemptAt != null && nextAttemptAt.isAfter(decidedAt)
+                ? nextAttemptAt != null && !nextAttemptAt.isBefore(decidedAt)
                 : nextAttemptAt == null;
         boolean leaseTime = status != EngineCommandStatus.DISPATCHING
                 || leaseExpiresAt != null && leaseExpiresAt.isAfter(decidedAt);

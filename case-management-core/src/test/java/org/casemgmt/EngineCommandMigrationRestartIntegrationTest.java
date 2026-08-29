@@ -42,26 +42,30 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
     private static final String CHANGELOG = "db/changelog/cm-production-engine-command.xml";
     private static final String SCHEMA = "WS4_COMMAND_RESTART";
     private static final String PASSWORD = "Ws4Command42";
+    private static final String FIRST_PRODUCTION_CHANGESET =
+            "cm-production-engine-command-columns-guard";
     private static final List<String> EXPECTED_CHANGESETS = List.of(
-            "cm-production-engine-command-columns-guard",
             "cm-production-engine-command-columns",
+            "cm-production-engine-command-status-migration-drop",
+            "cm-production-engine-command-legacy-due-migration-drop",
+            "cm-production-engine-command-status-width-v2",
             "cm-production-engine-command-backfill",
+            "cm-production-engine-command-status-v2",
+            "cm-production-engine-command-legacy-due-v2",
             "cm-production-engine-command-payload-digest-backfill",
             "cm-production-engine-command-required",
             "cm-production-engine-command-status-guard",
             "cm-production-engine-command-drop-poc-status",
             "cm-production-engine-command-new-status-guard",
             "cm-production-engine-command-status",
-            "cm-engine-command-action-table-guard",
             "cm-engine-command-action-table",
-            "cm-production-engine-command-invariants-guard",
             "cm-production-engine-command-counter-invariants",
             "cm-production-engine-command-lease-invariants",
             "cm-engine-command-action-invariants",
             "cm-production-engine-command-normalize-retry-time",
-            "cm-production-engine-command-temporal-guard",
             "cm-production-engine-command-temporal-invariants",
-            "cm-production-engine-command-objects-guard",
+            "cm-production-engine-command-temporal-v1-drop",
+            "cm-production-engine-command-temporal-v2",
             "cm-engine-command-action-fk",
             "cm-engine-command-action-id-unique",
             "cm-engine-command-action-seq-unique",
@@ -71,14 +75,28 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
             "cm-engine-command-lease-index",
             "cm-engine-command-case-status-index",
             "cm-engine-command-review-index",
-            "cm-engine-command-transition-table-guard",
             "cm-engine-command-transition-table",
+            "cm-engine-command-transition-status-width-v2",
             "cm-engine-command-transition-baseline",
-            "cm-engine-command-transition-objects-guard",
+            "cm-engine-command-transition-format-v1-drop",
+            "cm-engine-command-transition-format-v2",
             "cm-engine-command-action-sequence-constraint",
             "cm-engine-command-transition-command-fk",
             "cm-engine-command-transition-action-fk",
             "cm-production-engine-command-byte-semantics",
+            "cm-production-engine-command-columns-guard",
+            "cm-production-engine-command-status-migration-guard",
+            "cm-production-engine-command-legacy-due-migration-guard",
+            "cm-production-engine-command-status-width-guard",
+            "cm-engine-command-action-table-guard",
+            "cm-production-engine-command-invariants-guard",
+            "cm-production-engine-command-temporal-guard",
+            "cm-production-engine-command-temporal-v2-guard",
+            "cm-production-engine-command-objects-guard",
+            "cm-engine-command-transition-table-guard",
+            "cm-engine-command-transition-status-width-guard",
+            "cm-engine-command-transition-format-guard",
+            "cm-engine-command-transition-objects-guard",
             "cm-production-engine-command-final-state-guard");
     private static String jdbcUrl;
 
@@ -144,7 +162,8 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
     @Test
     void hashesAndRehydratesTheEntireLegacyClobBeyondOracleVarcharLimits() throws Exception {
         DataSource scenario = recreateBaseline();
-        String payload = "{\"raw\":\"" + "é".repeat(40_000) + "\"}";
+        String payload = "{\"engineTaskId\":\"case-a\",\"variables\":{\"raw\":\""
+                + "é".repeat(40_000) + "\"}}";
         try (Connection connection = scenario.getConnection();
              var statement = connection.prepareStatement("""
                      INSERT INTO CM_ENGINE_COMMAND
@@ -161,11 +180,13 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                 .query(String.class).single()).isEqualTo(JsonCodec.sha256(payload));
         assertThat(new EngineCommandRepository(scenario)
                 .require("__legacy_unscoped__", "large").payload())
+                .extracting("variables")
+                .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
                 .containsEntry("raw", "é".repeat(40_000));
     }
 
     @Test
-    void nullableLegacyPayloadRetainsNullEvidenceAndUsesCanonicalEmptyLivePayload()
+    void nullableLegacyPayloadRetainsNullEvidenceButFailsClosedDuringRehydration()
             throws Exception {
         DataSource scenario = recreateBaseline();
         JdbcClient jdbc = JdbcClient.create(scenario);
@@ -184,8 +205,10 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                   AND PAYLOAD_DIGEST_=:digest
                 """).param("digest", JsonCodec.sha256("{}"))
                 .query(Integer.class).single()).isEqualTo(1);
-        assertThat(new EngineCommandRepository(scenario)
-                .require("__legacy_unscoped__", "null-payload").payload()).isEmpty();
+        assertThatThrownBy(() -> new EngineCommandRepository(scenario)
+                .require("__legacy_unscoped__", "null-payload"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("payload fields");
     }
 
     @Test
@@ -312,7 +335,7 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
     }
 
     @ParameterizedTest(name = "resumes after {0} production changesets")
-    @ValueSource(ints = {0, 1, 2, 3, 4, 7, 10, 14, 19, 25, 26})
+    @ValueSource(ints = {0, 2, 5, 6, 8, 9, 10, 11, 19, 26, 29, 36, 41, 43, 44, 47, 52})
     void resumesAndRerunsAfterEveryRepresentativeOracleDdlPrefix(int prefix) throws Exception {
         DataSource scenario = recreateBaseline();
         updateNext(scenario, prefix);
@@ -402,48 +425,48 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                 "cm-production-engine-command-columns-guard"),
         STATUS_CONSTRAINT(0, null, "cm-production-engine-command-status-guard"),
         ACTION_TABLE(0, null, "cm-engine-command-action-table-guard"),
-        ACTION_DEFAULT(11, null, "cm-production-engine-command-invariants-guard"),
-        COUNTER_CONSTRAINT_DISABLED(13, null,
+        ACTION_DEFAULT(19, null, "cm-production-engine-command-invariants-guard"),
+        COUNTER_CONSTRAINT_DISABLED(21, null,
                 "cm-production-engine-command-invariants-guard"),
-        COUNTER_CONSTRAINT_WRONG_TABLE(11, null,
+        COUNTER_CONSTRAINT_WRONG_TABLE(19, null,
                 "cm-production-engine-command-invariants-guard"),
-        COUNTER_CONSTRAINT(11, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
+        COUNTER_CONSTRAINT(19, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
                 + "CK_CM_ENGCMD_COUNTERS CHECK (TOTAL_DISPATCH_ATTEMPTS_ >= 0)",
                 "cm-production-engine-command-invariants-guard"),
-        LEASE_CONSTRAINT(11, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
+        LEASE_CONSTRAINT(19, "ALTER TABLE CM_ENGINE_COMMAND ADD CONSTRAINT "
                 + "CK_CM_ENGCMD_LEASE CHECK (LEASE_TOKEN_ IS NULL)",
                 "cm-production-engine-command-invariants-guard"),
-        ACTION_CONSTRAINT(11, "ALTER TABLE CM_ENGINE_COMMAND_ACTION ADD CONSTRAINT "
+        ACTION_CONSTRAINT(19, "ALTER TABLE CM_ENGINE_COMMAND_ACTION ADD CONSTRAINT "
                 + "CK_CM_ECA_INVARIANTS CHECK (SEQUENCE_ > 0)",
                 "cm-production-engine-command-invariants-guard"),
-        ACTION_FK(11, "ALTER TABLE CM_ENGINE_COMMAND_ACTION ADD CONSTRAINT FK_CM_ECA_COMMAND "
+        ACTION_FK(19, "ALTER TABLE CM_ENGINE_COMMAND_ACTION ADD CONSTRAINT FK_CM_ECA_COMMAND "
                 + "FOREIGN KEY (OPERATION_ID_) REFERENCES CM_ENGINE_COMMAND(ID_)",
                 "cm-production-engine-command-objects-guard"),
-        ACTION_ID_INDEX(11, "CREATE UNIQUE INDEX UQ_CM_ECA_ACTION "
+        ACTION_ID_INDEX(19, "CREATE UNIQUE INDEX UQ_CM_ECA_ACTION "
                 + "ON CM_ENGINE_COMMAND_ACTION(ACTION_ID_)",
                 "cm-production-engine-command-objects-guard"),
-        ACTION_SEQUENCE_INDEX(11, "CREATE UNIQUE INDEX UQ_CM_ECA_SEQUENCE "
+        ACTION_SEQUENCE_INDEX(19, "CREATE UNIQUE INDEX UQ_CM_ECA_SEQUENCE "
                 + "ON CM_ENGINE_COMMAND_ACTION(SEQUENCE_)",
                 "cm-production-engine-command-objects-guard"),
-        OPERATION_INDEX(11, "CREATE INDEX UQ_CM_ENGCMD_OPERATION "
+        OPERATION_INDEX(19, "CREATE INDEX UQ_CM_ENGCMD_OPERATION "
                 + "ON CM_ENGINE_COMMAND(TENANT_ID_, OPERATION_ID_)",
                 "cm-production-engine-command-objects-guard"),
-        OPERATION_INDEX_TRAILING(11, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_OPERATION "
+        OPERATION_INDEX_TRAILING(19, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_OPERATION "
                 + "ON CM_ENGINE_COMMAND(CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END, "
                 + "TENANT_ID_, OPERATION_ID_, ID_)",
                 "cm-production-engine-command-objects-guard"),
-        IDEMPOTENCY_INDEX(11, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_IDEMPOTENCY "
+        IDEMPOTENCY_INDEX(19, "CREATE UNIQUE INDEX UQ_CM_ENGCMD_IDEMPOTENCY "
                 + "ON CM_ENGINE_COMMAND(TENANT_ID_, OPERATION_ID_)",
                 "cm-production-engine-command-objects-guard"),
-        DUE_INDEX(11, "CREATE INDEX IX_CM_ENGCMD_PROD_DUE ON CM_ENGINE_COMMAND(STATUS_)",
+        DUE_INDEX(19, "CREATE INDEX IX_CM_ENGCMD_PROD_DUE ON CM_ENGINE_COMMAND(STATUS_)",
                 "cm-production-engine-command-objects-guard"),
-        DUE_INDEX_UNUSABLE(22, null, "cm-production-engine-command-objects-guard"),
-        LEASE_INDEX(11, "CREATE INDEX IX_CM_ENGCMD_LEASE ON CM_ENGINE_COMMAND(LEASE_EXPIRES_AT_)",
+        DUE_INDEX_UNUSABLE(36, null, "cm-production-engine-command-objects-guard"),
+        LEASE_INDEX(19, "CREATE INDEX IX_CM_ENGCMD_LEASE ON CM_ENGINE_COMMAND(LEASE_EXPIRES_AT_)",
                 "cm-production-engine-command-objects-guard"),
-        CASE_STATUS_INDEX(11, "CREATE INDEX IX_CM_ENGCMD_CASE_STATUS "
+        CASE_STATUS_INDEX(19, "CREATE INDEX IX_CM_ENGCMD_CASE_STATUS "
                 + "ON CM_ENGINE_COMMAND(CASE_ID_, STATUS_)",
                 "cm-production-engine-command-objects-guard"),
-        REVIEW_INDEX(11, "CREATE INDEX IX_CM_ENGCMD_REVIEW ON CM_ENGINE_COMMAND(UPDATED_AT_)",
+        REVIEW_INDEX(19, "CREATE INDEX IX_CM_ENGCMD_REVIEW ON CM_ENGINE_COMMAND(UPDATED_AT_)",
                 "cm-production-engine-command-objects-guard");
 
         private final int prefix;
@@ -533,7 +556,7 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                     MASTER, new ClassLoaderResourceAccessor(), database)) {
                 int beforeProduction = 0;
                 for (var changeSet : liquibase.getDatabaseChangeLog().getChangeSets()) {
-                    if (EXPECTED_CHANGESETS.getFirst().equals(changeSet.getId())) break;
+                    if (FIRST_PRODUCTION_CHANGESET.equals(changeSet.getId())) break;
                     beforeProduction++;
                 }
                 assertThat(beforeProduction).isPositive();
@@ -560,7 +583,8 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                         SYSTIMESTAMP, :error, SYSTIMESTAMP,
                         CASE WHEN :status='CLAIMED' THEN 'old-token' END,
                         CASE WHEN :status='CLAIMED' THEN SYSTIMESTAMP END)
-                """).param("id", id).param("payload", "{\"raw\":\"old-" + id + "\"}")
+                """).param("id", id).param("payload", "{\"engineTaskId\":\"case-a\","
+                        + "\"variables\":{\"raw\":\"old-" + id + "\"}}")
                 .param("status", status).param("attempts", attempts)
                 .param("error", "boom-" + id).update();
     }
@@ -569,7 +593,7 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         return jdbc.sql("""
                 SELECT ID_ || '|' || STATUS_ || '|' || TOTAL_DISPATCH_ATTEMPTS_ || '|' ||
                        AUTO_ATTEMPTS_ || '|' || ORIGINAL_STATUS_ || '|' ||
-                       JSON_VALUE(RAW_LEGACY_PAYLOAD_, '$.raw') || '|' || RAW_LEGACY_ERROR_ || '|' ||
+                       JSON_VALUE(RAW_LEGACY_PAYLOAD_, '$.variables.raw') || '|' || RAW_LEGACY_ERROR_ || '|' ||
                        NVL(LEGACY_ROW_ID_, '-') || '|' || NVL(LEGACY_STATUS_, '-') || '|' ||
                        NVL(TO_CHAR(LEGACY_FAILURE_COUNT_), '-') || '|' ||
                        NVL(RAW_LEGACY_CLAIM_TOKEN_, '-') || '|' ||

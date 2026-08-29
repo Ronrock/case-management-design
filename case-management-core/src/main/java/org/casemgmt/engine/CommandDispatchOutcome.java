@@ -15,13 +15,15 @@ public record CommandDispatchOutcome(
         HttpResult httpResult,
         ConfirmationEvidence confirmationEvidence,
         ReviewEvidence reviewEvidence,
-        OperatorAction operatorAction) {
+        OperatorAction operatorAction,
+        RepairEvidence repairEvidence) {
 
     public enum Kind {
         DISPATCH_REQUESTED,
         TRANSPORT_FAILURE,
         HTTP_RESPONSE,
         MALFORMED_RESPONSE,
+        REPAIRABLE_PARTIAL_EFFECT,
         DUPLICATE_RESPONSE,
         LEASE_EXPIRED,
         OBSERVATION_CONFIRMED,
@@ -75,6 +77,11 @@ public record CommandDispatchOutcome(
     public enum ReviewSource {
         RECONCILIATION,
         OPERATOR_REVIEW
+    }
+
+    public enum RepairSource {
+        PRIMARY_HTTP_RESPONSE,
+        IDEMPOTENCY_LOOKUP
     }
 
     public enum ReviewFinding {
@@ -145,6 +152,45 @@ public record CommandDispatchOutcome(
         }
     }
 
+    /**
+     * Canonical proof that this command's deterministic CREATE_TASK resource exists while one
+     * or more postconditions still need idempotent repair.
+     */
+    public record RepairEvidence(
+            String tenantId,
+            String operationId,
+            String commandId,
+            EngineCommand.Type commandType,
+            String expectedTargetIdentity,
+            String remoteIdentity,
+            int primaryHttpStatus,
+            RepairSource source,
+            String evidenceReference) {
+        public RepairEvidence {
+            tenantId = identifier(tenantId, "tenantId");
+            operationId = identifier(operationId, "operationId");
+            commandId = identifier(commandId, "commandId");
+            Objects.requireNonNull(commandType, "commandType");
+            if (commandType != EngineCommand.Type.CREATE_TASK) {
+                throw new IllegalArgumentException(
+                        "Repair evidence is valid only for CREATE_TASK");
+            }
+            expectedTargetIdentity = identifier(
+                    expectedTargetIdentity, "expectedTargetIdentity");
+            remoteIdentity = identifier(remoteIdentity, "remoteIdentity");
+            if (!deterministicCreateTaskIdentity(commandId).equals(remoteIdentity)) {
+                throw new IllegalArgumentException(
+                        "Repair evidence remote identity is not the deterministic command task");
+            }
+            if (primaryHttpStatus < 200 || primaryHttpStatus >= 300) {
+                throw new IllegalArgumentException(
+                        "Repair evidence primary HTTP status must be successful");
+            }
+            Objects.requireNonNull(source, "source");
+            evidenceReference = safeReference(evidenceReference, "evidenceReference");
+        }
+    }
+
     public record ReviewEvidence(
             String tenantId,
             String operationId,
@@ -200,8 +246,12 @@ public record CommandDispatchOutcome(
         if (kind == Kind.HTTP_RESPONSE && confirmationEvidence != null
                 && (httpResult == null || httpResult.status() < 200
                 || httpResult.status() >= 300)) {
+                throw new IllegalArgumentException(
+                        "Only a 2xx HTTP response may carry confirmation evidence");
+        }
+        if ((kind == Kind.REPAIRABLE_PARTIAL_EFFECT) != (repairEvidence != null)) {
             throw new IllegalArgumentException(
-                    "Only a 2xx HTTP response may carry confirmation evidence");
+                    "Only a repairable partial effect may carry repair evidence");
         }
         if (operatorAction != null) {
             ActionType required = switch (kind) {
@@ -228,6 +278,14 @@ public record CommandDispatchOutcome(
                     requireOnly(kind, transportFailure, httpResult, confirmationEvidence,
                             reviewEvidence, operatorAction, false, true,
                             confirmationEvidence != null, false, false);
+            case REPAIRABLE_PARTIAL_EFFECT -> {
+                if (confirmationEvidence != null || reviewEvidence != null
+                        || operatorAction != null
+                        || transportFailure != null && httpResult != null) {
+                    throw new IllegalArgumentException(
+                            "Repairable partial effect has incompatible evidence");
+                }
+            }
             case DUPLICATE_RESPONSE ->
                     requireOnly(kind, transportFailure, httpResult, confirmationEvidence,
                             reviewEvidence, operatorAction, false, false,
@@ -253,14 +311,14 @@ public record CommandDispatchOutcome(
 
     public static CommandDispatchOutcome transportFailure(TransportFailure failure) {
         return new CommandDispatchOutcome(Kind.TRANSPORT_FAILURE,
-                Objects.requireNonNull(failure, "failure"), null, null, null, null);
+                Objects.requireNonNull(failure, "failure"), null, null, null, null, null);
     }
 
     public static CommandDispatchOutcome http(
             int status, Acceptance acceptance, Duration retryAfter,
             ConfirmationEvidence confirmation) {
         return new CommandDispatchOutcome(Kind.HTTP_RESPONSE, null,
-                new HttpResult(status, acceptance, retryAfter), confirmation, null, null);
+                new HttpResult(status, acceptance, retryAfter), confirmation, null, null, null);
     }
 
     public static CommandDispatchOutcome malformedResponse() {
@@ -269,7 +327,7 @@ public record CommandDispatchOutcome(
 
     public static CommandDispatchOutcome duplicateResponse(ConfirmationEvidence confirmation) {
         return new CommandDispatchOutcome(
-                Kind.DUPLICATE_RESPONSE, null, null, confirmation, null, null);
+                Kind.DUPLICATE_RESPONSE, null, null, confirmation, null, null, null);
     }
 
     public static CommandDispatchOutcome leaseExpired() {
@@ -279,20 +337,40 @@ public record CommandDispatchOutcome(
     public static CommandDispatchOutcome observation(ConfirmationEvidence confirmation) {
         return new CommandDispatchOutcome(
                 Kind.OBSERVATION_CONFIRMED, null, null,
-                Objects.requireNonNull(confirmation, "confirmation"), null, null);
+                Objects.requireNonNull(confirmation, "confirmation"), null, null, null);
     }
 
     public static CommandDispatchOutcome reconciliationConfirmed(
             ConfirmationEvidence confirmation) {
         return new CommandDispatchOutcome(
                 Kind.RECONCILIATION_CONFIRMED, null, null,
-                Objects.requireNonNull(confirmation, "confirmation"), null, null);
+                Objects.requireNonNull(confirmation, "confirmation"), null, null, null);
     }
 
     public static CommandDispatchOutcome reconciliation(ReviewEvidence evidence) {
         return new CommandDispatchOutcome(
                 Kind.RECONCILIATION_RESULT, null, null, null,
-                Objects.requireNonNull(evidence, "evidence"), null);
+                Objects.requireNonNull(evidence, "evidence"), null, null);
+    }
+
+    public static CommandDispatchOutcome repairablePartialEffect(
+            RepairEvidence evidence, HttpResult failure) {
+        return new CommandDispatchOutcome(Kind.REPAIRABLE_PARTIAL_EFFECT, null,
+                Objects.requireNonNull(failure, "failure"), null, null, null,
+                Objects.requireNonNull(evidence, "evidence"));
+    }
+
+    public static CommandDispatchOutcome repairablePartialEffect(
+            RepairEvidence evidence, TransportFailure failure) {
+        return new CommandDispatchOutcome(Kind.REPAIRABLE_PARTIAL_EFFECT,
+                Objects.requireNonNull(failure, "failure"), null, null, null, null,
+                Objects.requireNonNull(evidence, "evidence"));
+    }
+
+    public static CommandDispatchOutcome repairablePartialEffect(RepairEvidence evidence) {
+        return new CommandDispatchOutcome(Kind.REPAIRABLE_PARTIAL_EFFECT,
+                null, null, null, null, null,
+                Objects.requireNonNull(evidence, "evidence"));
     }
 
     public static CommandDispatchOutcome manualReviewRequested(OperatorAction action) {
@@ -318,19 +396,24 @@ public record CommandDispatchOutcome(
     }
 
     private static CommandDispatchOutcome simple(Kind kind) {
-        return new CommandDispatchOutcome(kind, null, null, null, null, null);
+        return new CommandDispatchOutcome(kind, null, null, null, null, null, null);
     }
 
     private static CommandDispatchOutcome manual(Kind kind, OperatorAction action) {
         return new CommandDispatchOutcome(kind, null, null, null, null,
-                Objects.requireNonNull(action, "action"));
+                Objects.requireNonNull(action, "action"), null);
     }
 
     private static CommandDispatchOutcome reviewed(
             Kind kind, ReviewEvidence evidence, OperatorAction action) {
         return new CommandDispatchOutcome(kind, null, null, null,
                 Objects.requireNonNull(evidence, "evidence"),
-                Objects.requireNonNull(action, "action"));
+                Objects.requireNonNull(action, "action"), null);
+    }
+
+    public static String deterministicCreateTaskIdentity(String commandId) {
+        String result = "cm-command-" + identifier(commandId, "commandId");
+        return identifier(result, "deterministicCreateTaskIdentity");
     }
 
     private static void requireOnly(

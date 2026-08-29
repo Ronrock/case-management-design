@@ -1,13 +1,13 @@
 package org.casemgmt.engine.remote;
 
 import org.casemgmt.engine.*;
-import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
@@ -15,8 +15,8 @@ import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
 import java.net.ConnectException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -26,22 +26,26 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 class RemoteEngineCommandTransportTest {
 
     @ParameterizedTest
     @EnumSource(EngineCommand.Type.class)
     void everyCommandTypeReturnsCommandBoundConfirmation(EngineCommand.Type type) {
-        var gateway = new SuccessfulGateway();
+        RestClient.Builder builder = RestClient.builder().baseUrl("http://engine.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         var command = command(type, payload(type));
-
-        CommandDispatchOutcome outcome = gateway.dispatch(command);
-
-        assertThat(outcome.kind()).isEqualTo(CommandDispatchOutcome.Kind.HTTP_RESPONSE);
         int expectedStatus = switch (type) {
             case CLAIM_TASK, COMPLETE_TASK, CANCEL_PROCESS, CORRELATE_MESSAGE -> 204;
             default -> 200;
         };
+        expectSuccessfulDispatch(server, type, HttpStatus.valueOf(expectedStatus));
+
+        CommandDispatchOutcome outcome = new RemoteEngineGateway(builder.build())
+                .dispatch(command);
+
+        assertThat(outcome.kind()).isEqualTo(CommandDispatchOutcome.Kind.HTTP_RESPONSE);
         assertThat(outcome.httpResult().status()).isEqualTo(expectedStatus);
         assertThat(outcome.confirmationEvidence()).satisfies(evidence -> {
             assertThat(evidence.tenantId()).isEqualTo("tenant-1");
@@ -52,6 +56,23 @@ class RemoteEngineCommandTransportTest {
             assertThat(evidence.evidenceReference())
                     .isEqualTo("http:" + expectedStatus + ":command-1");
         });
+        server.verify();
+    }
+
+    @ParameterizedTest
+    @EnumSource(EngineCommand.Type.class)
+    void everyCommandTypePreservesTheActualSuccessfulHttpStatus(EngineCommand.Type type) {
+        RestClient.Builder builder = RestClient.builder().baseUrl("http://engine.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        expectSuccessfulDispatch(server, type, HttpStatus.CREATED);
+
+        CommandDispatchOutcome outcome = new RemoteEngineGateway(builder.build()).dispatch(
+                command(type, payload(type)));
+
+        assertThat(outcome.httpResult()).isEqualTo(new CommandDispatchOutcome.HttpResult(
+                201, CommandDispatchOutcome.Acceptance.ACCEPTED, null));
+        assertThat(outcome.confirmationEvidence()).isNotNull();
+        server.verify();
     }
 
     @Test
@@ -174,28 +195,77 @@ class RemoteEngineCommandTransportTest {
         };
     }
 
-    private static final class SuccessfulGateway extends RemoteEngineGateway {
-        private SuccessfulGateway() { super(RestClient.create()); }
-        @Override public EngineTaskRef createHumanTask(HumanTaskRequest request) {
-            return new EngineTaskRef("task-1", request.name(), request.assignee(),
-                    request.caseId(), OffsetDateTime.parse("2026-08-29T00:00:00Z"));
+    private static void expectSuccessfulDispatch(
+            MockRestServiceServer server, EngineCommand.Type type, HttpStatus primaryStatus) {
+        switch (type) {
+            case CREATE_TASK -> {
+                String taskId = "cm-command-command-1";
+                server.expect(requestTo("http://engine.test/task/" + taskId))
+                        .andRespond(withStatus(HttpStatus.NOT_FOUND));
+                server.expect(requestTo("http://engine.test/task/create"))
+                        .andExpect(org.springframework.test.web.client.match
+                                .MockRestRequestMatchers.method(HttpMethod.POST))
+                        .andRespond(withStatus(primaryStatus));
+                server.expect(requestTo("http://engine.test/task/" + taskId + "/identity-links"))
+                        .andRespond(withSuccess("[]", MediaType.APPLICATION_JSON));
+                server.expect(requestTo("http://engine.test/task/" + taskId + "/variables"))
+                        .andRespond(withSuccess("""
+                                {"caseId":{"value":"case-1","type":"String"},
+                                 "planItemId":{"value":"plan-1","type":"String"}}
+                                """, MediaType.APPLICATION_JSON));
+                server.expect(requestTo("http://engine.test/task/" + taskId))
+                        .andRespond(withSuccess("{\"id\":\"" + taskId
+                                + "\",\"name\":\"Approve\"}", MediaType.APPLICATION_JSON));
+            }
+            case CLAIM_TASK -> server.expect(requestTo(
+                            "http://engine.test/task/task-1/claim"))
+                    .andRespond(withStatus(primaryStatus));
+            case COMPLETE_TASK -> server.expect(requestTo(
+                            "http://engine.test/task/task-1/complete"))
+                    .andRespond(withStatus(primaryStatus));
+            case START_PROCESS -> {
+                server.expect(requestTo("http://engine.test/process-definition/definition-1"))
+                        .andRespond(withSuccess("""
+                                {"id":"definition-1","key":"orders","tenantId":"tenant-1"}
+                                """, MediaType.APPLICATION_JSON));
+                server.expect(requestTo(
+                                "http://engine.test/process-definition/definition-1/start"))
+                        .andRespond(withStatus(primaryStatus)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .body("""
+                                        {"id":"process-1","definitionId":"definition-1"}
+                                        """));
+            }
+            case CANCEL_PROCESS -> server.expect(requestTo(
+                            "http://engine.test/process-instance/process-1?skipCustomListeners=false"))
+                    .andExpect(org.springframework.test.web.client.match
+                            .MockRestRequestMatchers.method(HttpMethod.DELETE))
+                    .andRespond(withStatus(primaryStatus));
+            case DEPLOY_ORCHESTRATION -> {
+                server.expect(requestTo("http://engine.test/deployment/create"))
+                        .andRespond(withStatus(primaryStatus)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .body("{\"id\":\"deployment-1\"}"));
+                server.expect(requestTo(
+                                "http://engine.test/process-definition?deploymentId=deployment-1"))
+                        .andRespond(withSuccess("""
+                                [{"id":"definition-1","key":"orders","version":1,
+                                  "deploymentId":"deployment-1","tenantId":"tenant-1"}]
+                                """, MediaType.APPLICATION_JSON));
+                server.expect(requestTo(
+                                "http://engine.test/deployment/deployment-1/resources"))
+                        .andRespond(withSuccess("""
+                                [{"id":"resource-1","name":"orders.bpmn",
+                                  "deploymentId":"deployment-1"}]
+                                """, MediaType.APPLICATION_JSON));
+                server.expect(requestTo("http://engine.test/deployment/deployment-1/resources/"
+                                + "resource-1/data"))
+                        .andRespond(withSuccess("a".getBytes(StandardCharsets.UTF_8),
+                                MediaType.APPLICATION_OCTET_STREAM));
+            }
+            case CORRELATE_MESSAGE -> server.expect(requestTo("http://engine.test/message"))
+                    .andRespond(withStatus(primaryStatus));
         }
-        @Override public void claimTask(String engineTaskId, String userId) { }
-        @Override public void completeTask(String engineTaskId, Map<String, Object> variables) { }
-        @Override protected DispatchHttpResponse completeTaskForDispatch(
-                String engineTaskId, Map<String, Object> variables) {
-            return new DispatchHttpResponse(204, org.springframework.http.HttpHeaders.EMPTY);
-        }
-        @Override public EngineProcessRef startProcess(StartProcessRequest request) {
-            return new EngineProcessRef("process-1", request.processDefinitionId(),
-                    request.processDefinitionKey(), request.caseId());
-        }
-        @Override public void cancelProcess(String processInstanceId, String reason) { }
-        @Override public EngineDeploymentIdentity deploy(String releaseId, String definitionKey,
-                String tenantId, byte[] content, String mediaType) {
-            return new EngineDeploymentIdentity("deployment-1", "definition-1",
-                    definitionKey, 1, tenantId);
-        }
-        @Override public void correlateMessage(MessageCorrelationRequest request) { }
     }
+
 }

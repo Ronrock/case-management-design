@@ -94,10 +94,11 @@ class EngineCommandClaimSafetyTest extends OracleTestBase {
         enqueue(1);
         assertThat(commands.claimDue(10)).hasSize(1);
 
-        // Simulate a dispatcher that claimed the row and then died before finishing: back-date
-        // LEASE_EXPIRES_AT_ past the lease instead of classifying the remote outcome. A crash
-        // after bytes may have been sent is ambiguous, so recovery must quarantine, not resend.
-        jdbc().sql("UPDATE CM_ENGINE_COMMAND SET LEASE_EXPIRES_AT_ = SYSTIMESTAMP - INTERVAL '10' MINUTE")
+        // Simulate a dispatcher that claimed the row and then died before finishing. Keep the
+        // persisted lease strictly after its decision (the exact temporal contract) while making
+        // it due before the next repository clock read. A possibly-sent crash is quarantined.
+        jdbc().sql("UPDATE CM_ENGINE_COMMAND SET LEASE_EXPIRES_AT_ = "
+                        + "DECIDED_AT_ + INTERVAL '0.000001' SECOND")
                 .update();
 
         assertThat(commands.claimDue(10)).isEmpty();
@@ -117,7 +118,11 @@ class EngineCommandClaimSafetyTest extends OracleTestBase {
     private void enqueue(int n) {
         for (int i = 0; i < n; i++) {
             commands.enqueue(new EngineCommand("cmd-" + UUID.randomUUID(), "eng-a:1",
-                    EngineCommand.Type.CREATE_TASK, Map.of("planItemId", "pi-" + i, "name", "T"),
+                    EngineCommand.Type.CREATE_TASK, Map.of(
+                            "planItemId", "pi-" + i,
+                            "name", "T",
+                            "candidateGroups", List.of(),
+                            "variables", Map.of()),
                     "PENDING", 0, OffsetDateTime.now(), null));
         }
     }
