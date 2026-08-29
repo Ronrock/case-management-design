@@ -129,6 +129,11 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
      */
     private static OrchestrationMode declaredMode(String definitionKey, JsonNode root) {
         JsonNode declared = root.get("orchestrationMode");
+        if (declared != null && "PLAN_MODEL".equals(declared.asText())) {
+            throw invalid(definitionKey,
+                    "Contract release rejects unsupported orchestrationMode PLAN_MODEL; "
+                            + "must explicitly declare BPMN");
+        }
         if (declared == null || !"BPMN".equals(declared.asText())) {
             throw invalid(definitionKey,
                     "Contract release must explicitly declare orchestrationMode BPMN");
