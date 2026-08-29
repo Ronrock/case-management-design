@@ -7,6 +7,9 @@ import org.casemgmt.projection.ProcessCompletionObservation;
 import org.casemgmt.projection.RemotePollingCheckpointRepository;
 import org.casemgmt.projection.TaskObservation;
 import org.casemgmt.projection.ActivityObservation;
+import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.ObservationEnvelope;
+import org.casemgmt.observation.ProcessObservation;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
@@ -36,16 +39,19 @@ public final class RemoteObservationPoller {
     private final RemotePollingCheckpointRepository checkpoints;
     private final ActiveBpmnCaseRepository activeCases;
     private final RemoteProcessActivityClassifier classifier;
+    private final EngineObservationHandler observations;
 
     public RemoteObservationPoller(RestClient client, CaseProjectionPort projections,
                                    RemotePollingCheckpointRepository checkpoints,
                                    ActiveBpmnCaseRepository activeCases,
-                                   RemoteProcessActivityClassifier classifier) {
+                                   RemoteProcessActivityClassifier classifier,
+                                   EngineObservationHandler observations) {
         this.client = client;
         this.projections = projections;
         this.checkpoints = checkpoints;
         this.activeCases = activeCases;
         this.classifier = classifier;
+        this.observations = observations;
     }
 
     /** Periodic authoritative pass over every still-active BPMN root process. */
@@ -58,11 +64,14 @@ public final class RemoteObservationPoller {
                         "/history/process-instance/" + active.rootProcessInstanceId());
                 if (process != null && process.get("endTime") != null) {
                     OffsetDateTime engineAt = parseTime(process.get("endTime"));
-                    projections.observe(new ProcessCompletionObservation(active.caseId(),
-                            active.rootProcessInstanceId(),
-                            string(process.get("processDefinitionKey")),
-                            process.get("deleteReason") == null ? "completed" : "cancelled",
-                            engineAt == null ? observedAt : engineAt, observedAt));
+                    observations.apply(new ObservationEnvelope(new ProcessObservation(
+                            "remote-process-" + active.rootProcessInstanceId() + "-" + engineAt,
+                            1, "remote-history", active.engineId(), active.tenantId(), active.caseId(),
+                            active.rootProcessInstanceId(), active.rootProcessInstanceId(), null,
+                            process.get("deleteReason") == null ? ProcessObservation.EventType.COMPLETED
+                                    : ProcessObservation.EventType.TERMINATED,
+                            (engineAt == null ? observedAt : engineAt).toInstant(), observedAt.toInstant(),
+                            Map.of("processDefinitionKey", string(process.get("processDefinitionKey"))))).observation());
                 }
                 for (Map<String, Object> task : getList("/history/task?processInstanceId="
                         + active.rootProcessInstanceId() + "&maxResults=500")) {
