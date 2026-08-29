@@ -128,3 +128,15 @@ repository test is `EngineCommandRepositoryProductionTest`.
   reading `USER_IND_EXPRESSIONS.COLUMN_EXPRESSION` (`ORA-17027: Stream has already been closed`),
   before command persistence assertions. The attempted single-read repair did not resolve this
   Oracle JDBC metadata limitation; no command ledger/dispatcher behavior was changed.
+
+## Review-fix round 2
+
+- Reworked Oracle final-schema index metadata reads to query each expression separately and
+  consume its character stream before closing the result set; this preserves the exact expected
+  index-expression comparison without joining a LONG expression column into the index-column
+  cursor.
+- Focused remote transport verification remained green: 20 tests passed.
+- Outstanding: the requested all-seven-status preservation and persisted repairable CREATE_TASK
+  retry need a coordinated command-outcome/policy/store migration. They cannot be added without
+  extending the durable outcome format, which this round explicitly forbade editing. Oracle
+  revalidation after the JDBC reader change remains required.

@@ -402,20 +402,42 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                 throws SQLException {
             var values = new ArrayList<String>();
             try (var statement = connection.prepareStatement("""
-                    SELECT C.COLUMN_NAME,E.COLUMN_EXPRESSION
-                    FROM USER_IND_COLUMNS C LEFT JOIN USER_IND_EXPRESSIONS E
-                      ON E.INDEX_NAME=C.INDEX_NAME AND E.COLUMN_POSITION=C.COLUMN_POSITION
+                    SELECT C.COLUMN_NAME,C.COLUMN_POSITION
+                    FROM USER_IND_COLUMNS C
                     WHERE C.INDEX_NAME=? ORDER BY C.COLUMN_POSITION
                     """)) {
                 statement.setString(1,name);
                 try (ResultSet rows=statement.executeQuery()) {
                     while(rows.next()) {
-                        String expression = rows.getString(2);
+                        String expression = indexExpression(connection, name, rows.getInt(2));
                         values.add(normalize(expression == null ? rows.getString(1) : expression));
                     }
                 }
             }
             return values;
+        }
+
+        private static String indexExpression(Connection connection, String index, int position)
+                throws SQLException {
+            try (var statement = connection.prepareStatement("""
+                    SELECT COLUMN_EXPRESSION FROM USER_IND_EXPRESSIONS
+                    WHERE INDEX_NAME=? AND COLUMN_POSITION=?
+                    """)) {
+                statement.setString(1, index);
+                statement.setInt(2, position);
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next()) return null;
+                    try (java.io.Reader reader = rows.getCharacterStream(1)) {
+                        if (reader == null) return null;
+                        StringBuilder value = new StringBuilder();
+                        char[] buffer = new char[256];
+                        for (int count; (count = reader.read(buffer)) >= 0;) value.append(buffer, 0, count);
+                        return value.toString();
+                    } catch (java.io.IOException e) {
+                        throw new SQLException("Could not read Oracle index expression", e);
+                    }
+                }
+            }
         }
 
         private static Integer integer(ResultSet rows, int column) throws SQLException {
