@@ -8,9 +8,7 @@ import java.util.Map;
  * Starts one exact, previously approved engine process definition.
  *
  * <p>{@code processDefinitionKey} is descriptive metadata only. Engine gateways must select
- * {@code processDefinitionId}; they must never fall back to the key. PLAN_MODEL callers that
- * intentionally retain latest-by-key behaviour use {@link StartProcessByKeyRequest} through
- * {@link EngineGateway#startProcessByKey(StartProcessByKeyRequest)} instead.
+ * {@code processDefinitionId}; they must never fall back to the key.
  *
  * <p>{@code correlationId} is the caller-owned local row id used to reconcile an asynchronous
  * outbox acknowledgement. It is not an engine process-instance id.

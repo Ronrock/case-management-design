@@ -19,7 +19,7 @@ import java.util.Set;
 /**
  * The manual half of the plan-item state machine (spec §3.2): enable, start, complete,
  * terminate — the four actions a client actually invokes, as opposed to {@link
- * org.casemgmt.rules.PlanModelEvaluator}'s automatic entry/exit-criteria transitions, which
+ * automatic entry/exit-criteria transitions, which
  * {@code CaseService.reevaluate} applies on every mutation.
  *
  * <p>Legal source states per action (must agree with {@code ActionPolicy.listForPlanItem} in
@@ -53,7 +53,7 @@ import java.util.Set;
  *
  * <p><b>Containment and cascade are enforced HERE, not only in the evaluator</b> (final
  * whole-branch review, Important 2 — this replaces an earlier version of this paragraph that
- * argued the opposite, and was wrong). The earlier argument ran: {@code PlanModelEvaluator}
+ * argued the opposite, and was wrong). The earlier argument ran: the transition evaluator
  * only admits a child to ENABLED/ACTIVE while its parent stage is ACTIVE
  * ({@link org.casemgmt.rules.StageCompletion#isContained}), so an item could only ever have
  * reached ENABLED under an ACTIVE parent, and any later end of that parent cascade-terminates
@@ -79,7 +79,7 @@ import java.util.Set;
  *       -non-ACTIVE-parent state {@code isContained} exists to prevent.</li>
  * </ul>
  * {@code cases.reevaluate} could not repair any of this afterwards: {@code
- * PlanModelEvaluator.singlePass} derives {@code cascadeTerminatedIds} only from stages whose
+ * transition calculation derives {@code cascadeTerminatedIds} only from stages whose
  * EXIT CRITERIA fired and {@code claimedForTermination} only from stages IT decided to
  * complete, and it skips every already-ended item — so a manually ended stage is invisible to
  * it. So the enforcement lives here:
@@ -193,16 +193,7 @@ public class PlanItemService {
                 "planitem." + to.name().toLowerCase(), "PlanItem", itemId,
                 Map.of("state", item.state().name()), Map.of("state", to.name()));
 
-        cases.reevaluate(caseId, actor);
-
-        // `updated` is already exactly right for a terminal state: PlanModelEvaluator and
-        // StageCompletion both categorically skip ended items (isEnded()), so nothing reevaluate()
-        // does can ever touch this row again — re-reading would only risk a concurrent writer's
-        // unrelated change (Task 4's rule). enable/start leave the item open, and reevaluate() —
-        // running in this same transaction — can, in rare cases (the item's own exit criterion
-        // firing, or a parent-stage cascade), transition it further; that IS a legitimate further
-        // write this call is responsible for reflecting, so it re-reads only in that case.
-        return to.isEnded() ? updated : planItems.require(itemId);
+        return updated;
     }
 
     /**

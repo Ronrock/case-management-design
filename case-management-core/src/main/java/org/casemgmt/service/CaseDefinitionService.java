@@ -50,7 +50,8 @@ public class CaseDefinitionService {
      */
     @SuppressWarnings("unchecked")
     public CaseDefinition deploy(String json, String deployedBy, String tenantId) {
-        return deploy(JsonCodec.toMap(json), deployedBy, tenantId, OrchestrationMode.PLAN_MODEL);
+        throw new InvalidCaseDefinitionException("case-definition",
+                "Direct definition deployment is unavailable; publish a BPMN release bundle");
     }
 
     public CaseDefinition deployBpmn(String key, String contractJson, String deployedBy,
@@ -137,7 +138,7 @@ public class CaseDefinitionService {
      *   {@code DataIntegrityViolationException} surfacing from deep inside the repository.
      *   <li>A {@code parentStageKey} that names no {@code defKey} in the same definition.
      *   Without this, a bad definition would deploy successfully and then blow up the first
-     *   time anyone starts a case from it: {@link org.casemgmt.rules.PlanModelInstantiator}
+     *   time anyone starts a case from it: the BPMN engine
      *   (Task 9) throws {@link IllegalArgumentException} from {@code initialItems} for exactly
      *   this condition, specifically because a case definition arriving over the API from
      *   another team is realistic malformed input. Deploy time is the right place to catch

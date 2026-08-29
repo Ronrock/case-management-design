@@ -75,7 +75,7 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
     @Override
     public ValidatedCaseContract validate(String definitionKey, byte[] utf8Json) {
         JsonNode root = parse(definitionKey, utf8Json);
-        OrchestrationMode mode = declaredMode(root);
+        OrchestrationMode mode = declaredMode(definitionKey, root);
 
         List<ValidationMessage> violations = new ArrayList<>(SCHEMA.validate(root));
         if (!violations.isEmpty()) {
@@ -124,17 +124,16 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
     }
 
     /**
-     * The mode is read from the document and never inferred from which properties are present.
-     * An absent mode is the legacy default: definitions published before BPMN-first existed are
-     * plan-model definitions, and re-reading one as BPMN because it happens to carry a field
-     * catalogue would change how a deployed case behaves. A bundle that must declare its mode
-     * explicitly is enforced where bundles are published, not here.
+     * The only supported mode is read explicitly from the release.  Missing data is not guessed:
+     * treating an old release as BPMN would start a process whose authority was never published.
      */
-    private static OrchestrationMode declaredMode(JsonNode root) {
+    private static OrchestrationMode declaredMode(String definitionKey, JsonNode root) {
         JsonNode declared = root.get("orchestrationMode");
-        return declared != null && "BPMN".equals(declared.asText())
-                ? OrchestrationMode.BPMN
-                : OrchestrationMode.PLAN_MODEL;
+        if (declared == null || !"BPMN".equals(declared.asText())) {
+            throw invalid(definitionKey,
+                    "Contract release must explicitly declare orchestrationMode BPMN");
+        }
+        return OrchestrationMode.BPMN;
     }
 
     // --------------------------------------------------------------- diagnostics
@@ -261,7 +260,7 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
                 text(root, "key"),
                 mode,
                 fields(root),
-                forms(root, mode),
+                forms(root),
                 mode == OrchestrationMode.BPMN ? mappings(root) : List.of(),
                 slaBindings(root),
                 adHocActions(root),
@@ -304,18 +303,13 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
     }
 
     /**
-     * In {@code BPMN} mode a form is {@code {schema, uiSchema}}. In {@code PLAN_MODEL} the form
-     * value <em>is</em> the JSON Schema — the legacy shape, kept working deliberately. Both are
-     * normalised here so nothing downstream has to branch on mode to read a form.
+     * A form is represented as {@code {schema, uiSchema}} and normalized here for consumers.
      */
-    private Map<String, ValidatedCaseContract.FormDefinition> forms(JsonNode root,
-                                                                   OrchestrationMode mode) {
+    private Map<String, ValidatedCaseContract.FormDefinition> forms(JsonNode root) {
         Map<String, ValidatedCaseContract.FormDefinition> result = new LinkedHashMap<>();
         forEachProperty(root.get("forms"), (id, node) -> {
-            JsonNode schema = mode == OrchestrationMode.BPMN ? node.get("schema") : node;
-            JsonNode uiSchema = mode == OrchestrationMode.BPMN ? node.get("uiSchema") : null;
-            result.put(id, new ValidatedCaseContract.FormDefinition(id, objectMap(schema),
-                    objectMap(uiSchema)));
+            result.put(id, new ValidatedCaseContract.FormDefinition(id,
+                    objectMap(node.get("schema")), objectMap(node.get("uiSchema"))));
         });
         return result;
     }

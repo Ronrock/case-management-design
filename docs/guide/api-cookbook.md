@@ -45,7 +45,7 @@ only by the administrator-only bind and combined-publication responses.
 Creating a BPMN case without an active definition version returns `409` with
 `code: case-definition-not-active`. If the version was selected but its exact binding became
 unavailable before start, the code is `case-definition-binding-not-active`. An unknown key remains
-`404 not-found`, and `PLAN_MODEL` definitions do not require a binding.
+`404 not-found`.
 
 ## Publish a BPMN case type
 

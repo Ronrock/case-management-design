@@ -30,7 +30,7 @@ import java.util.Map;
  * for the same self-invocation reason {@link EventPublisher} isn't).
  *
  * <p>Reads each plan item fresh from the repository ({@link #apply}) rather than off the
- * {@code CaseSnapshot} passed in: {@code PlanModelEvaluator.evaluate} can return several
+ * {@code CaseSnapshot} passed in: a transition calculation can return several
  * transitions for the SAME plan item across its internal rounds (e.g. AVAILABLE -&gt; ACTIVE
  * in round 1, ACTIVE -&gt; COMPLETED in round 2), all flattened into one list. The snapshot is a
  * single point-in-time read; re-reading before each {@code updateState} call is what keeps the

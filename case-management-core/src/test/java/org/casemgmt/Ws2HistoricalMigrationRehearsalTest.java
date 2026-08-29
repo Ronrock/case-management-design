@@ -51,6 +51,7 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
 
     private static final String LOCAL_SCHEMA = "WS2_MIG_LOCAL";
     private static final String REMOTE_SCHEMA = "WS2_MIG_REMOTE";
+    private static final String LEGACY_SCHEMA = "WS2_MIG_LEGACY";
     private static final String SCHEMA_PASSWORD = "Ws2Migration42";
     private static final String SYSTEM_USER = "system";
     private static final String SYSTEM_PASSWORD = "cm";
@@ -66,6 +67,7 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
                 jdbcUrl, SYSTEM_USER, SYSTEM_PASSWORD)) {
             recreateSchema(system, LOCAL_SCHEMA);
             recreateSchema(system, REMOTE_SCHEMA);
+            recreateSchema(system, LEGACY_SCHEMA);
         }
     }
 
@@ -76,6 +78,7 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
                 jdbcUrl, SYSTEM_USER, SYSTEM_PASSWORD)) {
             dropSchemaIfPresent(system, LOCAL_SCHEMA);
             dropSchemaIfPresent(system, REMOTE_SCHEMA);
+            dropSchemaIfPresent(system, LEGACY_SCHEMA);
         }
     }
 
@@ -101,14 +104,6 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
                 .isEqualTo(new BindingState(
                         "ACTIVE", "deployment-exact-newer", "invoice:8:newer",
                         "invoice", 8, "tenant-a", null));
-        assertThat(binding(jdbc, "plan:1"))
-                .isEqualTo(new BindingState(
-                        "RETIRED", null, null, null, null, null,
-                        DUPLICATE_ACTIVE_DIAGNOSTIC));
-        assertThat(binding(jdbc, "plan:2"))
-                .isEqualTo(new BindingState(
-                        "ACTIVE", null, null, null, null, null, null));
-
         assertThat(release(jdbc, "release-ambiguous"))
                 .isEqualTo(new ReleaseState(
                         "FAILED", null, null, null, null, REPAIR_DIAGNOSTIC));
@@ -119,7 +114,7 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
 
         assertThat(jdbc.sql("""
                 SELECT COUNT(*) FROM CM_CASE_DEF_BINDING WHERE STATUS_ = 'ACTIVE'""")
-                .query(Integer.class).single()).isEqualTo(2);
+                .query(Integer.class).single()).isEqualTo(1);
         assertThat(jdbc.sql("""
                 SELECT COUNT(*) FROM CM_CASE_DEF_BINDING WHERE STATUS_ = 'FAILED'""")
                 .query(Integer.class).single()).isEqualTo(1);
@@ -129,7 +124,7 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
                   AND DEPLOY_STATUS_ = 'FAILED'
                   AND FAILURE_DETAIL_ = :diagnostic""")
                 .param("diagnostic", DUPLICATE_ACTIVE_DIAGNOSTIC)
-                .query(Integer.class).single()).isEqualTo(2);
+                .query(Integer.class).single()).isEqualTo(1);
         assertThat(jdbc.sql("""
                 SELECT COUNT(*) FROM CM_CASE_DEF_RELEASE
                 WHERE FAILURE_DETAIL_ = :diagnostic""")
@@ -141,18 +136,6 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
         assertThat(rootLink(jdbc, "link-pending"))
                 .isEqualTo(new LinkedRootState(null, "correlation-pending", 1));
 
-        insertCaseDefinition(jdbc, "rolling:1", "rolling", "tenant-a", "PLAN_MODEL");
-        insertHistoricalBinding(jdbc, "rolling:1", "release-plan-newer");
-        assertThat(bindingAuthority(jdbc, "rolling:1"))
-                .isEqualTo(new BindingAuthority("rolling", "tenant-a", "DRAFT"));
-
-        insertCaseDefinition(jdbc, "forged:1", "forged", "tenant-a", "PLAN_MODEL");
-        assertThatThrownBy(() -> insertBindingWithAuthority(
-                jdbc, "forged:1", "release-plan-newer", "not-forged", "tenant-a"))
-                .hasMessageContaining("Binding key/tenant must match its immutable case definition");
-        assertThatThrownBy(() -> insertBindingWithAuthority(
-                jdbc, "forged:1", "release-plan-newer", "forged", "tenant-b"))
-                .hasMessageContaining("Binding key/tenant must match its immutable case definition");
         assertEveryWs2ChangesetAppliedOnce(jdbc);
     }
 
@@ -185,6 +168,18 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
                 .param("diagnostic", REPAIR_DIAGNOSTIC)
                 .query(Integer.class).single()).isEqualTo(1);
         assertEveryWs2ChangesetAppliedOnce(jdbc);
+    }
+
+    @Test
+    void activeLegacyDefinitionsHaltTheBpmnOnlyUpgradeWithARemediationCode() throws Exception {
+        DataSource legacy = schemaDataSource(LEGACY_SCHEMA);
+        applyPreWs2Master(legacy);
+        JdbcClient jdbc = JdbcClient.create(legacy);
+        insertCaseDefinition(jdbc, "legacy:1", "legacy", "tenant-r", "PLAN_MODEL");
+
+        assertThatThrownBy(() -> applyRemainingMasterTwice(legacy))
+                .hasMessageContaining("CM-BPMN-ONLY-LEGACY-ACTIVE")
+                .hasMessageContaining("retire or migrate legacy PLAN_MODEL definitions");
     }
 
     private static void applyPreWs2Master(DataSource dataSource) throws Exception {
@@ -264,8 +259,6 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
         insertCaseDefinition(jdbc, "invoice:1", "invoice", "tenant-a", "BPMN");
         insertCaseDefinition(jdbc, "invoice:2", "invoice", "tenant-a", "BPMN", 2);
         insertCaseDefinition(jdbc, "claim:1", "claim", "tenant-a", "BPMN");
-        insertCaseDefinition(jdbc, "plan:1", "plan", "tenant-a", "PLAN_MODEL", 1);
-        insertCaseDefinition(jdbc, "plan:2", "plan", "tenant-a", "PLAN_MODEL", 2);
         insertSharedArtifactReleases(jdbc, "tenant-a");
         insertHistoricalOrchestrationRelease(jdbc, "release-exact", "invoice",
                 "tenant-a", "deployment-exact");
@@ -273,15 +266,9 @@ class Ws2HistoricalMigrationRehearsalTest extends OracleTestBase {
                 "tenant-a", "deployment-exact-newer");
         insertHistoricalOrchestrationRelease(jdbc, "release-ambiguous", "claim",
                 "tenant-a", "deployment-ambiguous");
-        insertHistoricalOrchestrationRelease(jdbc, "release-plan-old", "plan",
-                "tenant-a", null);
-        insertHistoricalOrchestrationRelease(jdbc, "release-plan-newer", "plan",
-                "tenant-a", null);
         insertHistoricalBinding(jdbc, "invoice:1", "release-exact");
         insertHistoricalBinding(jdbc, "invoice:2", "release-exact-newer");
         insertHistoricalBinding(jdbc, "claim:1", "release-ambiguous");
-        insertHistoricalBinding(jdbc, "plan:1", "release-plan-old");
-        insertHistoricalBinding(jdbc, "plan:2", "release-plan-newer");
 
         jdbc.sql("""
                 INSERT INTO CM_CASE

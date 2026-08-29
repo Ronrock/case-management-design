@@ -108,25 +108,6 @@ class JdbcCaseProjectionPortTest extends OracleTestBase {
     }
 
     @Test
-    void ignoresEngineTaskAndActivityEventsForLegacyPlanModelCases() {
-        jdbc().sql("INSERT INTO CM_CASE_DEF (ID_, KEY_, VERSION_NO_, NAME_, ORCHESTRATION_MODE_) "
-                + "VALUES ('legacy:1','legacy',1,'Legacy','PLAN_MODEL')").update();
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        cases.insert(new CaseInstance("legacy-case", "eng-a", "t1", "legacy:1", "legacy", 1,
-                null, "Legacy", CaseState.ACTIVE, CasePriority.MEDIUM, null, null,
-                "alice", null, null, null, Map.of(), 0, now, now, null));
-
-        projections.observe(new TaskObservation("legacy-case", "legacy-engine-task",
-                "legacy-engine-task", "review", "Review", "create", null,
-                List.of("handlers"), "reviewForm", 50, null, now, now));
-        projections.observe(new ActivityObservation("legacy-case", "legacy-stage-instance",
-                "stage", "Stage", ActivityObservation.Kind.STAGE, null, "start", now, now));
-
-        assertThat(tasks.findByCase("legacy-case")).isEmpty();
-        assertThat(planItems.findByCase("legacy-case")).isEmpty();
-    }
-
-    @Test
     void globallyCollidingTaskAndActivityIdsCannotCrossCaseTenantOrProcessOwnership() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
         jdbc().sql("INSERT INTO CM_CASE_DEF (ID_, KEY_, VERSION_NO_, NAME_, TENANT_ID_, ORCHESTRATION_MODE_) "

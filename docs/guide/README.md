@@ -64,17 +64,10 @@ A BPMN case type is not one inseparable deployment. It has three independently p
 A **case-definition version** binds the exact release IDs and hashes. A running case is pinned to
 that immutable version, so a later publication cannot silently change its behavior.
 
-## BPMN-first does not remove the legacy model
+## BPMN orchestration
 
-The project supports two orchestration modes:
-
-| Mode | Source of lifecycle decisions | Completion |
-|---|---|---|
-| `BPMN` | Operaton's root process | Root process ending closes the case |
-| `PLAN_MODEL` | Existing JSON plan items and criteria evaluator | Client explicitly closes the case after required work ends |
-
-Existing JSON definitions remain supported and are not automatically migrated. New orchestration
-work should normally use BPMN unless the legacy plan-model behavior is specifically required.
+The project supports one orchestration mode: `BPMN`. Operaton's root process owns lifecycle
+decisions and its completion closes the case. Releases must declare `orchestrationMode: BPMN`.
 
 ## Division of responsibility
 

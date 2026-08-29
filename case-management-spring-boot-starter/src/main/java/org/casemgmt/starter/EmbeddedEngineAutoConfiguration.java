@@ -12,7 +12,6 @@ import org.casemgmt.engine.embedded.RepositoryProcessActivityClassifier;
 import org.casemgmt.orchestration.OrchestrationDeploymentPort;
 import org.casemgmt.observation.EngineObservationHandler;
 import org.casemgmt.observation.EngineProcessAuthorityLookup;
-import org.casemgmt.observation.LegacyPlanModelObservationHandler;
 import org.casemgmt.observation.PersistedProcessCaseAuthority;
 import org.casemgmt.observation.ProcessCaseAuthority;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
@@ -130,7 +129,6 @@ public class EmbeddedEngineAutoConfiguration {
         @ConditionalOnMissingBean(EmbeddedEngineEventBridge.class)
         EmbeddedEngineEventBridge embeddedEngineEventBridge(
                 EngineObservationHandler observations,
-                LegacyPlanModelObservationHandler planModelObservations,
                 ProcessCaseAuthority correlation,
                 ProcessActivityClassifier classifier, RepositoryService repositoryService,
                 TaskService taskService, CaseManagementProperties properties) {
@@ -140,8 +138,8 @@ public class EmbeddedEngineAutoConfiguration {
             // the condition here therefore skips the bridge even though the dependency exists
             // by bean-instantiation time. Required method parameters provide the correct
             // fail-fast behaviour without making registration order observable.
-            return new EmbeddedEngineEventBridge(observations, planModelObservations,
-                    correlation, classifier, repositoryService, taskService,
+            return new EmbeddedEngineEventBridge(observations, correlation, classifier,
+                    repositoryService, taskService,
                     properties.getEngineId());
         }
 

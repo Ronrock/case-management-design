@@ -238,21 +238,18 @@ public class CaseDefinitionRepository {
                 .flatMap(this::findById);
     }
 
-    /**
-     * Latest definition that may start a new case. Legacy PLAN_MODEL definitions remain
-     * startable exactly as before; BPMN definitions require their immutable binding to be ACTIVE.
-     */
+    /** Latest BPMN definition that may start a new case with its immutable binding ACTIVE. */
     public Optional<CaseDefinition> findLatestStartable(String key, String tenantId) {
         return jdbc.sql("""
                 SELECT d.ID_ FROM CM_CASE_DEF d
                 WHERE d.KEY_ = :key
                   AND (d.TENANT_ID_ = :tenant
                     OR (:tenant IS NULL AND d.TENANT_ID_ IS NULL))
-                  AND (d.ORCHESTRATION_MODE_ = 'PLAN_MODEL'
-                    OR (d.ORCHESTRATION_MODE_ = 'BPMN' AND EXISTS (
+                  AND d.ORCHESTRATION_MODE_ = 'BPMN'
+                  AND EXISTS (
                       SELECT 1 FROM CM_CASE_DEF_BINDING binding
                       WHERE binding.CASE_DEF_ID_ = d.ID_
-                        AND binding.STATUS_ = 'ACTIVE')))
+                        AND binding.STATUS_ = 'ACTIVE')
                 ORDER BY d.VERSION_NO_ DESC FETCH FIRST 1 ROWS ONLY""")
                 .param("key", key).param("tenant", tenantId)
                 .query(String.class).optional()

@@ -5,14 +5,12 @@ import org.casemgmt.orchestration.BpmnOrchestration;
 import org.casemgmt.orchestration.CaseOrchestration;
 import org.casemgmt.orchestration.CaseOrchestrationRegistry;
 import org.casemgmt.orchestration.EngineDeploymentIdentityResolver;
-import org.casemgmt.orchestration.PlanModelOrchestration;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.observation.DefaultEngineObservationAuthorityValidator;
 import org.casemgmt.observation.DefaultEngineObservationHandler;
 import org.casemgmt.observation.EngineObservationAuthorityValidator;
 import org.casemgmt.observation.EngineObservationHandler;
 import org.casemgmt.observation.LoggingObservationSecurityTelemetry;
-import org.casemgmt.observation.LegacyPlanModelObservationHandler;
 import org.casemgmt.observation.ObservationSecurityTelemetry;
 import org.casemgmt.observation.SlaLifecyclePort;
 import org.casemgmt.projection.CaseProjectionPort;
@@ -32,8 +30,6 @@ import org.casemgmt.repo.MilestoneRepository;
 import org.casemgmt.repo.ParticipantRepository;
 import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.repo.WebhookRepository;
-import org.casemgmt.rules.PlanModelEvaluator;
-import org.casemgmt.rules.PlanModelInstantiator;
 import org.casemgmt.rules.StageCompletion;
 import org.casemgmt.service.CaseDefinitionService;
 import org.casemgmt.service.CaseDefinitionReleaseService;
@@ -111,12 +107,6 @@ public class CaseManagementServiceConfiguration {
     }
 
     @Bean
-    public LegacyPlanModelObservationHandler legacyPlanModelObservationHandler(
-            CaseProjectionPort projections, EventPublisher events) {
-        return new LegacyPlanModelObservationHandler(projections, events);
-    }
-
-    @Bean
     @ConditionalOnMissingBean(EventPublisher.class)
     public EventPublisher eventPublisher(EventRepository events, AuditRepository audit,
                                          WebhookRepository webhooks, CaseManagementProperties props) {
@@ -145,12 +135,6 @@ public class CaseManagementServiceConfiguration {
                                    CaseManagementProperties props) {
         return new CaseService(cases, definitions, planItems, milestones, participants,
                 orchestrations, completion, applier, publisher, props.getEngineId());
-    }
-
-    @Bean
-    public PlanModelOrchestration planModelOrchestration(
-            PlanModelEvaluator evaluator, PlanModelInstantiator instantiator) {
-        return new PlanModelOrchestration(evaluator, instantiator);
     }
 
     @Bean

@@ -282,76 +282,20 @@ class JsonSchemaCaseContractValidatorTest {
     }
 
     /**
-     * WS1-AC5. The legacy shape is deliberately different — forms hold a JSON Schema directly
-     * rather than a {@code {schema, uiSchema}} wrapper, there is no field catalogue, and plan
-     * items carry the lifecycle. Closing the BPMN contract must not retroactively invalidate it.
+     * BPMN is the only production orchestration authority.  A missing mode is deliberately not
+     * interpreted as the historical default: doing so would make a release executable through
+     * a runtime that has been removed.
      */
-    @Test
-    void acceptsAnUnchangedLegacyPlanModelContract() {
-        ValidatedCaseContract contract = validate("""
-                {
-                  "key": "sample-case",
-                  "name": "Sample Handling",
-                  "tenantId": "t1",
-                  "slaPolicyId": "sla-sample",
-                  "roles": ["owner", "handler"],
-                  "attachmentCategories": ["evidence"],
-                  "mappings": [
-                    {"direction":"ENGINE_TO_CASE", "source":"legacySource",
-                     "target":"legacyTarget"}
-                  ],
-                  "forms": {
-                    "sampleForm": {
-                      "type": "object",
-                      "required": ["channel"],
-                      "properties": {"channel": {"type": "string", "ui:widget": "textarea"}}
-                    }
-                  },
-                  "planItems": [
-                    {"defKey": "intake", "type": "STAGE", "name": "Intake", "sortOrder": 10},
-                    {"defKey": "sampleTask", "type": "HUMAN_TASK", "required": true,
-                     "parentStageKey": "intake", "formKey": "sampleForm",
-                     "candidateGroups": ["intake"],
-                     "entryCriteria": ["${items.intake.state == 'ACTIVE'}"], "sortOrder": 20}
-                  ]
-                }""");
-
-        assertThat(contract.orchestrationMode()).isEqualTo(OrchestrationMode.PLAN_MODEL);
-        assertThat(contract.forms()).containsOnlyKeys("sampleForm");
-        assertThat(contract.forms().get("sampleForm").schema())
-                .containsEntry("type", "object");
-        assertThat(contract.roles()).containsExactlyInAnyOrder("owner", "handler");
-        assertThat(contract.mappings()).isEmpty();
-    }
-
-    @Test
-    void acceptsArbitraryLegacyMappingContentWithoutTypingItForRuntime() {
-        ValidatedCaseContract contract = validate("""
-                {
-                  "key":"sample-case",
-                  "forms":{},
-                  "mappings":[
-                    {"direction":"ENGINE_TO_CASE","source":"first","target":"same"},
-                    {"direction":"ENGINE_TO_CASE","source":"second","target":"same"}
-                  ]
-                }
-                """);
-
-        assertThat(contract.orchestrationMode()).isEqualTo(OrchestrationMode.PLAN_MODEL);
-        assertThat(contract.mappings()).isEmpty();
-    }
-
-    /**
-     * An absent mode is the legacy default, and that is the only inference allowed: a mode is
-     * never derived from which properties happen to be present. A document that declares
-     * {@code BPMN} and then carries plan items fails (above) rather than being re-read as legacy.
-     */
-    @Test
-    void treatsAnUndeclaredModeAsPlanModelRatherThanInferringItFromContent() {
-        ValidatedCaseContract contract = validate("""
-                {"key":"sample-case","forms":{}}""");
-
-        assertThat(contract.orchestrationMode()).isEqualTo(OrchestrationMode.PLAN_MODEL);
+    @ParameterizedTest(name = "rejects unsupported orchestration contract {0}")
+    @ValueSource(strings = {
+            "{\"key\":\"sample-case\",\"fields\":{},\"forms\":{}}",
+            "{\"key\":\"sample-case\",\"orchestrationMode\":\"PLAN_MODEL\",\"forms\":{}}"
+    })
+    void rejectsContractsThatDoNotExplicitlyDeclareBpmn(String json) {
+        assertThatThrownBy(() -> validate(json))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("orchestrationMode")
+                .hasMessageContaining("BPMN");
     }
 
     // ------------------------------------------------------- safety and identity

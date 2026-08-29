@@ -27,8 +27,6 @@ import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.rules.JuelCriterionEvaluator;
-import org.casemgmt.rules.PlanModelEvaluator;
-import org.casemgmt.rules.PlanModelInstantiator;
 import org.casemgmt.rules.StageCompletion;
 import org.casemgmt.search.CaseProjectionSearchProvider;
 import org.casemgmt.search.DocumentMetadataSearchProvider;
@@ -42,7 +40,6 @@ import org.casemgmt.projection.RemotePollingCheckpointRepository;
 import org.casemgmt.orchestration.BpmnOrchestration;
 import org.casemgmt.orchestration.CaseOrchestration;
 import org.casemgmt.orchestration.CaseOrchestrationRegistry;
-import org.casemgmt.orchestration.PlanModelOrchestration;
 import org.casemgmt.service.CaseDefinitionService;
 import org.casemgmt.service.CaseDefinitionReleaseService;
 import org.casemgmt.service.CaseDefinitionVersionService;
@@ -190,19 +187,6 @@ public class CaseApiTestConfig {
     @Bean public EngineGateway engineGateway() { return new RecordingEngineGateway(); }
     @Bean public FormValidator formValidator() { return new FormValidator(); }
     @Bean public StageCompletion stageCompletion() { return new StageCompletion(); }
-    @Bean public PlanModelInstantiator planModelInstantiator() { return new PlanModelInstantiator(); }
-
-    @Bean
-    public PlanModelEvaluator planModelEvaluator() {
-        return new PlanModelEvaluator(new JuelCriterionEvaluator());
-    }
-
-    @Bean
-    public PlanModelOrchestration planModelOrchestration(
-            PlanModelEvaluator evaluator, PlanModelInstantiator instantiator) {
-        return new PlanModelOrchestration(evaluator, instantiator);
-    }
-
     @Bean
     public BpmnOrchestration bpmnOrchestration(
             EngineGateway engine, LinkedProcessRepository processes,

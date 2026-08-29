@@ -31,7 +31,7 @@ import java.util.Set;
  *       not just on unfinished required children — a stage cannot complete while work is
  *       actively in flight beneath it, required or not.</li>
  *   <li>{@link #childrenToTerminate} identifies the AVAILABLE/ENABLED children a
- *       completing stage leaves behind. {@link PlanModelEvaluator} decides, up front and
+ *       completing stage leaves behind. The transition calculation decides, up front and
  *       against the pre-round snapshot, which stages complete this round, and then
  *       terminates their leftover AVAILABLE/ENABLED children as real {@link Transition}s
  *       in that same round — pre-empting those children's own entry-criteria admission
@@ -42,12 +42,12 @@ import java.util.Set;
  * </ol>
  *
  * <p><b>Exit-criteria precedence (Task 9 re-review, Important):</b> the batching above
- * introduced a regression — {@code PlanModelEvaluator} was checking "does this stage
+ * introduced a regression — the transition calculation was checking "does this stage
  * autocomplete" before "does this stage's own exit criterion fire," so a stage with both a
  * satisfied exit criterion and all-ended children came out COMPLETED instead of TERMINATED.
  * An explicit, author-written exit criterion is a stronger signal than autocomplete and must
  * win: a stage whose exit criteria are satisfied is excluded from the completing-stage batch
- * entirely (see {@code PlanModelEvaluator.singlePass}) and is TERMINATED instead, regardless
+ * entirely and is TERMINATED instead, regardless
  * of what its children are doing. That raised the question the batching for Critical 1 had
  * sidestepped by construction: what happens to that stage's children? Decision: they cascade
  * — see {@link #childrenToCascadeTerminate}, which (unlike {@link #childrenToTerminate})
@@ -106,7 +106,7 @@ public class StageCompletion {
      * transitively, via {@link #descendants} — left behind when {@code stage} completes.
      * CMMN autocomplete discards leftover, never-started descendants by terminating them —
      * never by silently dropping them — so the caller (today,
-     * {@link PlanModelEvaluator#singlePass}) must turn every one of these into a real
+     * transition calculation must turn every one of these into a real
      * TERMINATED {@link Transition} in the same round the stage completes.
      *
      * <p>Defensively excludes ACTIVE items rather than allow-listing AVAILABLE/ENABLED: by
@@ -214,7 +214,7 @@ public class StageCompletion {
      *       {@link #blockingItems} refuses to let a stage complete while one exists (Task 9
      *       review, Critical 1) — the cascade question doesn't arise. A TERMINATED stage
      *       (its own exit criterion fired) is different: exit is unconditional, so it CAN
-     *       fire while a child is ACTIVE, and {@link PlanModelEvaluator#singlePass} does
+     *       fire while a child is ACTIVE, and the transition calculation does
      *       cascade-terminate every remaining child via {@link #childrenToCascadeTerminate}
      *       in that case (Task 9 re-review, Important) — just not through this method.</li>
      *   <li>A top-level item (no {@code parentStageId}) always returns true — containment

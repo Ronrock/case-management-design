@@ -2,19 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://casemgmt.org/schemas/case-contract-v1.schema.json",
   "title": "Case contract v1",
-  "description": "A case-definition contract. The document declares its orchestration mode; BPMN-first and legacy PLAN_MODEL bundles are validated by separate, non-overlapping rules. In BPMN mode every behaviour-driving object is closed, so an unknown or misspelled property fails publication instead of being ignored until a live case reaches it. Unversioned extension data belongs under an 'extensions' object, which is deliberately open.",
+  "description": "A BPMN case-definition contract. Every behaviour-driving object is closed, so an unknown or misspelled property fails publication instead of being ignored until a live case reaches it. Unversioned extension data belongs under an 'extensions' object, which is deliberately open.",
   "type": "object",
-  "allOf": [
-    {
-      "if": {
-        "type": "object",
-        "properties": { "orchestrationMode": { "const": "BPMN" } },
-        "required": ["orchestrationMode"]
-      },
-      "then": { "$ref": "#/$defs/bpmnContract" },
-      "else": { "$ref": "#/$defs/planModelContract" }
-    }
-  ],
+  "allOf": [{ "$ref": "#/$defs/bpmnContract" }],
 
   "$defs": {
 
@@ -56,19 +46,6 @@
         "adHocActions": { "type": "array", "items": { "$ref": "#/$defs/adHocAction" } },
         "policyRefs": { "$ref": "#/$defs/nameList" },
         "extensions": { "type": "object" }
-      }
-    },
-
-    "planModelContract": {
-      "description": "The legacy declarative model. It keeps lifecycle, sentries and task activation, and its forms hold a JSON Schema directly rather than a {schema, uiSchema} wrapper. Left permissive on purpose: closing the BPMN contract must not retroactively invalidate definitions that already deployed.",
-      "type": "object",
-      "required": ["key", "forms"],
-      "properties": {
-        "key": { "$ref": "#/$defs/identifier" },
-        "orchestrationMode": { "const": "PLAN_MODEL" },
-        "forms": { "type": "object" },
-        "roles": { "$ref": "#/$defs/nameList" },
-        "candidateGroups": { "$ref": "#/$defs/nameList" }
       }
     },
 

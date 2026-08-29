@@ -127,16 +127,13 @@ class SchemaMigrationTest extends OracleTestBase {
     }
 
     @Test
-    void preservesPlanModelBindingsButRejectsActiveBpmnBindingsWithoutExactIdentity() {
-        insertCaseDefinition("plan:1", "plan", "PLAN_MODEL");
+    void rejectsLegacyModesAndActiveBpmnBindingsWithoutExactIdentity() {
+        assertThatThrownBy(() -> insertCaseDefinition("plan:1", "plan", "PLAN_MODEL"))
+                .hasMessageContaining("CK_CM_CASE_DEF_MODE");
         insertCaseDefinition("bpmn:1", "bpmn", "BPMN");
-        insertRelease("plan-orch", "ACTIVE", null, null, null, null, null);
         insertRelease("bpmn-orch", "VALIDATED", null, null, null, null, null);
         insertRelease("contract", "ACTIVE", null, null, null, null, null);
         insertRelease("presentation", "ACTIVE", null, null, null, null, null);
-
-        insertBinding("plan:1", "plan-orch", "PLAN_MODEL", "ACTIVE",
-                null, null, null, null, null);
 
         assertThatThrownBy(() -> insertBinding(
                 "bpmn:1", "bpmn-orch", "BPMN", "ACTIVE",
@@ -215,12 +212,12 @@ class SchemaMigrationTest extends OracleTestBase {
 
     @Test
     void derivesAuthorityForOldBindingWritersAndRejectsSuppliedMismatches() {
-        insertCaseDefinition("rolling:1", "rolling", "PLAN_MODEL", 1, "tenant-a");
-        insertRelease("plan-orch", "ACTIVE", null, null, null, null, null);
+        insertCaseDefinition("rolling:1", "rolling", "BPMN", 1, "tenant-a");
+        insertRelease("bpmn-orch", "ACTIVE", null, null, null, null, null);
         insertRelease("contract", "ACTIVE", null, null, null, null, null);
         insertRelease("presentation", "ACTIVE", null, null, null, null, null);
 
-        insertLegacyBinding("rolling:1", "plan-orch", null, null, false);
+        insertLegacyBinding("rolling:1", "bpmn-orch", null, null, false);
 
         assertThat(jdbc().sql("""
                 SELECT CASE_DEF_KEY_, TENANT_ID_, STATUS_
@@ -232,12 +229,12 @@ class SchemaMigrationTest extends OracleTestBase {
                 .single())
                 .containsExactly("rolling", "tenant-a", "DRAFT");
 
-        insertCaseDefinition("forged:1", "forged", "PLAN_MODEL", 1, "tenant-a");
+        insertCaseDefinition("forged:1", "forged", "BPMN", 1, "tenant-a");
         assertThatThrownBy(() -> insertLegacyBinding(
-                "forged:1", "plan-orch", "not-forged", "tenant-a", true))
+                "forged:1", "bpmn-orch", "not-forged", "tenant-a", true))
                 .hasMessageContaining("Binding key/tenant must match its immutable case definition");
         assertThatThrownBy(() -> insertLegacyBinding(
-                "forged:1", "plan-orch", "forged", "tenant-b", true))
+                "forged:1", "bpmn-orch", "forged", "tenant-b", true))
                 .hasMessageContaining("Binding key/tenant must match its immutable case definition");
     }
 

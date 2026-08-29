@@ -5,7 +5,7 @@ package org.casemgmt.rest.error;
  * version this system uses for its ETags (spec §6.3). Deliberately its own type rather
  * than a bare {@code IllegalArgumentException}: core throws {@code IllegalArgumentException}
  * for several unrelated, non-client-shaped reasons (e.g. {@code WebhookRepository}'s
- * paging-limit guard, {@code PlanModelInstantiator}'s bad {@code parentStageKey}, which the
+ * paging-limit guard, a bad {@code parentStageKey}, which the
  * status table routes to 500 {@code model-error}) — a blanket
  * {@code @ExceptionHandler(IllegalArgumentException.class)} would misclassify those as
  * 400 {@code invalid-request} along with this one. Scoping the handler to this type instead

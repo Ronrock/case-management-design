@@ -133,8 +133,7 @@ public class CaseDefinitionVersionService {
         requireDeclaredOrchestrationMode(key, contractContent);
         ValidatedCaseContract contract = contracts.validate(key, contractContent);
         if (contract.orchestrationMode() != org.casemgmt.orchestration.OrchestrationMode.BPMN) {
-            throw invalid(key, "A BPMN release binding requires orchestrationMode BPMN; "
-                    + "PLAN_MODEL definitions use the legacy definition deployment path");
+            throw invalid(key, "A BPMN release binding requires orchestrationMode BPMN");
         }
 
         BpmnReleaseValidator.Index orchestrationIndex = BpmnReleaseValidator.validate(key,
@@ -278,11 +277,8 @@ public class CaseDefinitionVersionService {
     /**
      * A bundle reaching a binding must say which side owns the process.
      *
-     * <p>{@link JsonSchemaCaseContractValidator} deliberately treats an absent mode as the legacy
-     * {@code PLAN_MODEL} default, so definitions published before BPMN-first keep loading
-     * unchanged. Binding is new publication, and design §9.9 requires the mode to be declared
-     * rather than inferred from which properties happen to be present — so the requirement is
-     * enforced at this boundary rather than in the validator.
+     * <p>Binding is a publication boundary: the release must declare its orchestration mode
+     * rather than leave the system to infer one from the available properties.
      */
     private static void requireDeclaredOrchestrationMode(String key, byte[] contractContent) {
         Map<String, Object> raw = JsonCodec.toMap(

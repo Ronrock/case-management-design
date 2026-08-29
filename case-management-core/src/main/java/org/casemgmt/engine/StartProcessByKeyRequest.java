@@ -5,7 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Explicit compatibility request for PLAN_MODEL process tasks and ad-hoc linked processes.
+ * Explicit request for ad-hoc linked processes that intentionally start by definition key.
  *
  * <p>This type prevents a descriptive key from being mistaken for an exact engine identity.
  * BPMN root orchestration must use {@link StartProcessRequest}.

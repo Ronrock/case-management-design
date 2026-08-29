@@ -29,6 +29,6 @@ public interface CaseOrchestration {
     PlanItem repeat(PlanItem previous, PlanItemDefinition definition);
 
     default boolean allowsExplicitClose() {
-        return mode() == OrchestrationMode.PLAN_MODEL;
+        return false;
     }
 }

@@ -12,7 +12,6 @@ import org.casemgmt.rest.error.ForbiddenException;
 import org.casemgmt.rest.error.InvalidRequestException;
 import org.casemgmt.rest.error.MalformedETagException;
 import org.casemgmt.rest.error.PreconditionFailedException;
-import org.casemgmt.rules.PlanModelLoopException;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
@@ -266,7 +265,6 @@ class IdempotencySupportTest {
     @Test
     void aServerErrorKeepsTheClaimSoARetryCannotRepeatUnknownSideEffects() {
         List<RuntimeException> serverErrors = List.of(
-                new PlanModelLoopException("eng-a:1", 20),
                 new IllegalStateException("something unrecognised blew up"),
                 new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "spring's own 500"));
 

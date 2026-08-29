@@ -25,9 +25,9 @@ public interface EngineGateway {
 
     EngineProcessRef startProcess(StartProcessRequest request);
 
-    /** Explicit latest-by-key compatibility path for legacy PLAN_MODEL process starts. */
+    /** Explicit latest-by-key path for non-root linked-process starts. */
     default EngineProcessRef startProcessByKey(StartProcessByKeyRequest request) {
-        throw new EngineException("Configured engine does not support legacy start by key");
+        throw new EngineException("Configured engine does not support start by key");
     }
 
     void cancelProcess(String processInstanceId, String reason);

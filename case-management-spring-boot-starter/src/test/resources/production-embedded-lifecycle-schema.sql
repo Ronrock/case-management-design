@@ -1,7 +1,7 @@
 -- H2-only minimal expansion for the combined engine/platform transaction test. Production
 -- migration correctness remains covered by the Oracle migration suite.
 
-ALTER TABLE CM_CASE_DEF ADD ORCHESTRATION_MODE_ VARCHAR2(20) DEFAULT 'PLAN_MODEL' NOT NULL;
+ALTER TABLE CM_CASE_DEF ADD ORCHESTRATION_MODE_ VARCHAR2(20) DEFAULT 'BPMN' NOT NULL;
 
 CREATE TABLE CM_CASE_DEF_RELEASE (
   ID_ VARCHAR2(96) PRIMARY KEY,

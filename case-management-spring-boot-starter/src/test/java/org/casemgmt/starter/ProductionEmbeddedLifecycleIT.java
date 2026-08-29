@@ -5,19 +5,8 @@ import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
-import org.casemgmt.domain.PlanItemDefinition;
-import org.casemgmt.domain.PlanItemType;
-import org.casemgmt.domain.TaskState;
 import org.casemgmt.event.EventTypes;
 import org.casemgmt.observation.SlaLifecyclePort;
-import org.casemgmt.observation.EngineObservation;
-import org.casemgmt.observation.UserTaskObservation;
-import org.casemgmt.observation.ActivityLifecycleObservation;
-import org.casemgmt.observation.MilestoneObservation;
-import org.casemgmt.observation.ProcessObservation;
-import org.casemgmt.observation.LegacyPlanModelObservationHandler;
-import org.casemgmt.projection.CaseProjectionPort;
-import org.casemgmt.event.EventPublisher;
 import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.release.BindingStatus;
@@ -32,7 +21,6 @@ import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseService;
-import org.casemgmt.service.CaseTaskService;
 import org.casemgmt.service.LinkedProcessService;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -62,7 +50,6 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -142,32 +129,6 @@ class ProductionEmbeddedLifecycleIT {
             return JdbcClient.create(dataSource);
         }
 
-        @Bean
-        @Primary
-        RecordingPlanModelObservationHandler recordingPlanModelObservationHandler(
-                CaseProjectionPort projections, EventPublisher events) {
-            return new RecordingPlanModelObservationHandler(projections, events);
-        }
-    }
-
-    static final class RecordingPlanModelObservationHandler
-            extends LegacyPlanModelObservationHandler {
-        private final List<EngineObservation> recorded = new CopyOnWriteArrayList<>();
-
-        RecordingPlanModelObservationHandler(CaseProjectionPort projections,
-                                             EventPublisher events) {
-            super(projections, events);
-        }
-
-        @Override
-        public void apply(EngineObservation observation) {
-            recorded.add(observation);
-            super.apply(observation);
-        }
-
-        void clear() {
-            recorded.clear();
-        }
     }
 
     static final class FailingSlaLifecyclePort implements SlaLifecyclePort {
@@ -253,15 +214,12 @@ class ProductionEmbeddedLifecycleIT {
     @Autowired PausingCaseRepository cases;
     @Autowired LinkedProcessRepository processes;
     @Autowired LinkedProcessService linkedProcesses;
-    @Autowired CaseTaskService caseTasks;
     @Autowired FailingSlaLifecyclePort failures;
     @Autowired EmbeddedTransactionResourceValidator transactionResourceValidator;
-    @Autowired RecordingPlanModelObservationHandler planModelObservations;
     @Autowired @Qualifier("caseManagementCaseService") CaseService caseService;
 
     private ProcessDefinition rootDefinition;
     private ProcessDefinition childDefinition;
-    private ProcessDefinition planChildDefinition;
 
     @BeforeAll
     void deployAndPublishDefinition() {
@@ -277,12 +235,7 @@ class ProductionEmbeddedLifecycleIT {
                 .deploymentId(deployment.getId())
                 .processDefinitionKey("production-child")
                 .singleResult();
-        planChildDefinition = repository.createProcessDefinitionQuery()
-                .deploymentId(deployment.getId())
-                .processDefinitionKey("production-plan-child")
-                .singleResult();
         publishCaseDefinition(rootDefinition);
-        publishPlanModelDefinition();
     }
 
     @BeforeEach
@@ -291,7 +244,6 @@ class ProductionEmbeddedLifecycleIT {
         failures.failCompletedTask = false;
         failures.failTerminatedProcess = false;
         cases.reset();
-        planModelObservations.clear();
     }
 
     @Test
@@ -629,55 +581,6 @@ class ProductionEmbeddedLifecycleIT {
         assertThat(observationCount(created.id(), null, null)).isEqualTo(observationsBefore);
     }
 
-    @Test
-    void planModelProcessTaskUsesPersistedCompatibilityAuthorityThroughNestedTaskCompletion() {
-        var created = caseService.create("production-plan", TENANT, "business-plan",
-                "Plan compatibility", CasePriority.MEDIUM, Map.of(), ACTOR);
-        var link = processes.findByCase(created.id()).getFirst();
-        var legacyTask = caseTasks.forCase(created.id()).getFirst();
-
-        assertThat(legacyTask.state()).isEqualTo(TaskState.OPEN);
-        var claimed = caseTasks.claim(legacyTask.id(), legacyTask.version(), ACTOR);
-        var completed = caseTasks.complete(
-                claimed.id(), claimed.version(), Map.of("outcome", "approved"), ACTOR);
-        assertThat(completed.state()).isEqualTo(TaskState.COMPLETED);
-
-        assertThat(link.processDefinitionId()).isEqualTo(planChildDefinition.getId());
-        assertThat(link.planItemId()).isNotBlank();
-        var nestedTask = tasks.createTaskQuery()
-                .processInstanceId(link.processInstanceId()).singleResult();
-        assertThat(nestedTask).isNotNull();
-        assertThat(jdbc.sql("SELECT COUNT(*) FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = :taskId")
-                .param("taskId", nestedTask.getId()).query(Integer.class).single()).isZero();
-
-        jdbc.sql("UPDATE CM_LINKED_PROCESS SET PROC_DEF_ID_ = NULL WHERE ID_ = :id")
-                .param("id", link.id()).update();
-        planModelObservations.clear();
-        tasks.claim(nestedTask.getId(), "alice");
-        assertThat(processes.findByProcessInstanceId(link.processInstanceId())
-                .orElseThrow().processDefinitionId()).isEqualTo(planChildDefinition.getId());
-
-        tasks.complete(nestedTask.getId());
-        var stageTask = tasks.createTaskQuery()
-                .processInstanceId(link.processInstanceId()).singleResult();
-        assertThat(stageTask.getTaskDefinitionKey()).isEqualTo("plan-child-stage-review");
-        tasks.complete(stageTask.getId());
-
-        assertThat(runtime.createProcessInstanceQuery()
-                .processInstanceId(link.processInstanceId()).singleResult()).isNull();
-        assertThat(processes.findByProcessInstanceId(link.processInstanceId()).orElseThrow().state())
-                .isEqualTo("COMPLETED");
-        assertThat(cases.require(created.id()).state()).isEqualTo(CaseState.ACTIVE);
-        assertThat(eventCount(created.id(), EventTypes.PROCESS_STARTED)).isEqualTo(1);
-        assertThat(auditActionCount(created.id(), "engine.process.started")).isEqualTo(1);
-        assertThat(planModelObservations.recorded)
-                .anyMatch(UserTaskObservation.class::isInstance)
-                .anyMatch(ActivityLifecycleObservation.class::isInstance)
-                .anyMatch(MilestoneObservation.class::isInstance)
-                .anyMatch(observation -> observation instanceof ProcessObservation process
-                        && process.eventType() == ProcessObservation.EventType.COMPLETED);
-    }
-
     private void publishCaseDefinition(ProcessDefinition definition) {
         String definitionId = "production-root:1";
         OffsetDateTime now = OffsetDateTime.now();
@@ -710,46 +613,6 @@ class ProductionEmbeddedLifecycleIT {
                         "production-root-contract", sha('b'),
                         "production-root-presentation", sha('c'), ReleaseStatus.ACTIVE,
                         OrchestrationMode.BPMN, BindingStatus.ACTIVE, identity, null,
-                        now, now, null, "publisher"));
-    }
-
-    private void publishPlanModelDefinition() {
-        String definitionId = "production-plan:1";
-        OffsetDateTime now = OffsetDateTime.now();
-        var processTask = new PlanItemDefinition("production-plan-task:1", definitionId,
-                "nested-process", PlanItemType.PROCESS_TASK, "Nested process", null,
-                false, true, false, List.of(), List.of(), null,
-                "production-plan-child", List.of(), 10);
-        var humanTask = new PlanItemDefinition("production-human-task:1", definitionId,
-                "legacy-review", PlanItemType.HUMAN_TASK, "Legacy review", null,
-                false, true, false, List.of(), List.of(), null,
-                null, List.of("handlers"), 20);
-        new CaseDefinitionRepository(dataSource).insert(new CaseDefinition(
-                definitionId, "production-plan", 1, "Production plan", TENANT,
-                null, null, List.of("handlers"), List.of(), Map.of(),
-                List.of(processTask, humanTask),
-                OrchestrationMode.PLAN_MODEL, now, "publisher"));
-
-        CaseDefinitionReleaseRepository releases =
-                new CaseDefinitionReleaseRepository(dataSource);
-        releases.insert(CaseDefinitionRelease.stored(
-                "production-plan-orchestration", "production-plan", TENANT,
-                ReleaseKind.ORCHESTRATION, "application/json", "{}".getBytes(StandardCharsets.UTF_8),
-                sha('d'), ReleaseStatus.ACTIVE, null, null, "publisher"));
-        releases.insert(CaseDefinitionRelease.stored(
-                "production-plan-contract", "production-plan", TENANT,
-                ReleaseKind.CONTRACT, "application/json", "{}".getBytes(StandardCharsets.UTF_8),
-                sha('e'), ReleaseStatus.ACTIVE, null, null, "publisher"));
-        releases.insert(CaseDefinitionRelease.stored(
-                "production-plan-presentation", "production-plan", TENANT,
-                ReleaseKind.PRESENTATION, "application/json", "{}".getBytes(StandardCharsets.UTF_8),
-                sha('f'), ReleaseStatus.ACTIVE, null, null, "publisher"));
-        new CaseDefinitionVersionBindingRepository(dataSource).insert(
-                new CaseDefinitionVersionBinding(definitionId, "production-plan", TENANT,
-                        "production-plan-orchestration", sha('d'),
-                        "production-plan-contract", sha('e'),
-                        "production-plan-presentation", sha('f'), ReleaseStatus.ACTIVE,
-                        OrchestrationMode.PLAN_MODEL, BindingStatus.ACTIVE, null, null,
                         now, now, null, "publisher"));
     }
 

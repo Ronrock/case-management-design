@@ -117,7 +117,7 @@ public record ValidatedCaseContract(
 
     /**
      * A form. In {@code BPMN} mode the author writes {@code {schema, uiSchema}}; in
-     * {@code PLAN_MODEL} the form value <em>is</em> the JSON Schema. Both land here with
+     * The form value is supplied as a JSON Schema and lands here with
      * {@code schema} holding the schema, so callers need not know which mode produced it.
      */
     public record FormDefinition(String id, Map<String, Object> schema,

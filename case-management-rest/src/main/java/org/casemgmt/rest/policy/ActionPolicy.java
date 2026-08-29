@@ -2,7 +2,6 @@ package org.casemgmt.rest.policy;
 
 import org.casemgmt.domain.*;
 import org.casemgmt.error.CaseConflictException;
-import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.rules.CaseSnapshot;
 import org.casemgmt.rules.StageCompletion;
 
@@ -45,13 +44,6 @@ public class ActionPolicy {
         if (state == CaseState.ACTIVE) {
             actions.add(AvailableAction.patch("update", base));
             actions.add(AvailableAction.post("cancel", base + "/cancel"));
-            // PLAN_MODEL cases retain their explicit close transition. A BPMN case is
-            // closed only when its pinned root process ends, so advertising this legacy
-            // action would let a caller bypass the orchestrator-of-record lifecycle.
-            if (snapshot.definition().orchestrationMode() == OrchestrationMode.PLAN_MODEL
-                    && stageCompletion.caseCanClose(snapshot)) {
-                actions.add(AvailableAction.post("close", base + "/close"));
-            }
         }
         return actions;
     }

@@ -18,4 +18,5 @@
   <include file="db/changelog/cm-bpmn-release-activation.xml"/>
   <include file="db/changelog/cm-engine-observation-effects.xml"/>
   <include file="db/changelog/cm-production-engine-command.xml"/>
+  <include file="db/changelog/cm-bpmn-only.xml"/>
 </databaseChangeLog>

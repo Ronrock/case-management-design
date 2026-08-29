@@ -8,7 +8,6 @@ import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
-import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
@@ -22,9 +21,9 @@ import java.util.Map;
 /**
  * Worklist, claim and complete for {@code CM_TASK} rows — the human side of the case (spec
  * §4.5/§4.6). Completing a task validates its payload against the declared form schema, tells
- * the engine, marks the row COMPLETED, and completes the plan item behind it so the model
- * re-evaluates (a task never outlives its plan item, and the plan item is what {@code
- * PlanModelEvaluator} actually reasons about).
+ * the engine, marks the row COMPLETED, and completes the plan item behind it so the lifecycle
+ * re-evaluates (a task never outlives its plan item, and the plan item supplies its lifecycle
+ * context).
  *
  * <p><b>Claim/complete legality must agree with {@code ActionPolicy.listForTask}</b>
  * (case-management-rest, Task 23) — checked directly against it while writing this class:
@@ -179,16 +178,6 @@ public class CaseTaskService {
                 Map.of("taskId", taskId, "outcome", saved.outcome() == null ? "" : saved.outcome())));
         publisher.audit(task.caseId(), c.tenantId(), actor.userId(), "task.complete", "Task", taskId,
                 Map.of("state", task.state().name()), Map.of("state", "COMPLETED"));
-
-        // Legacy tasks drive their plan model explicitly. For BPMN cases, Operaton's task
-        // completion event has already terminalized the projected task and plan item in this
-        // same transaction; invoking PlanItemService would try to complete that ended item a
-        // second time and, more importantly, would let the legacy evaluator participate in a
-        // lifecycle owned by the root BPMN process.
-        if (definitions.require(c.caseDefId()).orchestrationMode() == OrchestrationMode.PLAN_MODEL) {
-            PlanItem planItem = planItemRepo.require(task.planItemId());
-            planItems.complete(task.caseId(), planItem.id(), planItem.version(), actor);
-        }
 
         return saved;
     }

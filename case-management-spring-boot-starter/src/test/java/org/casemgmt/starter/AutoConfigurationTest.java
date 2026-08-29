@@ -180,6 +180,10 @@ class AutoConfigurationTest {
                     assertThat(context).hasSingleBean(CaseService.class);
                     assertThat(context.getBean(EngineGateway.class))
                             .isInstanceOf(OutboxEngineGateway.class);
+                    assertThat(context).doesNotHaveBean("planModelEvaluator");
+                    assertThat(context).doesNotHaveBean("planModelInstantiator");
+                    assertThat(context).doesNotHaveBean("planModelOrchestration");
+                    assertThat(context).doesNotHaveBean("legacyPlanModelObservationHandler");
                 });
     }
 

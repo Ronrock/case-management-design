@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+  <!--
+    A row with this historical mode was startable by the previous application.  Stop before
+    changing any constraint so an operator can explicitly retire or migrate the definition;
+    this migration never reinterprets or deletes business data.
+  -->
+  <changeSet id="cm-bpmn-only-legacy-preflight" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+                     onFailMessage="CM-BPMN-ONLY-LEGACY-ACTIVE: retire or migrate legacy PLAN_MODEL definitions before upgrading to the BPMN-only release">
+      <sqlCheck expectedResult="0">
+        SELECT COUNT(*) FROM CM_CASE_DEF WHERE ORCHESTRATION_MODE_ = 'PLAN_MODEL'
+      </sqlCheck>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-bpmn-only-orchestration-mode" author="casemgmt">
+    <sql>ALTER TABLE CM_CASE_DEF DROP CONSTRAINT CK_CM_CASE_DEF_MODE</sql>
+    <sql>ALTER TABLE CM_CASE_DEF ADD CONSTRAINT CK_CM_CASE_DEF_MODE CHECK (ORCHESTRATION_MODE_ = 'BPMN')</sql>
+    <sql>ALTER TABLE CM_CASE_DEF MODIFY ORCHESTRATION_MODE_ DEFAULT 'BPMN'</sql>
+    <sql>ALTER TABLE CM_CASE_DEF_BINDING DROP CONSTRAINT CK_CM_CDB_MODE_V2</sql>
+    <sql>ALTER TABLE CM_CASE_DEF_BINDING ADD CONSTRAINT CK_CM_CDB_MODE_V2 CHECK (ORCHESTRATION_MODE_ = 'BPMN')</sql>
+    <sql>ALTER TABLE CM_CASE_DEF_BINDING MODIFY ORCHESTRATION_MODE_ DEFAULT 'BPMN'</sql>
+  </changeSet>
+</databaseChangeLog>

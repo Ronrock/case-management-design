@@ -3,7 +3,6 @@ package org.casemgmt.engine.embedded;
 import org.casemgmt.observation.ActivityLifecycleObservation;
 import org.casemgmt.observation.EngineObservationHandler;
 import org.casemgmt.observation.EngineObservation;
-import org.casemgmt.observation.LegacyPlanModelObservationHandler;
 import org.casemgmt.observation.MilestoneObservation;
 import org.casemgmt.observation.ProcessObservation;
 import org.casemgmt.observation.ProcessCaseAuthority;
@@ -32,7 +31,6 @@ public final class EmbeddedEngineEventBridge {
     public static final String SOURCE = "operaton:embedded";
 
     private final EngineObservationHandler observations;
-    private final LegacyPlanModelObservationHandler planModelObservations;
     private final ProcessCaseAuthority correlation;
     private final ProcessActivityClassifier classifier;
     private final RepositoryService repository;
@@ -47,36 +45,11 @@ public final class EmbeddedEngineEventBridge {
             RepositoryService repository,
             TaskService tasks,
             String engineId) {
-        this(observations, null, correlation, classifier, repository, tasks, engineId,
-                Clock.systemUTC());
-    }
-
-    public EmbeddedEngineEventBridge(
-            EngineObservationHandler observations,
-            LegacyPlanModelObservationHandler planModelObservations,
-            ProcessCaseAuthority correlation,
-            ProcessActivityClassifier classifier,
-            RepositoryService repository,
-            TaskService tasks,
-            String engineId) {
-        this(observations, planModelObservations, correlation, classifier, repository, tasks,
-                engineId, Clock.systemUTC());
+        this(observations, correlation, classifier, repository, tasks, engineId, Clock.systemUTC());
     }
 
     EmbeddedEngineEventBridge(
             EngineObservationHandler observations,
-            ProcessCaseAuthority correlation,
-            ProcessActivityClassifier classifier,
-            RepositoryService repository,
-            TaskService tasks,
-            String engineId,
-            Clock clock) {
-        this(observations, null, correlation, classifier, repository, tasks, engineId, clock);
-    }
-
-    EmbeddedEngineEventBridge(
-            EngineObservationHandler observations,
-            LegacyPlanModelObservationHandler planModelObservations,
             ProcessCaseAuthority correlation,
             ProcessActivityClassifier classifier,
             RepositoryService repository,
@@ -84,7 +57,6 @@ public final class EmbeddedEngineEventBridge {
             String engineId,
             Clock clock) {
         this.observations = Objects.requireNonNull(observations, "observations");
-        this.planModelObservations = planModelObservations;
         this.correlation = Objects.requireNonNull(correlation, "correlation");
         this.classifier = Objects.requireNonNull(classifier, "classifier");
         this.repository = Objects.requireNonNull(repository, "repository");
@@ -318,13 +290,6 @@ public final class EmbeddedEngineEventBridge {
         var authority = correlation.authority(observation.processInstanceId(),
                 (String) observation.attributes().get("processDefinitionId"));
         if (authority.isEmpty() || !authority.orElseThrow().caseId().equals(observation.caseId())) {
-            return;
-        }
-        if (authority.orElseThrow().orchestrationMode()
-                == org.casemgmt.orchestration.OrchestrationMode.PLAN_MODEL) {
-            if (planModelObservations != null) {
-                planModelObservations.apply(observation);
-            }
             return;
         }
         observations.apply(observation);

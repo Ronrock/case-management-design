@@ -37,7 +37,6 @@ class EmbeddedLifecycleBoundaryArchitectureTest {
             "org.casemgmt.observation.EngineObservation",
             "org.casemgmt.observation.EngineObservationHandler",
             "org.casemgmt.observation.EngineProcessAuthorityLookup",
-            "org.casemgmt.observation.LegacyPlanModelObservationHandler",
             "org.casemgmt.observation.MilestoneObservation",
             "org.casemgmt.observation.ProcessCaseAuthority",
             "org.casemgmt.observation.ProcessObservation",

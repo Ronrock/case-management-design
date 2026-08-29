@@ -20,11 +20,10 @@ release lifecycle. The platform supplies the common lifecycle, task, event, SLA,
 webhook and UI-integration mechanics; it is not a centrally operated case-management service.
 
 **What exists today:** a backend case-management service built on the Operaton process engine.
-It manages *cases* (long-running, human-driven work items) whose behavior is selected explicitly
-per definition. In `BPMN` mode, Operaton owns token flow, gateways, task activation, process timers,
-subprocesses, and compensation. In legacy `PLAN_MODEL` mode, the service's declarative evaluator
-owns plan-item lifecycle. The service owns the shared case API, canonical data, authorization,
-audit, SLA, search, and presentation contracts in both modes.
+It manages *cases* (long-running, human-driven work items) whose behavior is defined by BPMN.
+Operaton owns token flow, gateways, task activation, process timers, subprocesses, and
+compensation. The service owns the shared case API, canonical data, authorization, audit, SLA,
+search, and presentation contracts.
 
 **UI scope:** the backend remains the main implemented surface, but a Lit Web Components package
 now provides the standalone shell and a generic enterprise portal-adapter contract.
@@ -253,43 +252,6 @@ stateDiagram-v2
     COMPLETED --> AVAILABLE: "repeatable item re-enters"
     COMPLETED --> [*]
     TERMINATED --> [*]
-```
-
-### 5.2 The plan model engine — `rules/`
-
-| Component | Responsibility |
-|---|---|
-| `PlanModelInstantiator` | Materialises plan items from a definition; handles repetition |
-| `PlanModelEvaluator` | One evaluation pass: entry criteria, stage completion, cascade termination |
-| `StageCompletion` | Containment, blocking items, cascade-to-subtree, cycle guard |
-| `JuelCriterionEvaluator` | Sandboxed JUEL expression evaluation for sentries |
-| `CaseSnapshot` | The read model an evaluation pass and the policy both operate on |
-| `Transition` | A state change the service layer persists and publishes |
-
-The evaluator defers autocomplete for a stage that just became active, giving contained children
-one evaluation round to materialise before leftover-child termination is considered.
-
-One evaluation pass is intentionally deterministic:
-
-1. The service loads one `CaseSnapshot` containing the case, plan items, tasks, milestones and
-   relevant variables.
-2. `PlanModelEvaluator` evaluates entry criteria against inactive items and emits transitions for
-   items that may become active.
-3. `StageCompletion` evaluates active stages only after their children have had a chance to
-   materialise in a previous pass.
-4. The service persists emitted transitions through `TransitionApplier`, which creates mirrored human
-   tasks, starts process commands, achieves milestones and publishes events as needed.
-5. Repetition is bounded by `MAX_REPETITIONS_PER_ITEM`; hitting the cap is treated as a model-design
-   warning, not as unbounded runtime work.
-
-```mermaid
-flowchart TD
-    A["Load case snapshot"] --> B["Evaluate entry criteria"]
-    B --> C["Evaluate stage completion"]
-    C --> D["Create transition list"]
-    D --> E["Persist rows"]
-    E --> F["Publish events and audit"]
-    F --> G["Return updated case view"]
 ```
 
 ### 5.3 Services

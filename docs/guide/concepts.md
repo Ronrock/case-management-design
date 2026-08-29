@@ -207,20 +207,3 @@ replay an old decision against new data.
 
 Case creation supports `Idempotency-Key`. The remote command outbox also uses stable command IDs
 internally so retryable delivery does not intentionally create duplicate effects.
-
-## Legacy plan-model definitions
-
-The original JSON plan model remains supported as `orchestrationMode: PLAN_MODEL`. It contains
-plan items, JUEL entry/exit criteria, manual activation, repetition, and explicit case closure.
-
-It is a compatibility path, not something automatically converted into BPMN. The main differences
-are:
-
-| BPMN mode | Plan-model mode |
-|---|---|
-| Operaton decides token flow | Local evaluator decides plan-item transitions |
-| Root completion closes case | Explicit close after required work finishes |
-| Three independently published releases | One legacy JSON definition document |
-
-The rest of this guide leads with BPMN. Legacy JSON fields are documented in a separate section of
-[Writing a case definition](case-definitions.md#legacy-plan-model-json).

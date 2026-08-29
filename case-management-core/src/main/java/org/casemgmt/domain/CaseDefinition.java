@@ -21,7 +21,7 @@ public record CaseDefinition(
                           List<PlanItemDefinition> planItems, OffsetDateTime deployedAt,
                           String deployedBy) {
         this(id, key, versionNo, name, tenantId, description, slaPolicyId, roles,
-                attachmentCategories, forms, planItems, OrchestrationMode.PLAN_MODEL,
+                attachmentCategories, forms, planItems, OrchestrationMode.BPMN,
                 deployedAt, deployedBy);
     }
 

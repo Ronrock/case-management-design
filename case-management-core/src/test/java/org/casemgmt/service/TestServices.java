@@ -2,6 +2,7 @@ package org.casemgmt.service;
 
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.event.EventPublisher;
+import org.casemgmt.orchestration.CaseOrchestrationRegistry;
 import org.casemgmt.repo.*;
 import org.casemgmt.rules.*;
 import org.casemgmt.sla.SlaService;
@@ -28,14 +29,13 @@ public final class TestServices {
         JdbcClient jdbc = JdbcClient.create(dataSource);
         var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
                 new WebhookRepository(jdbc), "org.example.cm", "eng-test");
-        var evaluator = new PlanModelEvaluator(new JuelCriterionEvaluator());
         var applier = new TransitionApplier(new PlanItemRepository(jdbc), new CaseTaskRepository(jdbc),
                 new LinkedProcessRepository(jdbc), new MilestoneRepository(jdbc), gateway,
                 publisher);
         return new CaseService(new CaseRepository(dataSource),
                 new CaseDefinitionRepository(dataSource),
                 new PlanItemRepository(jdbc), new MilestoneRepository(jdbc),
-                new ParticipantRepository(jdbc), evaluator, new PlanModelInstantiator(),
+                new ParticipantRepository(jdbc), new CaseOrchestrationRegistry(java.util.List.of()),
                 new StageCompletion(), applier, publisher, "eng-test");
     }
 

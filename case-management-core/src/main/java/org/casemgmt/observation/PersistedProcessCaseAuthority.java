@@ -74,9 +74,7 @@ public final class PersistedProcessCaseAuthority implements ProcessCaseAuthority
             if (link.processDefinitionId() != null) {
                 return Optional.of(managed.orElseThrow().authority());
             }
-            if (managed.orElseThrow().authority().orchestrationMode()
-                    != OrchestrationMode.PLAN_MODEL
-                    || processDefinitionId == null || processDefinitionId.isBlank()) {
+            if (processDefinitionId == null || processDefinitionId.isBlank()) {
                 return Optional.empty();
             }
             var definition = exactDefinition(processDefinitionId, processInstanceId);
