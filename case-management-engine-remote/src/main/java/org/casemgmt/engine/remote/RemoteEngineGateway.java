@@ -69,6 +69,9 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         try {
             Map<String, Object> payload = EngineCommandPayload.validate(
                     command.state().command(), command.payload());
+            if (command.state().command().commandType() == EngineCommand.Type.COMPLETE_TASK) {
+                return dispatchCompleteTask(command, payload);
+            }
             RemoteResult result = switch (command.state().command().commandType()) {
                 case CREATE_TASK -> {
                     EngineTaskRef ref = createHumanTask(new HumanTaskRequest(
@@ -84,11 +87,7 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
                     claimTask(id, text(payload, "userId"));
                     yield new RemoteResult(id, CommandDispatchOutcome.RemoteState.TASK_CLAIMED, 204);
                 }
-                case COMPLETE_TASK -> {
-                    String id = text(payload, "engineTaskId");
-                    completeTask(id, map(payload.get("variables")));
-                    yield new RemoteResult(id, CommandDispatchOutcome.RemoteState.TASK_COMPLETED, 204);
-                }
+                case COMPLETE_TASK -> throw new IllegalStateException("handled before dispatch switch");
                 case START_PROCESS -> {
                     EngineProcessRef ref;
                     if ("ID".equals(text(payload, "selectionType"))) {
@@ -131,8 +130,14 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             };
             return CommandDispatchOutcome.http(result.httpStatus(),
                     CommandDispatchOutcome.Acceptance.ACCEPTED, null,
-                    confirmation(command, result,
+                    result.httpStatus() == 202 ? null : confirmation(command, result,
                             "http:" + result.httpStatus() + ":" + command.commandId()));
+        } catch (PartiallyCreatedTaskException partial) {
+            RestClientResponseException response = responseCause(partial);
+            if (response != null) return classifyHttpFailure(new DispatchHttpResponse(
+                    response.getStatusCode().value(), response.getResponseHeaders()), true);
+            return CommandDispatchOutcome.transportFailure(
+                    CommandDispatchOutcome.TransportFailure.UNKNOWN);
         } catch (EngineException failure) {
             RestClientResponseException response = responseCause(failure);
             if (response != null) return classifyHttpFailure(command, response);
@@ -145,23 +150,53 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
         }
     }
 
+    private CommandDispatchOutcome dispatchCompleteTask(
+            ProductionEngineCommandStore.StoredCommand command, Map<String, Object> payload) {
+        String id = text(payload, "engineTaskId");
+        DispatchHttpResponse response = completeTaskForDispatch(id, map(payload.get("variables")));
+        if (response.status() < 200 || response.status() >= 300) {
+            return classifyHttpFailure(response, false);
+        }
+        RemoteResult result = new RemoteResult(id, CommandDispatchOutcome.RemoteState.TASK_COMPLETED,
+                response.status());
+        return CommandDispatchOutcome.http(result.httpStatus(),
+                CommandDispatchOutcome.Acceptance.ACCEPTED, null,
+                result.httpStatus() == 202 ? null : confirmation(command, result,
+                        "http:" + result.httpStatus() + ":" + command.commandId()));
+    }
+
     private CommandDispatchOutcome classifyHttpFailure(
             ProductionEngineCommandStore.StoredCommand command,
             RestClientResponseException response) {
-        int status = response.getStatusCode().value();
-        CommandDispatchOutcome.Acceptance acceptance = switch (status) {
+        return classifyHttpFailure(new DispatchHttpResponse(response.getStatusCode().value(),
+                response.getResponseHeaders()), false);
+    }
+
+    private CommandDispatchOutcome classifyHttpFailure(
+            DispatchHttpResponse response, boolean primaryEffectCompleted) {
+        int status = response.status();
+        CommandDispatchOutcome.Acceptance acceptance = primaryEffectCompleted
+                ? CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED
+                : acceptance(status);
+        return CommandDispatchOutcome.http(status, acceptance, retryAfter(response.headers()), null);
+    }
+
+    private static CommandDispatchOutcome.Acceptance acceptance(int status) {
+        return switch (status) {
             case 408 -> CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED;
             case 425, 429 -> CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED;
             default -> status >= 500
                     ? CommandDispatchOutcome.Acceptance.POSSIBLY_ACCEPTED
                     : CommandDispatchOutcome.Acceptance.PROVEN_NOT_ACCEPTED;
         };
-        return CommandDispatchOutcome.http(status, acceptance, retryAfter(response), null);
     }
 
     private Duration retryAfter(RestClientResponseException response) {
-        String value = response.getResponseHeaders() == null ? null
-                : response.getResponseHeaders().getFirst("Retry-After");
+        return retryAfter(response.getResponseHeaders());
+    }
+
+    private Duration retryAfter(org.springframework.http.HttpHeaders headers) {
+        String value = headers == null ? null : headers.getFirst("Retry-After");
         if (value == null || value.isBlank()) return null;
         try {
             long seconds = Long.parseLong(value.trim());
@@ -486,33 +521,45 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
                 ? UUID.randomUUID().toString() : "cm-command-" + request.requestId();
         if (request.requestId() != null) {
             Map<String, Object> existing = getIfPresent("/task/" + taskId);
-            if (existing != null) {
-                return toRef(existing, request.caseId());
+            if (existing == null) {
+                Map<String, Object> createBody = new LinkedHashMap<>();
+                createBody.put("id", taskId);
+                createBody.put("name", request.name());
+                if (request.assignee() != null) {
+                    createBody.put("assignee", request.assignee());
+                }
+                post("createHumanTask", "/task/create", createBody);
             }
-        }
-        Map<String, Object> createBody = new LinkedHashMap<>();
-        createBody.put("id", taskId);
-        createBody.put("name", request.name());
-        if (request.assignee() != null) {
-            createBody.put("assignee", request.assignee());
-        }
-        post("createHumanTask", "/task/create", createBody);
-
-        if (request.candidateGroups() != null) {
-            for (String group : request.candidateGroups()) {
-                post("createHumanTask (candidate group)", "/task/" + taskId + "/identity-links",
-                        Map.of("groupId", group, "type", "candidate"));
+        } else {
+            Map<String, Object> createBody = new LinkedHashMap<>();
+            createBody.put("id", taskId);
+            createBody.put("name", request.name());
+            if (request.assignee() != null) {
+                createBody.put("assignee", request.assignee());
             }
+            post("createHumanTask", "/task/create", createBody);
         }
-        Map<String, Object> variables = new LinkedHashMap<>(
-                request.variables() == null ? Map.of() : request.variables());
-        variables.put(CASE_ID_VARIABLE, request.caseId());
-        variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
-        post("createHumanTask (variables)", "/task/" + taskId + "/variables",
-                Map.of("modifications", typed(variables)));
 
-        Map<String, Object> readBack = get("createHumanTask (read-back)", "/task/" + taskId);
-        return toRef(readBack, request.caseId());
+        try {
+            if (request.candidateGroups() != null) {
+                for (String group : request.candidateGroups()) {
+                    post("createHumanTask (candidate group)", "/task/" + taskId
+                                    + "/identity-links",
+                            Map.of("groupId", group, "type", "candidate"));
+                }
+            }
+            Map<String, Object> variables = new LinkedHashMap<>(
+                    request.variables() == null ? Map.of() : request.variables());
+            variables.put(CASE_ID_VARIABLE, request.caseId());
+            variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
+            post("createHumanTask (variables)", "/task/" + taskId + "/variables",
+                    Map.of("modifications", typed(variables)));
+
+            Map<String, Object> readBack = get("createHumanTask (read-back)", "/task/" + taskId);
+            return toRef(readBack, request.caseId());
+        } catch (EngineException afterPrimaryEffect) {
+            throw new PartiallyCreatedTaskException(taskId, afterPrimaryEffect);
+        }
     }
 
     @Override
@@ -523,6 +570,13 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
     @Override
     public void completeTask(String engineTaskId, Map<String, Object> variables) {
         post("completeTask", "/task/" + engineTaskId + "/complete",
+                Map.of("variables", typed(variables == null ? Map.of() : variables)));
+    }
+
+    /** Dispatch needs the server's actual status, unlike the compatibility void gateway method. */
+    protected DispatchHttpResponse completeTaskForDispatch(
+            String engineTaskId, Map<String, Object> variables) {
+        return postForDispatch("/task/" + engineTaskId + "/complete",
                 Map.of("variables", typed(variables == null ? Map.of() : variables)));
     }
 
@@ -749,6 +803,30 @@ public class RemoteEngineGateway implements EngineGateway, OrchestrationDeployme
             // non-HTTP-status client failure — see the comment in cancelProcess for why this
             // matters specifically for the remote gateway.
             throw new EngineException(operation + " (POST " + path + ") failed: " + e.getMessage(), e);
+        }
+    }
+
+    private DispatchHttpResponse postForDispatch(String path, Object body) {
+        try {
+            return client.post().uri(path)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .exchange((request, response) -> new DispatchHttpResponse(
+                            response.getStatusCode().value(), response.getHeaders()));
+        } catch (RestClientException e) {
+            throw new EngineException("completeTask (POST " + path + ") failed: "
+                    + e.getMessage(), e);
+        }
+    }
+
+    protected record DispatchHttpResponse(
+            int status, org.springframework.http.HttpHeaders headers) {
+    }
+
+    private static final class PartiallyCreatedTaskException extends EngineException {
+        private PartiallyCreatedTaskException(String taskId, EngineException cause) {
+            super("createHumanTask primary task '" + taskId
+                    + "' was created before a later side effect failed", cause);
         }
     }
 

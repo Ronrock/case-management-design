@@ -182,6 +182,10 @@ class RemoteEngineCommandTransportTest {
         }
         @Override public void claimTask(String engineTaskId, String userId) { }
         @Override public void completeTask(String engineTaskId, Map<String, Object> variables) { }
+        @Override protected DispatchHttpResponse completeTaskForDispatch(
+                String engineTaskId, Map<String, Object> variables) {
+            return new DispatchHttpResponse(204, org.springframework.http.HttpHeaders.EMPTY);
+        }
         @Override public EngineProcessRef startProcess(StartProcessRequest request) {
             return new EngineProcessRef("process-1", request.processDefinitionId(),
                     request.processDefinitionKey(), request.caseId());

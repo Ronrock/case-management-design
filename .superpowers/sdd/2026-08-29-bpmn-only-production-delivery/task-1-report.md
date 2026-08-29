@@ -96,3 +96,35 @@ repository test is `EngineCommandRepositoryProductionTest`.
   possibly-sent transport failure.
 - Concern: full real-Oracle persistence proof remains blocked by the unrelated malformed
   `cm-engine-observation-effects.xml` guard. No unrelated migration change was made in this task.
+
+## Review-fix round 1
+
+### Implementation
+
+- `COMPLETE_TASK` dispatch now uses a status-preserving exchange path. A real `202 Accepted`
+  remains an accepted, confirmation-free fact, so policy keeps the command awaiting confirmation.
+- Create-task repair no longer returns early when its deterministic task already exists. It retries
+  identity links, variables, and read-back; a later HTTP failure after the primary create is
+  classified `POSSIBLY_ACCEPTED` rather than proven absent.
+- Replay now rejects normalized action rows not referenced by a persisted operator transition.
+- All clean-path no-op guards in the observation and production-command changelogs use
+  `splitStatements="false"`; default-value guards use Oracle's `DATA_DEFAULT_VC` to avoid LONG
+  expression errors. The Oracle metadata precondition also reads an index expression only once.
+
+### TDD evidence
+
+- RED: `RemoteEngineGatewayTest` initially failed because `202` was fabricated as `204`, and a
+  post-create `429` was `PROVEN_NOT_ACCEPTED`. GREEN: same focused suite passed 20 remote tests
+  after the status-preserving and partial-effect changes.
+- RED: the extra normalized-action test expected an exception but replay returned normally.
+  GREEN: `EngineCommandTransitionHistoryTest` passed all 6 tests after exact set reconciliation.
+
+### Verification and concern
+
+- Focused remote transport suite: 20 tests passed.
+- History suite: 6 tests passed.
+- Real Docker/Testcontainers Oracle runs reached fresh Oracle and passed all repaired no-op guards.
+  The final migration remains blocked in the unrelated `OracleFinalSchemaPrecondition` while
+  reading `USER_IND_EXPRESSIONS.COLUMN_EXPRESSION` (`ORA-17027: Stream has already been closed`),
+  before command persistence assertions. The attempted single-read repair did not resolve this
+  Oracle JDBC metadata limitation; no command ledger/dispatcher behavior was changed.

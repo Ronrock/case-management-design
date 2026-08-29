@@ -110,6 +110,7 @@ public final class EngineCommandTransitionHistory {
                 throw new IllegalArgumentException("Normalized command action sequence is duplicated");
             }
         }
+        java.util.Set<Long> referencedSequences = new java.util.HashSet<>();
         for (TransitionRow row : transitions) {
             CommandDispatchOutcome outcome = decodeOutcome(row.outcomeJson());
             if (outcome.operatorAction() == null) {
@@ -125,6 +126,11 @@ public final class EngineCommandTransitionHistory {
                 throw new IllegalArgumentException(
                         "Command transition action evidence differs from normalized action row");
             }
+            referencedSequences.add(row.actionSequence());
+        }
+        if (!referencedSequences.equals(bySequence.keySet())) {
+            throw new IllegalArgumentException(
+                    "Normalized action history contains unmatched action rows");
         }
         return replay(command, baseline, transitions);
     }

@@ -409,8 +409,10 @@ public final class OracleFinalSchemaPrecondition implements CustomPrecondition {
                     """)) {
                 statement.setString(1,name);
                 try (ResultSet rows=statement.executeQuery()) {
-                    while(rows.next()) values.add(normalize(
-                            rows.getString(2)==null?rows.getString(1):rows.getString(2)));
+                    while(rows.next()) {
+                        String expression = rows.getString(2);
+                        values.add(normalize(expression == null ? rows.getString(1) : expression));
+                    }
                 }
             }
             return values;

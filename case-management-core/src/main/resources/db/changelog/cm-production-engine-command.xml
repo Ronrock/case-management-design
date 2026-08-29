@@ -103,7 +103,7 @@
           FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_ENGINE_COMMAND')
       ]]></sqlCheck>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-production-engine-command-columns" author="casemgmt">
@@ -272,7 +272,7 @@
         WHERE TABLE_NAME='CM_ENGINE_COMMAND' AND CONSTRAINT_NAME='CK_CM_ENGCMD_STATUS'
       ]]></sqlCheck>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-production-engine-command-drop-poc-status" author="casemgmt">
@@ -298,7 +298,7 @@
         WHERE TABLE_NAME='CM_ENGINE_COMMAND' AND CONSTRAINT_NAME='CK_CM_ENGCMD_STATUS'
       ]]></sqlCheck>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-production-engine-command-status" author="casemgmt">
@@ -336,11 +336,11 @@
             (COLUMN_NAME='REVIEW_SOURCE_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=32 AND NULLABLE='Y' AND DATA_DEFAULT IS NULL) OR
             (COLUMN_NAME='REVIEW_REFERENCE_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=160 AND NULLABLE='Y' AND DATA_DEFAULT IS NULL) OR
             (COLUMN_NAME='CREATED_AT_' AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='N'
-              AND REGEXP_REPLACE(UPPER(DATA_DEFAULT),'[[:space:]]','')='SYSTIMESTAMP'))
+              AND REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC),'[[:space:]]','')='SYSTIMESTAMP'))
         ]]></sqlCheck>
       </or>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-engine-command-action-table" author="casemgmt">
@@ -385,7 +385,7 @@
                    AND COLUMN_NAME<>'CREATED_AT_' AND DATA_DEFAULT IS NOT NULL)=0
             AND (SELECT COUNT(*) FROM USER_TAB_COLUMNS
                  WHERE TABLE_NAME='CM_ENGINE_COMMAND_ACTION' AND COLUMN_NAME='CREATED_AT_'
-                   AND REGEXP_REPLACE(UPPER(DATA_DEFAULT),'[[:space:]]','')='SYSTIMESTAMP')=1
+                   AND REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC),'[[:space:]]','')='SYSTIMESTAMP')=1
             THEN 1 ELSE 0 END FROM DUAL
         ]]></sqlCheck>
         <sqlCheck expectedResult="1"><![CDATA[
@@ -417,7 +417,7 @@
         ]]></sqlCheck>
       </and>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-production-engine-command-counter-invariants" author="casemgmt">
@@ -484,7 +484,7 @@
         WHERE CONSTRAINT_NAME='CK_CM_ENGCMD_TEMPORAL'
       ]]></sqlCheck>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-production-engine-command-temporal-invariants" author="casemgmt">
@@ -593,7 +593,7 @@
           THEN 1 ELSE 0 END FROM DUAL
       ]]></sqlCheck>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-engine-command-action-fk" author="casemgmt">
@@ -698,12 +698,12 @@
           WHEN COLUMN_NAME='PREVIOUS_DECISION_DIGEST_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 AND NULLABLE='Y' AND DATA_DEFAULT IS NULL THEN 1
           WHEN COLUMN_NAME='NEXT_DECISION_DIGEST_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 AND NULLABLE='N' AND DATA_DEFAULT IS NULL THEN 1
           WHEN COLUMN_NAME='CREATED_AT_' AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='N'
-               AND REGEXP_REPLACE(UPPER(DATA_DEFAULT),'[[:space:]]','')='SYSTIMESTAMP' THEN 1
+               AND REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC),'[[:space:]]','')='SYSTIMESTAMP' THEN 1
           ELSE 0 END)=16 THEN 1 ELSE 0 END
         FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_ENGINE_COMMAND_TRANSITION'
       ]]></sqlCheck>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-engine-command-transition-table" author="casemgmt">
@@ -777,7 +777,7 @@
           THEN 1 ELSE 0 END FROM DUAL
       ]]></sqlCheck>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-engine-command-action-sequence-constraint" author="casemgmt">
@@ -840,11 +840,11 @@
                    (COLUMN_NAME='CASE_ID_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=140 AND NULLABLE='N' AND DATA_DEFAULT IS NULL) OR
                    (COLUMN_NAME='TYPE_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=30 AND NULLABLE='N' AND DATA_DEFAULT IS NULL) OR
                    (COLUMN_NAME='PAYLOAD_JSON_' AND DATA_TYPE='CLOB' AND NULLABLE='Y' AND DATA_DEFAULT IS NULL) OR
-                   (COLUMN_NAME='STATUS_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=20 AND NULLABLE='N' AND REGEXP_REPLACE(UPPER(DATA_DEFAULT),'[[:space:]'']','')='PENDING') OR
+                   (COLUMN_NAME='STATUS_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=20 AND NULLABLE='N' AND REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC),'[[:space:]'']','')='PENDING') OR
                    (COLUMN_NAME='ATTEMPTS_' AND DATA_TYPE='NUMBER' AND DATA_PRECISION=3 AND NVL(DATA_SCALE,0)=0 AND NULLABLE='N' AND REGEXP_REPLACE(DATA_DEFAULT,'[[:space:]]','')='0') OR
                    (COLUMN_NAME='NEXT_ATTEMPT_AT_' AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='Y' AND DATA_DEFAULT IS NULL) OR
                    (COLUMN_NAME='LAST_ERROR_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=2000 AND NULLABLE='Y' AND DATA_DEFAULT IS NULL) OR
-                   (COLUMN_NAME='CREATED_AT_' AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='N' AND REGEXP_REPLACE(UPPER(DATA_DEFAULT),'[[:space:]]','')='SYSTIMESTAMP') OR
+                   (COLUMN_NAME='CREATED_AT_' AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='N' AND REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC),'[[:space:]]','')='SYSTIMESTAMP') OR
                    (COLUMN_NAME='CLAIM_TOKEN_' AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=64 AND NULLABLE='Y' AND DATA_DEFAULT IS NULL) OR
                    (COLUMN_NAME='CLAIMED_AT_' AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='Y' AND DATA_DEFAULT IS NULL)
                  ))=11
@@ -881,7 +881,7 @@
         ]]></sqlCheck>
       </and>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
 </databaseChangeLog>

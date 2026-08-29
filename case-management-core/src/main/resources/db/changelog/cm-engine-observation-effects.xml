@@ -34,7 +34,7 @@
         ]]></sqlCheck>
       </or>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-applied-engine-observation" author="casemgmt">
@@ -121,7 +121,7 @@
         ]]></sqlCheck>
       </or>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-applied-engine-observation-authority-index" author="casemgmt">
@@ -161,7 +161,7 @@
         ]]></sqlCheck>
       </or>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-applied-engine-observation-status-index" author="casemgmt">
@@ -186,7 +186,7 @@
           (NOT EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='OBSERVATION_KIND_') OR
            EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='OBSERVATION_KIND_'
              AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=32 AND NULLABLE='N'
-             AND REGEXP_REPLACE(UPPER(DATA_DEFAULT),'[[:space:]'']','')='LEGACY'))
+             AND REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC),'[[:space:]'']','')='LEGACY'))
           AND (NOT EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='IGNORED_AT_') OR
            EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='IGNORED_AT_'
              AND DATA_TYPE='TIMESTAMP WITH TIME ZONE' AND NULLABLE='Y' AND DATA_DEFAULT IS NULL))
@@ -240,7 +240,7 @@
           THEN 1 ELSE 0 END FROM DUAL
       ]]></sqlCheck>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 
   <changeSet id="cm-engine-observation-hardening-kind" author="casemgmt">
@@ -432,6 +432,6 @@
         ]]></sqlCheck>
       </and>
     </preConditions>
-    <sql>BEGIN NULL; END;</sql>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
   </changeSet>
 </databaseChangeLog>

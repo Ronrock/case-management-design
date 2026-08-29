@@ -184,6 +184,11 @@ class EngineCommandTransitionHistoryTest {
         assertThatThrownBy(() -> EngineCommandTransitionHistory.replay(COMMAND, baseline,
                 List.of(cancel.row()), List.of(tampered)))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("action");
+        EngineCommandPolicy.ProcessedAction extra = new EngineCommandPolicy.ProcessedAction(
+                2, action(CommandDispatchOutcome.ActionType.CANCEL, false), null);
+        assertThatThrownBy(() -> EngineCommandTransitionHistory.replay(COMMAND, baseline,
+                List.of(cancel.row()), List.of(exact, extra)))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("unmatched");
     }
 
     private static EngineCommandPolicy.Decision pending(OffsetDateTime at) {
