@@ -172,37 +172,62 @@ public record ValidatedCaseContract(
         String formRef();
         List<String> candidateGroups();
         String availabilityExpression();
+        /** Explicitly declared data movement for this action; no submitted field is implicit. */
+        default List<MappingDefinition> mappings() { return List.of(); }
     }
 
     /** Creates a discretionary task. */
     public record TaskAction(String id, String name, List<String> roles, String formRef,
-                             List<String> candidateGroups, String availabilityExpression)
+                             List<String> candidateGroups, String availabilityExpression,
+                             List<MappingDefinition> mappings)
             implements AdHocActionDefinition {
         public TaskAction {
             roles = List.copyOf(roles);
             candidateGroups = List.copyOf(candidateGroups);
+            mappings = List.copyOf(mappings);
+        }
+        public TaskAction(String id, String name, List<String> roles, String formRef,
+                          List<String> candidateGroups, String availabilityExpression) {
+            this(id, name, roles, formRef, candidateGroups, availabilityExpression, List.of());
         }
     }
 
     /** Starts an explicitly permitted related process. */
     public record ProcessAction(String id, String name, List<String> roles, String formRef,
                                 List<String> candidateGroups, String availabilityExpression,
-                                String processDefinitionKey)
+                                String processDefinitionKey, String orchestrationReleaseId,
+                                List<MappingDefinition> mappings)
             implements AdHocActionDefinition {
         public ProcessAction {
             roles = List.copyOf(roles);
             candidateGroups = List.copyOf(candidateGroups);
+            mappings = List.copyOf(mappings);
+        }
+        public ProcessAction(String id, String name, List<String> roles, String formRef,
+                             List<String> candidateGroups, String availabilityExpression,
+                             String processDefinitionKey) {
+            this(id, name, roles, formRef, candidateGroups, availabilityExpression,
+                    processDefinitionKey, null, List.of());
         }
     }
 
     /** Correlates a declared message through the orchestration. */
     public record MessageAction(String id, String name, List<String> roles, String formRef,
                                 List<String> candidateGroups, String availabilityExpression,
-                                String messageName)
+                                String messageName, List<String> correlationKeys,
+                                List<MappingDefinition> mappings)
             implements AdHocActionDefinition {
         public MessageAction {
             roles = List.copyOf(roles);
             candidateGroups = List.copyOf(candidateGroups);
+            correlationKeys = List.copyOf(correlationKeys);
+            mappings = List.copyOf(mappings);
+        }
+        public MessageAction(String id, String name, List<String> roles, String formRef,
+                             List<String> candidateGroups, String availabilityExpression,
+                             String messageName) {
+            this(id, name, roles, formRef, candidateGroups, availabilityExpression,
+                    messageName, List.of(), List.of());
         }
     }
 

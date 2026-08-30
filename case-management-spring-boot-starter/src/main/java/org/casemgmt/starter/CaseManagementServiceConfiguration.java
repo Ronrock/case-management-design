@@ -201,9 +201,11 @@ public class CaseManagementServiceConfiguration {
             CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
             PlanItemRepository planItems, CaseTaskRepository tasks,
             LinkedProcessService linkedProcesses, EngineGateway engine,
-            CriterionEvaluator criteria, EventPublisher publisher) {
+            CriterionEvaluator criteria, EventPublisher publisher,
+            EngineOperationService operations) {
         return new AdHocActionService(cases, bindings, releases, participants,
-                planItems, tasks, linkedProcesses, engine, criteria, publisher);
+                planItems, tasks, linkedProcesses, engine, criteria, publisher, operations,
+                new JsonSchemaCaseContractValidator(), new FormValidator());
     }
 
     @Bean

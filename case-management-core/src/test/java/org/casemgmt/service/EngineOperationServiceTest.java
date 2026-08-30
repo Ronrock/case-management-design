@@ -10,6 +10,7 @@ import org.casemgmt.domain.PlanItemState;
 import org.casemgmt.domain.PlanItemType;
 import org.casemgmt.domain.TaskState;
 import org.casemgmt.engine.EngineCommandStatus;
+import org.casemgmt.engine.EngineCommand;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.orchestration.EngineDeploymentIdentity;
@@ -84,6 +85,36 @@ class EngineOperationServiceTest extends OracleTestBase {
 
         assertThat(cancelled.status()).isEqualTo("CANCELLED");
         assertThat(jdbc.sql("SELECT COUNT(*) FROM CM_AUDIT_LOG WHERE ACTION_='engine-operation.cancel'")
+                .query(Long.class).single()).isEqualTo(1L);
+    }
+
+    @Test
+    void adHocRequestIsDurableIdempotentAndTenantBound() {
+        JdbcClient jdbc = jdbc();
+        seedBoundDefinition(jdbc);
+        CaseRepository cases = new CaseRepository(jdbc);
+        CaseInstance instance = instance();
+        cases.insert(instance);
+        EngineCommandRepository commands = new EngineCommandRepository(dataSource());
+        EventPublisher events = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                new WebhookRepository(jdbc), "org.example.cm", "engine-a");
+        EngineOperationService service = new EngineOperationService(commands, events,
+                Clock.fixed(Instant.parse("2026-08-30T10:00:00Z"), ZoneOffset.UTC));
+        Map<String, Object> payload = Map.of("messageName", "case.updated", "variables", Map.of());
+
+        EngineOperationService.Operation requested = service.submitAdHoc(instance, "notify",
+                EngineCommand.Type.CORRELATE_MESSAGE, payload, "case.updated", instance.version(),
+                new Actor("alice", List.of("handlers")), "ad-hoc-message-1");
+        EngineOperationService.Operation replay = service.submitAdHoc(instance, "notify",
+                EngineCommand.Type.CORRELATE_MESSAGE, payload, "case.updated", instance.version(),
+                new Actor("alice", List.of("handlers")), "ad-hoc-message-1");
+
+        assertThat(replay.id()).isEqualTo(requested.id());
+        assertThat(requested.status()).isEqualTo("PENDING");
+        assertThat(commands.find("tenant-b", requested.id())).isEmpty();
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM CM_ENGINE_COMMAND WHERE IDEMPOTENCY_KEY_='ad-hoc-message-1'")
+                .query(Long.class).single()).isEqualTo(1L);
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_='org.example.cm.case.adhoc.requested'")
                 .query(Long.class).single()).isEqualTo(1L);
     }
 

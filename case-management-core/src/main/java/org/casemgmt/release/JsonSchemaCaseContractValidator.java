@@ -363,11 +363,13 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
             String availability = text(node, "availabilityExpression");
             result.add(switch (text(node, "type")) {
                 case "PROCESS" -> new ValidatedCaseContract.ProcessAction(id, name, roles,
-                        formRef, groups, availability, text(node, "processDefinitionKey"));
+                        formRef, groups, availability, text(node, "processDefinitionKey"),
+                        text(node, "orchestrationReleaseId"), mappings(node));
                 case "MESSAGE" -> new ValidatedCaseContract.MessageAction(id, name, roles,
-                        formRef, groups, availability, text(node, "messageName"));
+                        formRef, groups, availability, text(node, "messageName"),
+                        strings(node.get("correlationKeys")), mappings(node));
                 default -> new ValidatedCaseContract.TaskAction(id, name, roles, formRef,
-                        groups, availability);
+                        groups, availability, mappings(node));
             });
         }
         return result;

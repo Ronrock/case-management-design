@@ -5,6 +5,11 @@ import org.casemgmt.orchestration.OrchestrationDeploymentClient;
 import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.repo.EngineCommandRepository;
+import org.casemgmt.repo.JsonCodec;
+import org.casemgmt.domain.CaseIds;
+import org.casemgmt.event.CaseEvent;
+import org.casemgmt.event.EventPublisher;
+import org.casemgmt.event.EventTypes;
 
 import java.util.Base64;
 import java.time.OffsetDateTime;
@@ -75,6 +80,7 @@ public class EngineCommandDispatcher {
     private final String workerOwner;
     private final Clock clock;
     private final Duration leaseDuration;
+    private final EventPublisher events;
 
     public EngineCommandDispatcher(EngineCommandRepository commands, EngineGateway delegate,
                                    SyncReporter syncReporter) {
@@ -92,6 +98,7 @@ public class EngineCommandDispatcher {
         this.workerOwner = null;
         this.clock = null;
         this.leaseDuration = null;
+        this.events = null;
     }
 
     /** Production dispatcher: all results flow through the typed policy/store boundary. */
@@ -103,6 +110,22 @@ public class EngineCommandDispatcher {
         this.workerOwner = java.util.Objects.requireNonNull(workerOwner, "workerOwner");
         this.clock = java.util.Objects.requireNonNull(clock, "clock");
         this.leaseDuration = java.util.Objects.requireNonNull(leaseDuration, "leaseDuration");
+        this.delegate = null;
+        this.syncReporter = null;
+        this.deploymentReporter = null;
+        this.events = null;
+    }
+
+    /** Production dispatcher with lifecycle publication for command-backed ad-hoc actions. */
+    public EngineCommandDispatcher(
+            EngineCommandRepository commands, EngineCommandTransport transport,
+            String workerOwner, Clock clock, Duration leaseDuration, EventPublisher events) {
+        this.commands = java.util.Objects.requireNonNull(commands, "commands");
+        this.transport = java.util.Objects.requireNonNull(transport, "transport");
+        this.workerOwner = java.util.Objects.requireNonNull(workerOwner, "workerOwner");
+        this.clock = java.util.Objects.requireNonNull(clock, "clock");
+        this.leaseDuration = java.util.Objects.requireNonNull(leaseDuration, "leaseDuration");
+        this.events = java.util.Objects.requireNonNull(events, "events");
         this.delegate = null;
         this.syncReporter = null;
         this.deploymentReporter = null;
@@ -148,11 +171,37 @@ public class EngineCommandDispatcher {
                 outcome = CommandDispatchOutcome.transportFailure(
                         CommandDispatchOutcome.TransportFailure.UNKNOWN);
             }
-            commands.commitLeaseOutcome(command.state().command().tenantId(),
+            ProductionEngineCommandStore.StoredCommand committed = commands.commitLeaseOutcome(command.state().command().tenantId(),
                     command.operationId(), lease.leaseToken(), command.version(), outcome);
+            publishAdHocTerminal(command, committed);
             processed++;
         }
         return processed;
+    }
+
+    private void publishAdHocTerminal(ProductionEngineCommandStore.StoredCommand submitted,
+                                      ProductionEngineCommandStore.StoredCommand committed) {
+        if (events == null || committed.correlationJson() == null) return;
+        Map<String, Object> correlation;
+        try {
+            correlation = JsonCodec.toMap(committed.correlationJson());
+        } catch (RuntimeException malformed) {
+            return; // correlation is auxiliary metadata; never turn a dispatched effect into a retry
+        }
+        Object action = correlation.get("adHocActionId");
+        if (!(action instanceof String actionId) || actionId.isBlank()) return;
+        EngineCommandStatus status = committed.state().committedDecision().status();
+        String event = switch (status) {
+            case CONFIRMED -> EventTypes.AD_HOC_ACTION_CONFIRMED;
+            case FAILED -> EventTypes.AD_HOC_ACTION_FAILED;
+            default -> null;
+        };
+        if (event == null) return;
+        events.publish(new CaseEvent(CaseIds.newId(), events.engineId(), event, committed.caseId(),
+                submitted.state().command().tenantId(), OffsetDateTime.now(clock),
+                Map.of("actionId", actionId, "operationId", committed.operationId(),
+                        "commandType", submitted.state().command().commandType().name(),
+                        "status", status.name())));
     }
 
     private void execute(EngineCommand command) {

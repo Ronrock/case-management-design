@@ -40,6 +40,7 @@ public class AdHocActionController {
     public ResponseEntity<Map<String, Object>> execute(
             @PathVariable String caseId, @PathVariable String actionId,
             @RequestHeader(value = "If-Match", required = false) String ifMatch,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @RequestBody(required = false) Map<String, Object> input,
             Authentication authentication) {
         Actor actor = callers.actor(authentication);
@@ -50,7 +51,7 @@ public class AdHocActionController {
         long expected = ETagSupport.expectedVersion(ifMatch, "case " + caseId,
                 () -> OptionalLong.of(c.version()));
         AdHocActionService.Result result = actions.execute(caseId, actionId, expected,
-                input == null ? Map.of() : input, actor);
+                input == null ? Map.of() : input, actor, idempotencyKey);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("actionId", result.actionId());
         body.put("type", result.type());
@@ -58,8 +59,8 @@ public class AdHocActionController {
         body.put("taskId", result.taskId());
         body.put("linkedProcessId", result.linkedProcessId());
         body.put("engineSync", result.engineSync().name());
-        body.put("status", result.engineSync() == CaseTask.EngineSync.PENDING
-                ? "PENDING" : "CURRENT");
+        body.put("operationId", result.operationId());
+        body.put("status", result.status());
         HttpStatus status = result.engineSync() == CaseTask.EngineSync.PENDING
                 ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
         return ResponseEntity.status(status).body(body);

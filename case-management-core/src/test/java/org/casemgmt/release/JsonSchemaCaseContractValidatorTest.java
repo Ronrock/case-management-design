@@ -149,8 +149,10 @@ class JsonSchemaCaseContractValidatorTest {
                             .isEqualTo("${case.state == 'ACTIVE'}");
                 });
         assertThat(contract.adHocActions().get(1))
-                .isInstanceOfSatisfying(ValidatedCaseContract.ProcessAction.class, action ->
-                        assertThat(action.processDefinitionKey()).isEqualTo("escalation"));
+                .isInstanceOfSatisfying(ValidatedCaseContract.ProcessAction.class, action -> {
+                    assertThat(action.processDefinitionKey()).isEqualTo("escalation");
+                    assertThat(action.orchestrationReleaseId()).isEqualTo("release-1");
+                });
         assertThat(contract.adHocActions().get(2))
                 .isInstanceOfSatisfying(ValidatedCaseContract.MessageAction.class, action ->
                         assertThat(action.messageName()).isEqualTo("complaint-withdrawn"));
@@ -171,7 +173,8 @@ class JsonSchemaCaseContractValidatorTest {
             /forms/reviewForm/schema            | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{"reviewForm":{}}}
             /slaBindings/resolution/calendarId  | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"slaBindings":{"resolution":{"scope":"CASE","duration":"P5D","startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED"}}}
             /adHocActions/0/roles               | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"TASK"}]}
-            /adHocActions/0/processDefinitionKey| {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"PROCESS","roles":["handler"]}]}
+            /adHocActions/0/processDefinitionKey| {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"PROCESS","roles":["handler"],"orchestrationReleaseId":"release-1"}]}
+            /adHocActions/0/orchestrationReleaseId| {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"PROCESS","roles":["handler"],"processDefinitionKey":"escalation"}]}
             /adHocActions/0/messageName         | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"MESSAGE","roles":["handler"]}]}
             /mappings/0/target                  | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"mappings":[{"direction":"ENGINE_TO_CASE","source":"outcome"}]}
             """)
@@ -218,7 +221,7 @@ class JsonSchemaCaseContractValidatorTest {
     void rejectsPropertiesBelongingToAnotherAdHocActionVariant(String type, String property,
                                                                String extra) {
         String required = switch (type) {
-            case "PROCESS" -> ",\"processDefinitionKey\":\"escalation\"";
+            case "PROCESS" -> ",\"processDefinitionKey\":\"escalation\",\"orchestrationReleaseId\":\"release-1\"";
             case "MESSAGE" -> ",\"messageName\":\"withdrawn\"";
             default -> "";
         };
@@ -567,7 +570,7 @@ class JsonSchemaCaseContractValidatorTest {
                      "candidateGroups": ["handlers"],
                      "availabilityExpression": "${case.state == 'ACTIVE'}"},
                     {"id": "escalate", "type": "PROCESS", "roles": ["handler"],
-                     "processDefinitionKey": "escalation"},
+                     "processDefinitionKey": "escalation", "orchestrationReleaseId": "release-1"},
                     {"id": "withdraw", "type": "MESSAGE", "roles": ["handler"],
                      "messageName": "complaint-withdrawn"}
                   ]

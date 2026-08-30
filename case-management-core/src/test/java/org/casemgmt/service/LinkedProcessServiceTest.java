@@ -5,6 +5,7 @@ import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.EngineProcessRef;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
+import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.junit.jupiter.api.Test;
@@ -140,5 +141,33 @@ class LinkedProcessServiceTest {
                 EventTypes.PROCESS_STARTED.equals(event.type())));
         verify(events).audit(eq("eng-a:1"), eq("t1"), eq("alice"), eq("process.start"),
                 eq("LinkedProcess"), eq(result.id()), eq(null), any());
+    }
+
+    @Test
+    void exactStartUsesThePinnedDefinitionIdRatherThanResolvingByKey() {
+        LinkedProcessRepository processes = mock(LinkedProcessRepository.class);
+        CaseRepository cases = mock(CaseRepository.class);
+        EngineGateway engine = mock(EngineGateway.class);
+        EventPublisher events = mock(EventPublisher.class);
+        AtomicReference<String> insertedId = new AtomicReference<>();
+        when(cases.require("eng-a:1")).thenReturn(caseInstance(Map.of()));
+        when(engine.startProcess(any())).thenReturn(new EngineProcessRef("process-42",
+                "letter-process:1:v1", "letter-process", "eng-a:1"));
+        doAnswer(invocation -> { insertedId.set(invocation.getArgument(0)); return null; })
+                .when(processes).insert(any(), eq("eng-a:1"), eq("item-1"), eq(null),
+                        eq("letter-process:1:v1"), eq("letter-process"),
+                        eq(CaseTask.EngineSync.PENDING));
+        when(processes.findByCase("eng-a:1")).thenAnswer(invocation -> List.of(
+                new LinkedProcessRepository.LinkedProcessRow(insertedId.get(), "eng-a:1", "item-1",
+                        insertedId.get(), "process-42", "letter-process:1:v1", "letter-process",
+                        "ACTIVE", CaseTask.EngineSync.SYNCED, false)));
+
+        new LinkedProcessService(processes, cases, engine, events).startExact("eng-a:1", "item-1",
+                new EngineDeploymentIdentity("deployment-v1", "letter-process:1:v1",
+                        "letter-process", 1, "t1"), Map.of(), new Actor("alice", List.of()));
+
+        verify(engine).startProcess(org.mockito.ArgumentMatchers.argThat(request ->
+                "letter-process:1:v1".equals(request.processDefinitionId())
+                        && "letter-process".equals(request.processDefinitionKey())));
     }
 }

@@ -73,6 +73,47 @@ public class EngineOperationService {
         return commands.find(tenantId, operationId).map(EngineOperationService::operation);
     }
 
+    /**
+     * Submits a declared discretionary action through the same durable command record used by
+     * normal remote task operations.  The action id is retained as immutable command
+     * correlation metadata; it is deliberately not added to the engine payload, whose closed
+     * contract is owned by {@link org.casemgmt.engine.EngineCommandPayload}.
+     */
+    public Operation submitAdHoc(CaseInstance instance, String actionId,
+                                 EngineCommand.Type type, Map<String, Object> payload,
+                                 String expectedTarget, long expectedCaseVersion,
+                                 Actor actor, String idempotencyKey) {
+        Objects.requireNonNull(instance, "instance");
+        if (actionId == null || actionId.isBlank()) {
+            throw new IllegalArgumentException("actionId must not be blank");
+        }
+        String stableKey = idempotencyKey == null || idempotencyKey.isBlank()
+                ? "adhoc:" + instance.id() + ":" + actionId + ":" + expectedCaseVersion
+                : idempotencyKey;
+        String operationId = CaseIds.newId();
+        ProductionEngineCommandStore.ProductionCommandRequest request =
+                new ProductionEngineCommandStore.ProductionCommandRequest(
+                        CaseIds.newId(), instance.id(), instance.tenantId(), operationId,
+                        stableKey, type, payload, expectedTarget,
+                        JsonCodec.canonicalJson(Map.of("adHocActionId", actionId)),
+                        JsonCodec.canonicalJson(Map.of("adHocActionId", actionId,
+                                "requestedBy", actor.userId())), expectedCaseVersion,
+                        OffsetDateTime.now(clock));
+        ProductionEngineCommandStore.Submission submission = commands.submit(request);
+        Operation operation = operation(submission.command());
+        if (!submission.replayed()) {
+            OffsetDateTime now = OffsetDateTime.now(clock);
+            events.publish(new org.casemgmt.event.CaseEvent(CaseIds.newId(), events.engineId(),
+                    org.casemgmt.event.EventTypes.AD_HOC_ACTION_REQUESTED, instance.id(),
+                    instance.tenantId(), now, Map.of("actionId", actionId,
+                            "operationId", operation.id(), "type", type.name())));
+            events.audit(instance.id(), instance.tenantId(), actor.userId(),
+                    "ad-hoc.requested", "AdHocAction", actionId, Map.of(),
+                    Map.of("operationId", operation.id(), "commandType", type.name()));
+        }
+        return operation;
+    }
+
     public boolean hasActiveCommand(String tenantId, CaseTask task) {
         EngineCommand.Type type = task.state().name().equals("OPEN")
                 ? EngineCommand.Type.CLAIM_TASK : EngineCommand.Type.COMPLETE_TASK;

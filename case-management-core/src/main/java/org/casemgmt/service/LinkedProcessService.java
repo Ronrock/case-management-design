@@ -7,6 +7,8 @@ import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.EngineException;
 import org.casemgmt.engine.EngineProcessRef;
 import org.casemgmt.engine.StartProcessByKeyRequest;
+import org.casemgmt.engine.StartProcessRequest;
+import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
@@ -99,6 +101,51 @@ public class LinkedProcessService {
 
     public List<LinkedProcessRepository.LinkedProcessRow> forCase(String caseId) {
         return processes.findByCase(caseId);
+    }
+
+    /**
+     * Starts a linked process from an immutable deployment identity. This is intentionally
+     * separate from {@link #start}: discretionary actions must never let the engine resolve a
+     * descriptive key to whichever deployment happens to be newest.
+     */
+    @Transactional
+    public LinkedProcessRepository.LinkedProcessRow startExact(String caseId, String planItemId,
+                                                                EngineDeploymentIdentity identity,
+                                                                Map<String, Object> variables,
+                                                                Actor actor) {
+        if (identity == null || identity.processDefinitionId() == null
+                || identity.processDefinitionId().isBlank()) {
+            throw new IllegalArgumentException("Exact linked-process start requires process definition identity");
+        }
+        CaseInstance c = cases.require(caseId);
+        String id = CaseIds.newId();
+        processes.insert(id, caseId, planItemId, null, identity.processDefinitionId(),
+                identity.processDefinitionKey(), CaseTask.EngineSync.PENDING);
+        EngineProcessRef ref = engine.startProcess(new StartProcessRequest(caseId, planItemId,
+                identity.processDefinitionId(), identity.processDefinitionKey(), identity.tenantId(),
+                variables, id));
+        if (ref == null || !identity.processDefinitionId().equals(ref.processDefinitionId())
+                || !identity.processDefinitionKey().equals(ref.processDefinitionKey())) {
+            throw new EngineException("Engine start returned an inconsistent exact process definition");
+        }
+        CaseTask.EngineSync sync = ref.processInstanceId() == null
+                ? CaseTask.EngineSync.PENDING : CaseTask.EngineSync.SYNCED;
+        if (sync == CaseTask.EngineSync.SYNCED) {
+            processes.confirmStarted(caseId, id, ref.processInstanceId(), identity.processDefinitionId(),
+                    identity.processDefinitionKey(), OffsetDateTime.now());
+        }
+        if (!engine.emitsSynchronousLifecycleObservations()) {
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("correlationId", id);
+            details.put("processDefinitionId", identity.processDefinitionId());
+            details.put("processDefinitionKey", identity.processDefinitionKey());
+            publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(),
+                    EventTypes.PROCESS_STARTED, caseId, c.tenantId(), OffsetDateTime.now(), details));
+            publisher.audit(caseId, c.tenantId(), actor.userId(), "process.start", "LinkedProcess",
+                    id, null, details);
+        }
+        return processes.findByCase(caseId).stream().filter(row -> row.id().equals(id))
+                .findFirst().orElseThrow();
     }
 
     /** Confirms an asynchronous engine start under one transaction boundary. */

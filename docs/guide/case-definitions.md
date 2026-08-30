@@ -217,12 +217,15 @@ Ad-hoc work is deliberately outside the BPMN token flow. Supported types are:
 
 | Type | Required reference | Effect |
 |---|---|---|
-| `TASK` | Optional `formRef` and candidate groups | Creates a projected discretionary task |
-| `PROCESS` | `processDefinitionKey` | Starts a linked discretionary process |
-| `MESSAGE` | `messageName` | Correlates a message through orchestration |
+| `TASK` | Optional `formRef` and candidate groups | Requests a task through the normal engine command and observation path |
+| `PROCESS` | Exact active `orchestrationReleaseId` and `processDefinitionKey` | Requests the pinned discretionary process through the normal command path |
+| `MESSAGE` | `messageName` | Requests message correlation through the normal command path |
 
 Every action needs an ID, type, at least one role, and an availability expression. Execution
-reauthorizes, validates the form, checks optimistic locking, audits, and publishes events.
+reauthorizes, validates the form, checks optimistic locking, audits, and publishes requested,
+confirmed, or failed events. In remote mode an `Idempotency-Key` binds the request to one durable
+operation; no local pending task, plan item, or process projection is written before engine
+evidence arrives.
 
 Example:
 

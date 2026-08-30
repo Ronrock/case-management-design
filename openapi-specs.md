@@ -914,6 +914,40 @@ paths:
         '400': {description: Payload fails form schema validation}
         '412': {$ref: '#/components/responses/PreconditionFailed'}
 
+  /cases/{caseId}/ad-hoc-actions/{actionId}:
+    post:
+      tags: [Cases]
+      summary: Request a declared discretionary BPMN action
+      description: >
+        Resolves the action from the immutable contract pinned to the case. Remote execution
+        returns a durable operation receipt; a task, process, or message is not confirmed until
+        normal engine command and observation evidence arrives.
+      parameters:
+        - {$ref: '#/components/parameters/caseId'}
+        - {$ref: '#/components/parameters/ifMatch'}
+        - {$ref: '#/components/parameters/idempotencyKey'}
+        - name: actionId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        '201':
+          description: Embedded engine confirmation
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AdHocActionOperation'}}
+        '202':
+          description: Durable remote action request; repeat the same Idempotency-Key to retrieve it
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AdHocActionOperation'}}
+        '403': {description: Caller cannot access this case or action}
+        '409': {description: Action is unavailable or case is not active}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+
   # ---------- Processes ----------
   /cases/{caseId}/processes:
     parameters: [{$ref: '#/components/parameters/caseId'}]
@@ -2308,6 +2342,18 @@ components:
         availableActions:
           type: array
           items: {$ref: '#/components/schemas/AvailableAction'}
+
+    AdHocActionOperation:
+      type: object
+      required: [actionId, type, status, engineSync]
+      properties:
+        actionId: {type: string}
+        type: {type: string, enum: [TASK, PROCESS, MESSAGE]}
+        operationId: {type: string, nullable: true}
+        status: {type: string, enum: [PENDING, CONFIRMED, FAILED, RETRYABLE, AWAITING_CONFIRMATION]}
+        engineSync: {type: string, enum: [PENDING, SYNCED, FAILED]}
+        taskId: {type: string, nullable: true}
+        linkedProcessId: {type: string, nullable: true}
 
     LinkedProcess:
       type: object

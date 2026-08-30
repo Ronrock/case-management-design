@@ -324,9 +324,10 @@ public class CaseApiTestConfig {
             CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
             PlanItemRepository planItems, CaseTaskRepository tasks,
             LinkedProcessService linkedProcesses, EngineGateway engine,
-            EventPublisher publisher) {
+            EventPublisher publisher, EngineOperationService operations) {
         return new AdHocActionService(cases, bindings, releases, participants, planItems, tasks,
-                linkedProcesses, engine, new JuelCriterionEvaluator(), publisher);
+                linkedProcesses, engine, new JuelCriterionEvaluator(), publisher, operations,
+                new org.casemgmt.release.JsonSchemaCaseContractValidator(), new org.casemgmt.service.FormValidator());
     }
 
     @Bean

@@ -190,13 +190,17 @@ Contract-declared discretionary work uses:
 ```http
 POST /case-api/v2/cases/{caseId}/ad-hoc-actions/{actionId}
 If-Match: "5"
+Idempotency-Key: request-more-information-42
 Content-Type: application/json
 
 {"aspect":"shipping","finding":"Carrier scan missing"}
 ```
 
-The response identifies the created task, plan item, or linked process. Embedded mode normally
-returns `201` with `CURRENT`; remote engine work can return `202` with `PENDING`.
+The response is an operation receipt. In remote mode it returns `202`, an `operationId`, and a
+`PENDING` status. Repeating the same idempotency key returns the same receipt, even if the first
+response was lost. The engine command and its later observation provide the authoritative
+`CONFIRMED` or `FAILED` outcome; the request does not create a local pending task or plan-item
+projection.
 
 Ad-hoc work stays outside BPMN token flow. Root completion terminalizes any still open.
 

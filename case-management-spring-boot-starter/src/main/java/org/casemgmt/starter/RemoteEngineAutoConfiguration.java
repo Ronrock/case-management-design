@@ -182,9 +182,10 @@ public class RemoteEngineAutoConfiguration {
      */
     @Bean
     public EngineCommandDispatcher engineCommandDispatcher(
-            EngineCommandRepository commands, RemoteEngineGateway delegate) {
+            EngineCommandRepository commands, RemoteEngineGateway delegate,
+            org.casemgmt.event.EventPublisher events) {
         return new EngineCommandDispatcher(commands, delegate,
                 "remote-dispatcher-" + java.util.UUID.randomUUID(),
-                java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(5));
+                java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(5), events);
     }
 }

@@ -17,6 +17,9 @@ public final class EventTypes {
     public static final String DOCUMENT_REMOVED = "case.document.removed";
     public static final String PROCESS_STARTED = "case.process.started";
     public static final String AD_HOC_ACTION_EXECUTED = "case.adhoc.executed";
+    public static final String AD_HOC_ACTION_REQUESTED = "case.adhoc.requested";
+    public static final String AD_HOC_ACTION_CONFIRMED = "case.adhoc.confirmed";
+    public static final String AD_HOC_ACTION_FAILED = "case.adhoc.failed";
     public static final String SLA_STARTED = "case.sla.started";
     public static final String SLA_PAUSED = "case.sla.paused";
     public static final String SLA_RESUMED = "case.sla.resumed";

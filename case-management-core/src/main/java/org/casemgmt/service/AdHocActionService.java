@@ -3,12 +3,13 @@ package org.casemgmt.service;
 import org.casemgmt.domain.*;
 import org.casemgmt.engine.*;
 import org.casemgmt.error.CaseConflictException;
+import org.casemgmt.error.FormValidationException;
 import org.casemgmt.error.InvalidCaseDefinitionException;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
-import org.casemgmt.release.CaseDefinitionRelease;
+import org.casemgmt.release.*;
 import org.casemgmt.repo.*;
 import org.casemgmt.rules.CriterionEvaluator;
 import org.casemgmt.rules.EvaluationContext;
@@ -17,11 +18,11 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.OffsetDateTime;
 import java.util.*;
 
-/** Executes only actions declared by the contract pinned to the running case. */
+/** Executes only closed-schema actions on the immutable release pinned to a live case. */
 public class AdHocActionService {
-
     public record Result(String actionId, String type, String planItemId, String taskId,
-                         String linkedProcessId, CaseTask.EngineSync engineSync) { }
+                         String linkedProcessId, CaseTask.EngineSync engineSync,
+                         String operationId, String status) { }
 
     private final CaseRepository cases;
     private final CaseDefinitionVersionBindingRepository bindings;
@@ -33,178 +34,226 @@ public class AdHocActionService {
     private final EngineGateway engine;
     private final CriterionEvaluator criteria;
     private final EventPublisher publisher;
+    private final EngineOperationService operations;
+    private final CaseContractValidator contracts;
+    private final FormValidator forms;
 
-    public AdHocActionService(CaseRepository cases,
-                              CaseDefinitionVersionBindingRepository bindings,
-                              CaseDefinitionReleaseRepository releases,
-                              ParticipantRepository participants, PlanItemRepository planItems,
-                              CaseTaskRepository tasks, LinkedProcessService processes,
-                              EngineGateway engine, CriterionEvaluator criteria,
-                              EventPublisher publisher) {
-        this.cases = cases;
-        this.bindings = bindings;
-        this.releases = releases;
-        this.participants = participants;
-        this.planItems = planItems;
-        this.tasks = tasks;
-        this.processes = processes;
-        this.engine = engine;
-        this.criteria = criteria;
-        this.publisher = publisher;
+    public AdHocActionService(CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
+                              CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
+                              PlanItemRepository planItems, CaseTaskRepository tasks,
+                              LinkedProcessService processes, EngineGateway engine,
+                              CriterionEvaluator criteria, EventPublisher publisher) {
+        this(cases, bindings, releases, participants, planItems, tasks, processes, engine, criteria,
+                publisher, null, new JsonSchemaCaseContractValidator(), new FormValidator());
+    }
+
+    public AdHocActionService(CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
+                              CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
+                              PlanItemRepository planItems, CaseTaskRepository tasks,
+                              LinkedProcessService processes, EngineGateway engine,
+                              CriterionEvaluator criteria, EventPublisher publisher,
+                              CaseContractValidator contracts, FormValidator forms) {
+        this(cases, bindings, releases, participants, planItems, tasks, processes, engine, criteria,
+                publisher, null, contracts, forms);
+    }
+
+    public AdHocActionService(CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
+                              CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
+                              PlanItemRepository planItems, CaseTaskRepository tasks,
+                              LinkedProcessService processes, EngineGateway engine,
+                              CriterionEvaluator criteria, EventPublisher publisher,
+                              EngineOperationService operations,
+                              CaseContractValidator contracts, FormValidator forms) {
+        this.cases = Objects.requireNonNull(cases); this.bindings = Objects.requireNonNull(bindings);
+        this.releases = Objects.requireNonNull(releases); this.participants = Objects.requireNonNull(participants);
+        this.planItems = Objects.requireNonNull(planItems); this.tasks = Objects.requireNonNull(tasks);
+        this.processes = Objects.requireNonNull(processes); this.engine = Objects.requireNonNull(engine);
+        this.criteria = Objects.requireNonNull(criteria); this.publisher = Objects.requireNonNull(publisher);
+        this.operations = operations;
+        this.contracts = Objects.requireNonNull(contracts); this.forms = Objects.requireNonNull(forms);
     }
 
     @Transactional
     public Result execute(String caseId, String actionId, long expectedVersion,
                           Map<String, Object> input, Actor actor) {
+        return execute(caseId, actionId, expectedVersion, input, actor, null);
+    }
+
+    @Transactional
+    public Result execute(String caseId, String actionId, long expectedVersion,
+                          Map<String, Object> input, Actor actor, String idempotencyKey) {
         CaseInstance c = cases.require(caseId);
-        if (c.version() != expectedVersion) {
-            throw new CaseConflictException("version-conflict",
-                    "Case version is " + c.version() + "; expected " + expectedVersion,
-                    List.of());
-        }
-        Action action = requireAction(c, actionId);
-        authorize(caseId, action, actor);
-        if (action.availabilityExpression != null && !criteria.matches(
-                action.availabilityExpression, context(c))) {
+        if (c.version() != expectedVersion) throw new CaseConflictException("version-conflict",
+                "Case version is " + c.version() + "; expected " + expectedVersion, List.of());
+        if (c.state() != CaseState.ACTIVE) throw new CaseConflictException("case-not-active",
+                "Ad-hoc actions are available only while the case is ACTIVE (was " + c.state() + ")", List.of());
+        ResolvedAction resolved = resolve(c, actionId);
+        var action = resolved.action();
+        authorize(c.id(), action, actor);
+        if (action.availabilityExpression() != null && !criteria.matches(action.availabilityExpression(), context(c))) {
             throw new CaseConflictException("ad-hoc-action-unavailable",
                     "Ad-hoc action '" + actionId + "' is not currently available", List.of());
         }
-        Map<String, Object> variables = input == null ? Map.of()
-                : Collections.unmodifiableMap(new LinkedHashMap<>(input));
-        Result result = switch (action.type) {
-            case "TASK" -> createTask(c, action, variables);
-            case "PROCESS" -> startProcess(c, action, variables, actor);
-            case "MESSAGE" -> correlateMessage(c, action, variables);
-            default -> throw invalid(c.caseDefKey(), "Unsupported ad-hoc action type '"
-                    + action.type + "'");
-        };
+        Map<String, Object> variables = immutableInput(input);
+        validateInput(resolved.contract(), action, variables);
+        if (action instanceof ValidatedCaseContract.MessageAction message) {
+            validateCorrelation(c, message, variables);
+        }
+        Result result = engine.defersTaskMutations()
+                ? requestRemote(c, action, variables, actor, idempotencyKey)
+                : executeEmbedded(c, action, variables);
         OffsetDateTime now = OffsetDateTime.now();
-        publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(),
-                EventTypes.AD_HOC_ACTION_EXECUTED, c.id(), c.tenantId(), now,
-                Map.of("actionId", action.id, "type", action.type,
-                        "planItemId", result.planItemId)));
-        publisher.audit(c.id(), c.tenantId(), actor.userId(), "ad-hoc.execute",
-                "AdHocAction", action.id, null, Map.of("type", action.type,
-                        "planItemId", result.planItemId));
+        if (!engine.defersTaskMutations()) {
+            publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(), EventTypes.AD_HOC_ACTION_CONFIRMED,
+                    c.id(), c.tenantId(), now, Map.of("actionId", action.id(), "type", type(action))));
+            publisher.audit(c.id(), c.tenantId(), actor.userId(), "ad-hoc.confirmed", "AdHocAction", action.id(),
+                    null, Map.of("type", type(action)));
+        }
         return result;
     }
 
-    private Result createTask(CaseInstance c, Action action, Map<String, Object> variables) {
-        String planItemId = insertPlanItem(c, action, PlanItemType.HUMAN_TASK,
-                PlanItemState.ACTIVE);
-        EngineTaskRef engineTask = engine.createHumanTask(new HumanTaskRequest(c.id(), planItemId,
-                action.name, null, action.candidateGroups, action.formRef, variables));
-        CaseTask.EngineSync sync = engineTask.engineTaskId() == null
-                ? CaseTask.EngineSync.PENDING : CaseTask.EngineSync.SYNCED;
-        String taskId = CaseIds.newId();
-        OffsetDateTime now = OffsetDateTime.now();
-        tasks.insert(new CaseTask(taskId, c.id(), planItemId, engineTask.engineTaskId(),
-                action.name, null, TaskState.OPEN, null, null, action.candidateGroups,
-                action.formRef, 50, null, null, sync, 0, now, now, null));
-        if (engineTask.engineTaskId() != null) {
-            planItems.bindEngineTask(planItemId, engineTask.engineTaskId());
+    /**
+     * No discretionary action writes CM_TASK or CM_PLAN_ITEM directly.  Embedded engines emit
+     * their normal lifecycle observations synchronously; remote engines use {@link #requestRemote}.
+     */
+    private Result executeEmbedded(CaseInstance c, ValidatedCaseContract.AdHocActionDefinition action,
+                                   Map<String, Object> variables) {
+        return switch (action) {
+            case ValidatedCaseContract.TaskAction task -> {
+                String target = target(c, task, null);
+                EngineTaskRef engineTask = engine.createHumanTask(new HumanTaskRequest(c.id(), target,
+                        taskName(task), null, task.candidateGroups(), task.formRef(), variables));
+                yield new Result(task.id(), type(task), null, engineTask.engineTaskId(), null,
+                        CaseTask.EngineSync.SYNCED, null, "CONFIRMED");
+            }
+            case ValidatedCaseContract.ProcessAction process -> {
+                CaseDefinitionRelease release = exactRelease(c, process);
+                EngineProcessRef ref = engine.startProcess(new StartProcessRequest(c.id(), null,
+                        release.engineIdentity().processDefinitionId(), process.processDefinitionKey(),
+                        release.engineTenantId(), variables, target(c, process, null)));
+                yield new Result(process.id(), type(process), null, null, ref.processInstanceId(),
+                        CaseTask.EngineSync.SYNCED, null, "CONFIRMED");
+            }
+            case ValidatedCaseContract.MessageAction message -> {
+                engine.correlateMessage(new MessageCorrelationRequest(c.id(), message.messageName(), variables));
+                yield new Result(message.id(), type(message), null, null, null,
+                        CaseTask.EngineSync.SYNCED, null, "CONFIRMED");
+            }
+        };
+    }
+
+    private Result requestRemote(CaseInstance c, ValidatedCaseContract.AdHocActionDefinition action,
+                                 Map<String, Object> variables, Actor actor, String idempotencyKey) {
+        String stableTarget = target(c, action, idempotencyKey);
+        EngineOperationService.Operation operation = switch (action) {
+            case ValidatedCaseContract.TaskAction task -> requiredOperations().submitAdHoc(c, task.id(),
+                    EngineCommand.Type.CREATE_TASK, Map.of("planItemId", stableTarget,
+                            "name", taskName(task), "assignee", "", "candidateGroups", task.candidateGroups(),
+                            "formKey", task.formRef() == null ? "" : task.formRef(), "variables", variables),
+                    stableTarget, c.version(), actor, idempotencyKey);
+            case ValidatedCaseContract.ProcessAction process -> {
+                CaseDefinitionRelease release = exactRelease(c, process);
+                yield requiredOperations().submitAdHoc(c, process.id(), EngineCommand.Type.START_PROCESS,
+                        Map.of("planItemId", "", "selectionType", "ID",
+                                "processDefinitionId", release.engineIdentity().processDefinitionId(),
+                                "processDefinitionKey", process.processDefinitionKey(),
+                                "tenantId", release.engineTenantId(), "variables", variables,
+                                "correlationId", stableTarget),
+                        release.engineIdentity().processDefinitionId(), c.version(), actor, idempotencyKey);
+            }
+            case ValidatedCaseContract.MessageAction message -> requiredOperations().submitAdHoc(c, message.id(),
+                    EngineCommand.Type.CORRELATE_MESSAGE, Map.of("messageName", message.messageName(),
+                            "variables", variables), message.messageName(), c.version(), actor, idempotencyKey);
+        };
+        return new Result(action.id(), type(action), null, null, null, CaseTask.EngineSync.PENDING,
+                operation.id(), operation.status());
+    }
+
+    private CaseDefinitionRelease exactRelease(CaseInstance c, ValidatedCaseContract.ProcessAction action) {
+        if (action.orchestrationReleaseId() == null || action.orchestrationReleaseId().isBlank()) {
+            throw invalid(c.caseDefKey(), "Process action '" + action.id() + "' requires orchestrationReleaseId for exact BPMN selection");
         }
-        return new Result(action.id, action.type, planItemId, taskId, null, sync);
-    }
-
-    private Result startProcess(CaseInstance c, Action action, Map<String, Object> variables,
-                                Actor actor) {
-        if (action.processDefinitionKey == null) {
-            throw invalid(c.caseDefKey(), "Process action '" + action.id
-                    + "' requires processDefinitionKey");
+        CaseDefinitionRelease target = releases.require(action.orchestrationReleaseId(), c.tenantId());
+        if (target.kind() != ReleaseKind.ORCHESTRATION || target.status() != ReleaseStatus.ACTIVE
+                || target.engineIdentity() == null || !action.processDefinitionKey().equals(target.engineProcessDefinitionKey())
+                || !Objects.equals(c.tenantId(), target.engineTenantId())) {
+            throw invalid(c.caseDefKey(), "Process action '" + action.id() + "' does not name an ACTIVE exact BPMN release for '" + action.processDefinitionKey() + "'");
         }
-        String planItemId = insertPlanItem(c, action, PlanItemType.PROCESS_TASK,
-                PlanItemState.ACTIVE);
-        LinkedProcessRepository.LinkedProcessRow process = processes.start(c.id(), planItemId,
-                action.processDefinitionKey, variables, actor);
-        return new Result(action.id, action.type, planItemId, null, process.id(),
-                process.engineSync());
+        return target;
     }
 
-    private Result correlateMessage(CaseInstance c, Action action, Map<String, Object> variables) {
-        if (action.messageName == null) {
-            throw invalid(c.caseDefKey(), "Message action '" + action.id + "' requires messageName");
+    private ResolvedAction resolve(CaseInstance c, String actionId) {
+        CaseDefinitionVersionBinding binding = bindings.find(c.caseDefId()).orElseThrow(() -> invalid(c.caseDefKey(), "BPMN case has no release binding"));
+        CaseDefinitionRelease release = releases.require(binding.contractReleaseId(), c.tenantId());
+        if (!c.caseDefId().equals(binding.caseDefinitionId()) || !c.caseDefKey().equals(binding.caseDefinitionKey())
+                || !Objects.equals(c.tenantId(), binding.tenantId())
+                || (binding.status() != BindingStatus.ACTIVE && binding.status() != BindingStatus.RETIRED)
+                || !binding.contractReleaseId().equals(release.id()) || !binding.contractSha256().equals(release.sha256())
+                || release.kind() != ReleaseKind.CONTRACT || !c.caseDefKey().equals(release.definitionKey())
+                || !Objects.equals(c.tenantId(), release.tenantId())) {
+            throw new IllegalStateException("Published contract release does not match case '" + c.id() + "'");
         }
-        String planItemId = insertPlanItem(c, action, PlanItemType.PROCESS_TASK,
-                PlanItemState.COMPLETED);
-        engine.correlateMessage(new MessageCorrelationRequest(c.id(), action.messageName, variables));
-        return new Result(action.id, action.type, planItemId, null, null,
-                engine instanceof OutboxEngineGateway
-                        ? CaseTask.EngineSync.PENDING : CaseTask.EngineSync.SYNCED);
+        ValidatedCaseContract contract = contracts.validate(c.caseDefKey(), release.content());
+        var action = contract.action(actionId);
+        if (action == null) throw new NotFoundException("AdHocAction", actionId);
+        return new ResolvedAction(contract, action);
     }
 
-    private String insertPlanItem(CaseInstance c, Action action, PlanItemType type,
-                                  PlanItemState state) {
-        String id = CaseIds.newId();
-        OffsetDateTime now = OffsetDateTime.now();
-        planItems.insert(new PlanItem(id, c.id(), "adhoc:" + action.id, type, action.name,
-                state, null, true, 1, null, null, null, 0, now, now,
-                state.isEnded() ? now : null));
-        return id;
-    }
-
-    private void authorize(String caseId, Action action, Actor actor) {
+    private void authorize(String caseId, ValidatedCaseContract.AdHocActionDefinition action, Actor actor) {
         Set<String> held = participants.rolesOf(caseId, actor.userId(), actor.groups());
-        if (action.roles.isEmpty() || Collections.disjoint(held, action.roles)) {
-            throw new org.casemgmt.error.AuthorizationDeniedException(
-                    "Caller may not execute ad-hoc action '" + action.id + "'");
+        if (action.roles().isEmpty() || Collections.disjoint(held, action.roles())) {
+            throw new org.casemgmt.error.AuthorizationDeniedException("Caller may not execute ad-hoc action '" + action.id() + "'");
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private Action requireAction(CaseInstance c, String actionId) {
-        var binding = bindings.find(c.caseDefId())
-                .orElseThrow(() -> invalid(c.caseDefKey(), "BPMN case has no release binding"));
-        CaseDefinitionRelease contract = releases.require(binding.contractReleaseId(), c.tenantId());
-        Map<String, Object> doc = JsonCodec.toMap(new String(contract.content(),
-                java.nio.charset.StandardCharsets.UTF_8));
-        Object raw = doc.get("adHocActions");
-        List<Map<String, Object>> actions;
-        if (raw instanceof List<?> list) {
-            actions = list.stream().filter(Map.class::isInstance)
-                    .map(item -> (Map<String, Object>) item).toList();
-        } else if (raw instanceof Map<?, ?> map) {
-            actions = map.entrySet().stream().filter(entry -> entry.getValue() instanceof Map)
-                    .map(entry -> {
-                        Map<String, Object> value = new LinkedHashMap<>((Map<String, Object>) entry.getValue());
-                        value.putIfAbsent("id", String.valueOf(entry.getKey()));
-                        return value;
-                    }).toList();
-        } else {
-            actions = List.of();
+    private void validateInput(ValidatedCaseContract contract, ValidatedCaseContract.AdHocActionDefinition action,
+                               Map<String, Object> input) {
+        if (action.formRef() == null) {
+            if (!input.isEmpty()) throw invalidInput("Action has no declared form; submitted fields are not allowed");
+            return;
         }
-        return actions.stream().map(Action::from).filter(action -> action.id.equals(actionId))
-                .findFirst().orElseThrow(() -> new NotFoundException("AdHocAction", actionId));
+        var form = contract.forms().get(action.formRef());
+        if (form == null) throw invalid(contract.key(), "Ad-hoc action '" + action.id() + "' references unknown form '" + action.formRef() + "'");
+        Object declared = form.schema().get("properties");
+        if (declared instanceof Map<?, ?> properties) {
+            for (String key : input.keySet()) if (!properties.containsKey(key)) throw invalidInput("Undeclared action field '" + key + "'");
+        } else if (!input.isEmpty()) throw invalidInput("Action form declares no fields");
+        forms.validate(form.schema(), input);
     }
 
-    private EvaluationContext context(CaseInstance c) {
-        return new EvaluationContext(Map.of("id", c.id(), "state", c.state().name(),
-                "priority", c.priority().name()), c.variables(), Map.of());
+    private void validateCorrelation(CaseInstance c, ValidatedCaseContract.MessageAction action, Map<String, Object> input) {
+        for (String key : action.correlationKeys()) if (!c.variables().containsKey(key) || !input.containsKey(key)
+                || !Objects.equals(c.variables().get(key), input.get(key))) throw new CaseConflictException("message-correlation-mismatch",
+                "Message action '" + action.id() + "' does not match required correlation '" + key + "'", List.of());
     }
 
-    private static InvalidCaseDefinitionException invalid(String key, String message) {
-        return new InvalidCaseDefinitionException(key, message);
+    private EngineOperationService requiredOperations() {
+        if (operations == null) throw new IllegalStateException(
+                "Remote ad-hoc actions require an EngineOperationService");
+        return operations;
     }
 
-    private record Action(String id, String type, String name, List<String> roles,
-                          String formRef, List<String> candidateGroups,
-                          String processDefinitionKey, String messageName,
-                          String availabilityExpression) {
-        static Action from(Map<String, Object> value) {
-            String id = String.valueOf(value.get("id"));
-            return new Action(id, String.valueOf(value.get("type")).toUpperCase(Locale.ROOT),
-                    String.valueOf(value.getOrDefault("name", id)), strings(value.get("roles")),
-                    text(value.getOrDefault("formRef", value.get("formKey"))),
-                    strings(value.get("candidateGroups")), text(value.get("processDefinitionKey")),
-                    text(value.get("messageName")), text(value.get("availabilityExpression")));
-        }
-
-        private static List<String> strings(Object raw) {
-            return raw instanceof List<?> list ? list.stream().map(String::valueOf).toList() : List.of();
-        }
-
-        private static String text(Object raw) {
-            return raw == null || raw.toString().isBlank() ? null : raw.toString();
-        }
+    private static String target(CaseInstance c, ValidatedCaseContract.AdHocActionDefinition action,
+                                 String idempotencyKey) {
+        String stableKey = idempotencyKey == null || idempotencyKey.isBlank()
+                ? "adhoc:" + c.id() + ":" + action.id() + ":" + c.version() : idempotencyKey;
+        return "adhoc:" + action.id() + ":" + java.util.UUID.nameUUIDFromBytes(
+                (c.id() + ":" + stableKey).getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
+
+    private static String taskName(ValidatedCaseContract.TaskAction task) {
+        return task.name() == null || task.name().isBlank() ? task.id() : task.name();
+    }
+
+    private EvaluationContext context(CaseInstance c) { return new EvaluationContext(Map.of("id", c.id(),
+            "state", c.state().name(), "priority", c.priority().name()), c.variables(), Map.of()); }
+    private static Map<String, Object> immutableInput(Map<String, Object> input) { return input == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(input)); }
+    private static InvalidCaseDefinitionException invalid(String key, String message) { return new InvalidCaseDefinitionException(key, message); }
+    private static FormValidationException invalidInput(String message) { return new FormValidationException(List.of(new FormValidationException.Violation("", message))); }
+    private static String type(ValidatedCaseContract.AdHocActionDefinition action) { return switch (action) {
+        case ValidatedCaseContract.TaskAction ignored -> "TASK";
+        case ValidatedCaseContract.ProcessAction ignored -> "PROCESS";
+        case ValidatedCaseContract.MessageAction ignored -> "MESSAGE";
+    }; }
+    private record ResolvedAction(ValidatedCaseContract contract, ValidatedCaseContract.AdHocActionDefinition action) { }
 }

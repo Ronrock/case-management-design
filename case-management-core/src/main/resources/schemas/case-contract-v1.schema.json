@@ -202,7 +202,7 @@
     },
 
     "processAction": {
-      "required": ["processDefinitionKey"],
+      "required": ["processDefinitionKey", "orchestrationReleaseId"],
       "additionalProperties": false,
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
