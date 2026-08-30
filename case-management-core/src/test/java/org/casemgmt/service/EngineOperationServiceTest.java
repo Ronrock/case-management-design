@@ -5,6 +5,9 @@ import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
 import org.casemgmt.domain.CaseTask;
+import org.casemgmt.domain.PlanItem;
+import org.casemgmt.domain.PlanItemState;
+import org.casemgmt.domain.PlanItemType;
 import org.casemgmt.domain.TaskState;
 import org.casemgmt.engine.EngineCommandStatus;
 import org.casemgmt.event.EventPublisher;
@@ -23,6 +26,7 @@ import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.EngineCommandRepository;
 import org.casemgmt.repo.EventRepository;
+import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.repo.WebhookRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -42,11 +46,13 @@ class EngineOperationServiceTest extends OracleTestBase {
     void remoteClaimPersistsCanonicalIntentWithoutMutatingTheConfirmedTask() {
         JdbcClient jdbc = jdbc();
         CaseRepository cases = new CaseRepository(jdbc);
+        PlanItemRepository planItems = new PlanItemRepository(jdbc);
         CaseTaskRepository tasks = new CaseTaskRepository(jdbc);
         CaseInstance instance = instance();
         CaseTask task = task();
         seedBoundDefinition(jdbc);
         cases.insert(instance);
+        planItems.insert(planItem());
         tasks.insert(task);
         EngineCommandRepository commands = new EngineCommandRepository(dataSource());
         EventPublisher events = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
@@ -123,5 +129,12 @@ class EngineOperationServiceTest extends OracleTestBase {
         return new CaseTask("task-1", "case-1", "item-1", "engine-task-1", "Review",
                 null, TaskState.OPEN, null, null, List.of("handlers"), null, 50, null, null,
                 CaseTask.EngineSync.SYNCED, 7L, now, now, null);
+    }
+
+    private static PlanItem planItem() {
+        OffsetDateTime now = OffsetDateTime.parse("2026-08-30T10:00:00Z");
+        return new PlanItem("item-1", "case-1", "review", PlanItemType.HUMAN_TASK,
+                "Review", PlanItemState.ACTIVE, null, false, 1, "engine-task-1", null,
+                null, 0L, now, now, null);
     }
 }

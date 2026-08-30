@@ -5,6 +5,9 @@ import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
 import org.casemgmt.domain.CaseTask;
+import org.casemgmt.domain.PlanItem;
+import org.casemgmt.domain.PlanItemState;
+import org.casemgmt.domain.PlanItemType;
 import org.casemgmt.domain.TaskState;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.event.EventPublisher;
@@ -14,6 +17,7 @@ import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.EngineCommandRepository;
 import org.casemgmt.repo.EventRepository;
+import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.repo.WebhookRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -108,6 +112,9 @@ class CaseTaskOperationConcurrencyTest extends OracleTestBase {
         context.getBean(CaseRepository.class).insert(new CaseInstance("case-1", "engine-a", "tenant-a",
                 "tenant-a:definition:1", "definition", 1, null, "Example", CaseState.ACTIVE,
                 CasePriority.MEDIUM, null, null, "alice", "NONE", null, null, Map.of(), 0L, now, now, null));
+        context.getBean(PlanItemRepository.class).insert(new PlanItem("item-1", "case-1", "review",
+                PlanItemType.HUMAN_TASK, "Review", PlanItemState.ACTIVE, null, false, 1,
+                "engine-task-1", null, null, 0L, now, now, null));
         context.getBean(CaseTaskRepository.class).insert(new CaseTask("task-1", "case-1", "item-1",
                 "engine-task-1", "Review", null, TaskState.OPEN, null, null, List.of("handlers"),
                 null, 50, null, null, CaseTask.EngineSync.SYNCED, 0L, now, now, null));
@@ -118,6 +125,7 @@ class CaseTaskOperationConcurrencyTest extends OracleTestBase {
         @Bean JdbcClient jdbcClient(DataSource dataSource) { return JdbcClient.create(dataSource); }
         @Bean CaseRepository cases(DataSource dataSource) { return new CaseRepository(dataSource); }
         @Bean CaseTaskRepository tasks(JdbcClient jdbc) { return new CaseTaskRepository(jdbc); }
+        @Bean PlanItemRepository planItems(JdbcClient jdbc) { return new PlanItemRepository(jdbc); }
         @Bean CaseDefinitionRepository definitions(DataSource dataSource) { return new CaseDefinitionRepository(dataSource); }
         @Bean EngineCommandRepository commands(DataSource dataSource) { return new EngineCommandRepository(dataSource); }
         @Bean EventPublisher events(JdbcClient jdbc) {

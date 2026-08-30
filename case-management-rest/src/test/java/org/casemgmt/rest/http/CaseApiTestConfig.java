@@ -40,6 +40,9 @@ import org.casemgmt.projection.RemotePollingCheckpointRepository;
 import org.casemgmt.orchestration.BpmnOrchestration;
 import org.casemgmt.orchestration.CaseOrchestration;
 import org.casemgmt.orchestration.CaseOrchestrationRegistry;
+import org.casemgmt.orchestration.EngineDeploymentIdentity;
+import org.casemgmt.orchestration.OrchestrationDeploymentPort;
+import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.service.CaseDefinitionService;
 import org.casemgmt.service.CaseDefinitionReleaseService;
 import org.casemgmt.service.CaseDefinitionVersionService;
@@ -288,9 +291,17 @@ public class CaseApiTestConfig {
     }
 
     @Bean
+    public OrchestrationDeploymentPort orchestrationDeployments() {
+        return (releaseId, definitionKey, tenantId, content, mediaType) ->
+                new OrchestrationDeploymentPort.DeploymentResult(ReleaseStatus.ACTIVE,
+                        new EngineDeploymentIdentity("test-deployment-" + releaseId,
+                                definitionKey + ":1:exact", definitionKey, 1, tenantId), null);
+    }
+
+    @Bean
     public CaseDefinitionReleaseService caseDefinitionReleaseService(
-            CaseDefinitionReleaseRepository repo) {
-        return new CaseDefinitionReleaseService(repo);
+            CaseDefinitionReleaseRepository repo, OrchestrationDeploymentPort orchestrationDeployments) {
+        return new CaseDefinitionReleaseService(repo, orchestrationDeployments);
     }
 
     @Bean
