@@ -33,7 +33,13 @@ public class SlaRepository {
                                      String calendarId, int calendarRevision,
                                      String meetAnchor, String cancelAnchor,
                                      OffsetDateTime startedAt, OffsetDateTime dueAt,
-                                     OffsetDateTime warnAt, String transitionEvidence) { }
+                                     OffsetDateTime warnAt, String calendarDefinition,
+                                     List<String> pauseAnchors, List<String> resumeAnchors,
+                                     String transitionEvidence) { }
+
+    /** Contract snapshot plus mutable runtime clock state, read only inside the case lock. */
+    public record ContractLifecycleRow(SlaRecord record, String calendarDefinition,
+                                       List<String> pauseAnchors, List<String> resumeAnchors) { }
 
     private static final String RECORD_COLUMNS = """
             ID_, CASE_ID_, TARGET_ID_, STATUS_, STARTED_AT_, DUE_AT_, WARN_AT_, PAUSED_AT_,
@@ -169,12 +175,13 @@ public class SlaRepository {
                       (ID_, CASE_ID_, TARGET_ID_, STATUS_, STARTED_AT_, DUE_AT_, WARN_AT_,
                        PAUSED_TOTAL_SECS_, VERSION_, CONTRACT_RELEASE_ID_, CONTRACT_SHA256_,
                        TARGET_KEY_, TARGET_VERSION_, SLA_SCOPE_, OCCURRENCE_KEY_, CALENDAR_ID_,
-                       CALENDAR_REVISION_, MEET_ANCHOR_, CANCEL_ANCHOR_, TRANSITION_EVIDENCE_JSON_)
+                       CALENDAR_REVISION_, MEET_ANCHOR_, CANCEL_ANCHOR_, CALENDAR_DEFINITION_JSON_,
+                       PAUSE_ANCHORS_JSON_, RESUME_ANCHORS_JSON_, TRANSITION_EVIDENCE_JSON_)
                     VALUES
                       (:id, :caseId, :targetId, 'RUNNING', :startedAt, :dueAt, :warnAt,
                        0, 0, :releaseId, :sha256, :targetKey, :targetVersion, :scope,
                        :occurrenceKey, :calendarId, :calendarRevision, :meetAnchor,
-                       :cancelAnchor, :evidence)""")
+                       :cancelAnchor, :calendarDefinition, :pauseAnchors, :resumeAnchors, :evidence)""")
                     .param("id", occurrence.id()).param("caseId", occurrence.caseId())
                     .param("targetId", occurrence.targetId()).param("startedAt", occurrence.startedAt())
                     .param("dueAt", occurrence.dueAt()).param("warnAt", occurrence.warnAt())
@@ -183,6 +190,9 @@ public class SlaRepository {
                     .param("scope", occurrence.scope()).param("occurrenceKey", occurrence.occurrenceKey())
                     .param("calendarId", occurrence.calendarId()).param("calendarRevision", occurrence.calendarRevision())
                     .param("meetAnchor", occurrence.meetAnchor()).param("cancelAnchor", occurrence.cancelAnchor())
+                    .param("calendarDefinition", occurrence.calendarDefinition())
+                    .param("pauseAnchors", JsonCodec.toJson(occurrence.pauseAnchors()))
+                    .param("resumeAnchors", JsonCodec.toJson(occurrence.resumeAnchors()))
                     .param("evidence", occurrence.transitionEvidence()).update();
             return true;
         } catch (DuplicateKeyException duplicate) {
@@ -285,6 +295,52 @@ public class SlaRepository {
             if (changed == 1) result.add(require(candidate.id()));
         }
         return List.copyOf(result);
+    }
+
+    public List<ContractLifecycleRow> contractLifecycleRows(String caseId, String releaseId,
+                                                             String targetKey) {
+        return jdbc.sql("SELECT " + RECORD_COLUMNS + ", CALENDAR_DEFINITION_JSON_, "
+                        + "PAUSE_ANCHORS_JSON_, RESUME_ANCHORS_JSON_ FROM CM_SLA_RECORD "
+                        + "WHERE CASE_ID_ = :caseId AND CONTRACT_RELEASE_ID_ = :releaseId "
+                        + "AND TARGET_KEY_ = :targetKey ORDER BY ID_")
+                .param("caseId", caseId).param("releaseId", releaseId).param("targetKey", targetKey)
+                .query((rs, n) -> new ContractLifecycleRow(mapRecord(rs, n),
+                        rs.getString("CALENDAR_DEFINITION_JSON_"),
+                        JsonCodec.toList(rs.getString("PAUSE_ANCHORS_JSON_")),
+                        JsonCodec.toList(rs.getString("RESUME_ANCHORS_JSON_"))))
+                .list();
+    }
+
+    public java.util.Optional<SlaRecord> pauseContractOccurrence(ContractLifecycleRow row,
+                                                                   String anchor,
+                                                                   OffsetDateTime occurredAt) {
+        SlaRecord record = row.record();
+        int changed = jdbc.sql("""
+                UPDATE CM_SLA_RECORD SET STATUS_ = 'PAUSED', PAUSED_AT_ = :occurredAt,
+                    PAUSED_REASON_ = :anchor, CLAIM_TOKEN_ = NULL, CLAIMED_AT_ = NULL,
+                    TRANSITION_EVIDENCE_JSON_ = :evidence, VERSION_ = VERSION_ + 1
+                WHERE ID_ = :id AND STATUS_ = 'RUNNING'""")
+                .param("id", record.id()).param("occurredAt", occurredAt).param("anchor", anchor)
+                .param("evidence", evidence("PAUSED", anchor, occurredAt)).update();
+        return changed == 0 ? java.util.Optional.empty() : java.util.Optional.of(require(record.id()));
+    }
+
+    public java.util.Optional<SlaRecord> resumeContractOccurrence(ContractLifecycleRow row,
+                                                                    String anchor,
+                                                                    OffsetDateTime occurredAt,
+                                                                    OffsetDateTime dueAt,
+                                                                    OffsetDateTime warnAt,
+                                                                    long pausedSeconds) {
+        SlaRecord record = row.record();
+        int changed = jdbc.sql("""
+                UPDATE CM_SLA_RECORD SET STATUS_ = 'RUNNING', DUE_AT_ = :dueAt, WARN_AT_ = :warnAt,
+                    PAUSED_AT_ = NULL, PAUSED_REASON_ = NULL, PAUSED_TOTAL_SECS_ = :pausedSeconds,
+                    TRANSITION_EVIDENCE_JSON_ = :evidence, VERSION_ = VERSION_ + 1
+                WHERE ID_ = :id AND STATUS_ = 'PAUSED'""")
+                .param("id", record.id()).param("dueAt", dueAt).param("warnAt", warnAt)
+                .param("pausedSeconds", pausedSeconds)
+                .param("evidence", evidence("RESUMED", anchor, occurredAt)).update();
+        return changed == 0 ? java.util.Optional.empty() : java.util.Optional.of(require(record.id()));
     }
 
     public SlaRecord require(String id) {
@@ -453,6 +509,11 @@ public class SlaRepository {
     }
 
     private record ContractTerminalCandidate(String id, String meetAnchor, String cancelAnchor) { }
+
+    private static String evidence(String transition, String anchor, OffsetDateTime occurredAt) {
+        return JsonCodec.toJson(Map.of("transition", transition, "anchor", anchor,
+                "occurredAt", occurredAt.toInstant().toString()));
+    }
 
     private static SlaRecord mapRecord(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
         return new SlaRecord(rs.getString("ID_"), rs.getString("CASE_ID_"), rs.getString("TARGET_ID_"),

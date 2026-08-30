@@ -119,7 +119,7 @@
     },
 
     "slaBinding": {
-      "description": "One SLA target, keyed by the id a BPMN casemgmt:slaTargetId attribute resolves against. Runtime clock behaviour is out of scope here; this fixes the published shape so a target cannot be half-specified.",
+      "description": "One executable SLA target, keyed by the id a BPMN casemgmt:slaTargetId attribute resolves against. Publication fixes the start, pause, resume and root-outcome rules that a runtime occurrence snapshots.",
       "type": "object",
       "required": ["scope", "calendarId", "startAnchor", "meetAnchor"],
       "additionalProperties": false,
@@ -141,7 +141,7 @@
         "cancelAnchor": { "$ref": "#/$defs/anchor" },
         "pauseAnchors": { "type": "array", "items": { "$ref": "#/$defs/anchor" } },
         "resumeAnchors": { "type": "array", "items": { "$ref": "#/$defs/anchor" } },
-        "warnings": { "type": "array", "items": { "$ref": "#/$defs/duration" } },
+        "warnings": { "type": "array", "maxItems": 1, "items": { "$ref": "#/$defs/duration" } },
         "breachActions": { "$ref": "#/$defs/nameList" },
         "messageName": { "type": "string", "minLength": 1, "maxLength": 200 },
         "extensions": { "type": "object" }

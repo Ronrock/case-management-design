@@ -124,6 +124,17 @@ class JsonSchemaCaseContractValidatorTest {
     }
 
     @Test
+    void rejectsMultipleWarningThresholdsUntilTheyHaveDistinctRuntimeSemantics() {
+        assertThatThrownBy(() -> validate("""
+                {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{"resolution":{"scope":"CASE","calendarId":"business",
+                 "duration":"PT1H","startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED",
+                 "warnings":["PT15M","PT30M"]}}}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/slaBindings/resolution/warnings");
+    }
+
+    @Test
     void discriminatesEachAdHocActionVariantIntoItsOwnType() {
         ValidatedCaseContract contract = validate(fullBpmnContract());
 

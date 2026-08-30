@@ -236,6 +236,53 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                 .param("caseId", CASE_ID).query(Integer.class).single()).isEqualTo(1);
     }
 
+    @Test
+    void commonObservationTransactionExecutesPublishedSlaStartPauseAndResumeRules() {
+        SlaLifecyclePort contractLifecycle = new SlaLifecycleService(new SlaRepository(jdbc()),
+                new CaseRepository(dataSource()), new EventPublisher(new EventRepository(jdbc()),
+                new AuditRepository(jdbc()), new WebhookRepository(jdbc()), "org.example.cm", ENGINE_ID),
+                new CaseDefinitionVersionBindingRepository(dataSource()),
+                new CaseDefinitionReleaseRepository(dataSource()), new JsonSchemaCaseContractValidator());
+        DefaultEngineObservationHandler contractHandler = new DefaultEngineObservationHandler(
+                new AppliedObservationRepository(jdbc()), new CaseRepository(dataSource()),
+                new LinkedProcessRepository(jdbc()), context.getBean(CaseProjectionPort.class),
+                context.getBean(CaseDataMappingService.class), new EventPublisher(new EventRepository(jdbc()),
+                new AuditRepository(jdbc()), new WebhookRepository(jdbc()), "org.example.cm", ENGINE_ID),
+                contractLifecycle, context.getBean(EngineObservationAuthorityValidator.class),
+                ObservationSecurityTelemetry.none());
+        TransactionTemplate transaction = new TransactionTemplate(
+                context.getBean(PlatformTransactionManager.class));
+
+        transaction.executeWithoutResult(status -> contractHandler.apply(processObservation(
+                "sla-start", 1L, ProcessObservation.EventType.STARTED,
+                Instant.parse("2026-08-30T10:00:00Z"))));
+        transaction.executeWithoutResult(status -> contractHandler.apply(processObservation(
+                "sla-pause", 2L, ProcessObservation.EventType.SUSPENDED,
+                Instant.parse("2026-08-30T10:10:00Z"))));
+        transaction.executeWithoutResult(status -> contractHandler.apply(processObservation(
+                "sla-resume", 3L, ProcessObservation.EventType.RESUMED,
+                Instant.parse("2026-08-30T10:20:00Z"))));
+
+        assertThat(jdbc().sql("""
+                SELECT STATUS_, DUE_AT_, WARN_AT_, PAUSED_TOTAL_SECS_, TRANSITION_EVIDENCE_JSON_
+                FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-1'""")
+                .query((rs, row) -> List.of(rs.getString(1), rs.getObject(2, OffsetDateTime.class),
+                        rs.getObject(3, OffsetDateTime.class), rs.getLong(4), rs.getString(5))).single())
+                .satisfies(row -> {
+                    assertThat(row.get(0)).isEqualTo("RUNNING");
+                    assertThat(row.get(1)).isEqualTo(OffsetDateTime.parse("2026-08-30T11:10:00Z"));
+                    assertThat(row.get(2)).isEqualTo(OffsetDateTime.parse("2026-08-30T10:40:00Z"));
+                    assertThat(row.get(3)).isEqualTo(600L);
+                    assertThat(String.valueOf(row.get(4))).contains("PROCESS_RESUMED");
+                });
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.started'")
+                .query(Integer.class).single()).isEqualTo(1);
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.paused'")
+                .query(Integer.class).single()).isEqualTo(1);
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.resumed'")
+                .query(Integer.class).single()).isEqualTo(1);
+    }
+
     private void seedPublishedBpmnCase() {
         OffsetDateTime now = OffsetDateTime.ofInstant(OCCURRED.minusSeconds(60), ZoneOffset.UTC);
         JdbcClient jdbc = jdbc();
@@ -268,7 +315,7 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                         now, now, null, "publisher"));
 
         SlaRepository sla = new SlaRepository(jdbc);
-        sla.insertCalendar("calendar-1", Map.of());
+        sla.insertCalendar("calendar-1", alwaysOpenCalendar());
         sla.insertPolicy("policy-1", "Policy", null, "calendar-1");
         sla.insertTarget("target-1", "policy-1", "taskAnchor", "Task anchor",
                 "PT1H", null, List.of(), List.of());
@@ -348,6 +395,16 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
         return new ProcessObservation("observation-root", 1, "operaton:embedded", ENGINE_ID,
                 TENANT_ID, CASE_ID, PROCESS_INSTANCE_ID, PROCESS_INSTANCE_ID, 9L,
                 ProcessObservation.EventType.COMPLETED, OCCURRED, RECEIVED, Map.of(
+                "processDefinitionId", PROCESS_DEFINITION_ID,
+                "processDefinitionKey", PROCESS_DEFINITION_KEY));
+    }
+
+    private ProcessObservation processObservation(String observationId, long revision,
+                                                   ProcessObservation.EventType type,
+                                                   Instant occurredAt) {
+        return new ProcessObservation(observationId, 1, "operaton:embedded", ENGINE_ID,
+                TENANT_ID, CASE_ID, PROCESS_INSTANCE_ID, PROCESS_INSTANCE_ID, revision, type,
+                occurredAt, occurredAt.plusSeconds(5), Map.of(
                 "processDefinitionId", PROCESS_DEFINITION_ID,
                 "processDefinitionKey", PROCESS_DEFINITION_KEY));
     }
@@ -515,9 +572,24 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                   "mappings":[
                     {"direction":"ENGINE_TO_CASE","source":"decisionVar",
                      "target":"decision","type":"string","required":true}
-                  ]
+                  ],
+                  "slaBindings":{
+                    "resolution":{"scope":"CASE","calendarId":"calendar-1",
+                    "calendarRevision":1,"duration":"PT1H","startAnchor":"CASE_CREATED",
+                    "meetAnchor":"CASE_CLOSED","cancelAnchor":"CASE_CANCELLED",
+                    "pauseAnchors":["PROCESS_SUSPENDED"],
+                    "resumeAnchors":["PROCESS_RESUMED"],"warnings":["PT30M"]}
+                  }
                 }
                 """;
+    }
+
+    private static Map<String, Object> alwaysOpenCalendar() {
+        List<Map<String, String>> wholeDay = List.of(Map.of("from", "00:00", "to", "23:59"));
+        return Map.of("timezone", "UTC", "workingHours", Map.of(
+                "MONDAY", wholeDay, "TUESDAY", wholeDay, "WEDNESDAY", wholeDay,
+                "THURSDAY", wholeDay, "FRIDAY", wholeDay, "SATURDAY", wholeDay,
+                "SUNDAY", wholeDay));
     }
 
     private static String sha(char value) {

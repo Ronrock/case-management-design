@@ -7,6 +7,25 @@
   <!-- A cancellation is a terminal SLA fact in its own right.  Keep it separate from MET_AT_
        so support/audit can distinguish a commitment achieved by the case from one stopped when
        the case itself was cancelled. -->
+  <!-- An older database may already carry this column.  Presence alone is not compatibility:
+       accepting a VARCHAR2/DATE shadow column would make root terminalisation appear to work
+       until the first write.  This guard deliberately permits only absence (fresh install) or
+       the exact Oracle timestamp-with-zone representation. -->
+  <changeSet id="cm-sla-root-terminalization-column-shape-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+      onFailMessage="CM_SLA_RECORD.CANCELLED_AT_ must be TIMESTAMP WITH TIME ZONE; migration stopped without changing the existing column.">
+      <or>
+        <not><columnExists tableName="CM_SLA_RECORD" columnName="CANCELLED_AT_"/></not>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT COUNT(*) FROM USER_TAB_COLUMNS
+          WHERE TABLE_NAME = 'CM_SLA_RECORD' AND COLUMN_NAME = 'CANCELLED_AT_'
+            AND DATA_TYPE LIKE 'TIMESTAMP%WITH TIME ZONE'
+        ]]></sqlCheck>
+      </or>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+
   <changeSet id="cm-sla-root-terminalization-column" author="casemgmt">
     <preConditions onFail="MARK_RAN">
       <not><columnExists tableName="CM_SLA_RECORD" columnName="CANCELLED_AT_"/></not>
@@ -54,5 +73,13 @@
          id and null snapshots.  The function-based index applies uniqueness only once a row is
          contract-derived, preserving pre-existing policy clocks. -->
     <sql>CREATE UNIQUE INDEX UQ_CM_SLAR_OCCURRENCE ON CM_SLA_RECORD (CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN CASE_ID_ END, CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN CONTRACT_RELEASE_ID_ END, CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN TARGET_KEY_ END, CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN OCCURRENCE_KEY_ END)</sql>
+  </changeSet>
+
+  <changeSet id="cm-sla-contract-occurrence-transitions" author="casemgmt">
+    <addColumn tableName="CM_SLA_RECORD">
+      <column name="CALENDAR_DEFINITION_JSON_" type="CLOB"/>
+      <column name="PAUSE_ANCHORS_JSON_" type="CLOB"/>
+      <column name="RESUME_ANCHORS_JSON_" type="CLOB"/>
+    </addColumn>
   </changeSet>
 </databaseChangeLog>

@@ -15,9 +15,10 @@ import org.casemgmt.release.CaseContractValidator;
 import org.casemgmt.release.ValidatedCaseContract;
 
 import java.time.Instant;
+import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -64,8 +65,10 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
         BoundSlaContractResolver.ResolvedContract bound = contracts.resolve(instance);
         String observedAnchor = anchorName(anchor);
         for (ValidatedCaseContract.SlaBindingDefinition binding : bound.contract().slaBindings()) {
-            if (!observedAnchor.equals(binding.startAnchor())) continue;
-            createOccurrence(instance, bound, binding, anchor, observedAnchor);
+            if (observedAnchor.equals(binding.startAnchor())) {
+                createOccurrence(instance, bound, binding, anchor, observedAnchor);
+            }
+            applyAnchorTransition(instance, bound, binding, observedAnchor, anchor.occurredAt());
         }
     }
 
@@ -111,11 +114,14 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
             throw new IllegalStateException("SLA binding '" + binding.id() + "' references missing calendar '"
                     + binding.calendarId() + "'");
         }
+        Map<String, Object> calendarDefinition = sla.calendarDefinition(binding.calendarId());
+        BusinessCalendar calendar = BusinessCalendar.fromJson("SLA calendar '" + binding.calendarId()
+                + "' revision " + binding.calendarRevision(), calendarDefinition);
         OffsetDateTime startedAt = OffsetDateTime.ofInstant(anchor.occurredAt(), ZoneOffset.UTC);
         Duration duration = Duration.parse(binding.duration());
-        OffsetDateTime dueAt = startedAt.plus(duration);
+        OffsetDateTime dueAt = calendar.addDuration(startedAt, duration);
         OffsetDateTime warnAt = binding.warnings().isEmpty() ? null
-                : startedAt.plus(Duration.parse(binding.warnings().getFirst()));
+                : calendar.addDuration(startedAt, Duration.parse(binding.warnings().getFirst()));
         String occurrenceKey = occurrenceKey(binding, anchor);
         String hash = JsonCodec.sha256(bound.releaseId() + "|" + binding.id());
         String policyId = "cp-" + hash.substring(0, 40);
@@ -125,13 +131,63 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
                 binding.breachActions());
         String occurrenceHash = JsonCodec.sha256(instance.id() + "|" + bound.releaseId() + "|"
                 + binding.id() + "|" + occurrenceKey);
-        sla.insertContractOccurrenceIfAbsent(new SlaRepository.ContractOccurrence(
-                "so-" + occurrenceHash.substring(0, 40), instance.id(), targetId, binding.id(),
+        String occurrenceId = "so-" + occurrenceHash.substring(0, 40);
+        boolean inserted = sla.insertContractOccurrenceIfAbsent(new SlaRepository.ContractOccurrence(
+                occurrenceId, instance.id(), targetId, binding.id(),
                 binding.targetVersion(), binding.scope().name(), occurrenceKey, bound.releaseId(),
                 bound.sha256(), binding.calendarId(), binding.calendarRevision(), binding.meetAnchor(),
                 binding.cancelAnchor(), startedAt, dueAt, warnAt,
+                JsonCodec.toJson(calendarDefinition), binding.pauseAnchors(), binding.resumeAnchors(),
                 JsonCodec.toJson(Map.of("anchor", observedAnchor, "occurredAt",
                         anchor.occurredAt().toString(), "transition", "STARTED"))));
+        if (inserted) {
+            Map<String, Object> data = Map.of("slaId", occurrenceId, "targetId", targetId,
+                    "targetKey", binding.id(), "dueAt", dueAt.toString(),
+                    "calendarRevision", binding.calendarRevision());
+            events.publish(new CaseEvent(CaseIds.newId(), events.engineId(), EventTypes.SLA_STARTED,
+                    instance.id(), instance.tenantId(), startedAt, data));
+            events.audit(instance.id(), instance.tenantId(), "engine", "sla.start", "SlaRecord",
+                    occurrenceId, null, data);
+        }
+    }
+
+    private void applyAnchorTransition(CaseInstance instance,
+                                       BoundSlaContractResolver.ResolvedContract bound,
+                                       ValidatedCaseContract.SlaBindingDefinition binding,
+                                       String observedAnchor, Instant occurredAt) {
+        OffsetDateTime at = OffsetDateTime.ofInstant(occurredAt, ZoneOffset.UTC);
+        for (SlaRepository.ContractLifecycleRow row : sla.contractLifecycleRows(instance.id(),
+                bound.releaseId(), binding.id())) {
+            if (row.pauseAnchors().contains(observedAnchor)) {
+                sla.pauseContractOccurrence(row, observedAnchor, at)
+                        .ifPresent(record -> emitTransition(instance, record, EventTypes.SLA_PAUSED,
+                                "sla.pause", observedAnchor, at));
+            }
+            if (row.resumeAnchors().contains(observedAnchor) && "PAUSED".equals(row.record().status())) {
+                BusinessCalendar calendar = BusinessCalendar.fromJson("SLA occurrence "
+                        + row.record().id() + " calendar snapshot", JsonCodec.toMap(row.calendarDefinition()));
+                OffsetDateTime pausedAt = row.record().pausedAt();
+                OffsetDateTime dueAt = calendar.addDuration(at,
+                        calendar.workingDurationBetween(pausedAt, row.record().dueAt()));
+                OffsetDateTime warnAt = row.record().warnAt() == null ? null : calendar.addDuration(at,
+                        calendar.workingDurationBetween(pausedAt, row.record().warnAt()));
+                long pausedSeconds = Math.max(0, Duration.between(pausedAt, at).toSeconds());
+                sla.resumeContractOccurrence(row, observedAnchor, at, dueAt, warnAt,
+                        row.record().pausedTotalSeconds() + pausedSeconds)
+                        .ifPresent(record -> emitTransition(instance, record, EventTypes.SLA_RESUMED,
+                                "sla.resume", observedAnchor, at));
+            }
+        }
+    }
+
+    private void emitTransition(CaseInstance instance, SlaRecord record, String eventType,
+                                String auditAction, String anchor, OffsetDateTime occurredAt) {
+        Map<String, Object> data = Map.of("slaId", record.id(), "targetId", record.targetId(),
+                "anchor", anchor, "status", record.status(), "dueAt", String.valueOf(record.dueAt()));
+        events.publish(new CaseEvent(CaseIds.newId(), events.engineId(), eventType, instance.id(),
+                instance.tenantId(), occurredAt, data));
+        events.audit(instance.id(), instance.tenantId(), "engine", auditAction, "SlaRecord",
+                record.id(), null, data);
     }
 
     private static String occurrenceKey(ValidatedCaseContract.SlaBindingDefinition binding,
