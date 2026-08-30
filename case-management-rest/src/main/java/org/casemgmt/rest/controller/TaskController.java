@@ -18,7 +18,6 @@ import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.service.Actor;
 import org.casemgmt.service.CaseTaskService;
 import org.casemgmt.service.EngineOperationService;
-import org.casemgmt.error.CaseConflictException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
@@ -115,7 +114,6 @@ public class TaskController {
         CaseInstance c = visibleCaseOf(current.caseId(), actor);
         permissions.assertAllowed(actor, c.tenantId(), PermissionActions.TASK_CLAIM,
                 ResourceTypes.TASK, current.id(), taskContext(current));
-        rejectIfPending(c.tenantId(), current);
         long version = expectedVersion(ifMatch, taskId, actor);
         policy.assertAllowedOnTask(current, actor.userId(),
                 callers.roles(current.caseId(), actor), callers.groups(actor), "claim");
@@ -143,7 +141,6 @@ public class TaskController {
         CaseInstance c = visibleCaseOf(current.caseId(), actor);
         permissions.assertAllowed(actor, c.tenantId(), PermissionActions.TASK_COMPLETE,
                 ResourceTypes.TASK, current.id(), taskContext(current));
-        rejectIfPending(c.tenantId(), current);
         long version = expectedVersion(ifMatch, taskId, actor);
         policy.assertAllowedOnTask(current, actor.userId(),
                 callers.roles(current.caseId(), actor), callers.groups(actor), "complete");
@@ -203,14 +200,6 @@ public class TaskController {
         return TaskResponse.of(task, filterTaskActions(task, actor, c.tenantId(),
                 policy.listForTask(task, actor.userId(),
                         callers.roles(task.caseId(), actor), callers.groups(actor))));
-    }
-
-    private void rejectIfPending(String tenantId, CaseTask task) {
-        if (operations.hasActiveCommand(tenantId, task)) {
-            throw new CaseConflictException("operation-pending",
-                    "A conflicting engine operation is still awaiting confirmation for task " + task.id(),
-                    List.of());
-        }
     }
 
     private List<CaseTask> readableTasks(List<CaseTask> rows, Actor actor, String tenant) {

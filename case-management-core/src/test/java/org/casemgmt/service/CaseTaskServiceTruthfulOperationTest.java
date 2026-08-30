@@ -36,6 +36,7 @@ class CaseTaskServiceTruthfulOperationTest {
         CaseTask task = task(TaskState.OPEN, null);
         CaseInstance instance = instance();
         when(tasks.require(task.id())).thenReturn(task);
+        when(tasks.lockForOperation(task.id(), 7L)).thenReturn(task);
         when(cases.require(task.caseId())).thenReturn(instance);
         when(engine.defersTaskMutations()).thenReturn(true);
         EngineOperationService.Operation operation = new EngineOperationService.Operation(

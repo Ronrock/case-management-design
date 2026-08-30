@@ -63,6 +63,7 @@ import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Import;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetailsService;
@@ -184,7 +185,13 @@ public class CaseApiTestConfig {
         return new EventPublisher(events, audit, webhooks, EVENT_TYPE_PREFIX, ENGINE_ID);
     }
 
-    @Bean public EngineGateway engineGateway() { return new RecordingEngineGateway(); }
+    @Bean
+    @ConditionalOnProperty(prefix = "casemgmt.test", name = "remote", havingValue = "false", matchIfMissing = true)
+    public EngineGateway embeddedEngineGateway() { return new RecordingEngineGateway(); }
+
+    @Bean
+    @ConditionalOnProperty(prefix = "casemgmt.test", name = "remote", havingValue = "true")
+    public EngineGateway remoteEngineGateway() { return new DeferredRecordingEngineGateway(); }
     @Bean public EngineOperationService engineOperationService(EngineCommandRepository commands,
                                                                EventPublisher publisher) {
         return new EngineOperationService(commands, publisher);

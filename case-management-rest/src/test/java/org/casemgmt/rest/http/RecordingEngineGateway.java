@@ -55,3 +55,11 @@ class RecordingEngineGateway implements EngineGateway {
         return List.of();
     }
 }
+
+/** Test remote boundary: task creation is synchronous, claim/complete remain durable requests. */
+class DeferredRecordingEngineGateway extends RecordingEngineGateway {
+    @Override
+    public boolean defersTaskMutations() {
+        return true;
+    }
+}

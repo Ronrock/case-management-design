@@ -3,6 +3,7 @@ package org.casemgmt.service;
 import org.casemgmt.domain.CaseIds;
 import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CaseTask;
+import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.engine.CommandDispatchOutcome;
 import org.casemgmt.engine.EngineCommand;
 import org.casemgmt.engine.EngineCommandPolicy;
@@ -106,11 +107,21 @@ public class EngineOperationService {
         String stableKey = idempotencyKey == null || idempotencyKey.isBlank()
                 ? "task:" + task.id() + ":" + type.name() + ":" + expectedTaskVersion
                 : idempotencyKey;
-        ProductionEngineCommandStore.Submission submission = commands.submit(
+        ProductionEngineCommandStore.ProductionCommandRequest request =
                 new ProductionEngineCommandStore.ProductionCommandRequest(commandId, instance.id(),
                         instance.tenantId(), operationId, stableKey, type, payload,
                         task.engineTaskId(), null, JsonCodec.canonicalJson(patch),
-                        instance.version(), OffsetDateTime.now(clock)));
+                        instance.version(), OffsetDateTime.now(clock));
+        // Same-key retries must get the command store's exact-intent replay semantics. Only a
+        // different key is a competing operation that must be suppressed while confirmation is
+        // outstanding. The caller holds CM_TASK's row lock across this decision and submit.
+        if (commands.findByIdempotency(instance.tenantId(), stableKey).isEmpty()
+                && commands.hasActiveTaskCommand(instance.tenantId(), type, task.engineTaskId())) {
+            throw new CaseConflictException("operation-pending",
+                    "A conflicting engine operation is still awaiting confirmation for task " + task.id(),
+                    List.of());
+        }
+        ProductionEngineCommandStore.Submission submission = commands.submit(request);
         Operation operation = operation(submission.command());
         if (!submission.replayed()) {
             events.audit(instance.id(), instance.tenantId(), actor.userId(),

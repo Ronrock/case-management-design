@@ -579,7 +579,12 @@ public class ProductionEngineCommandStore {
                         "Command disappeared during action append"));
     }
 
-    private Optional<StoredCommand> findByIdempotency(String tenantId, String key) {
+    /**
+     * Looks up an already-bound request before considering another active command. This is what
+     * lets an in-flight HTTP retry return the original operation instead of being treated as a
+     * competing task action.
+     */
+    public Optional<StoredCommand> findByIdempotency(String tenantId, String key) {
         return jdbc.sql("SELECT " + PRODUCTION_COLUMNS + " FROM CM_ENGINE_COMMAND "
                         + "WHERE TENANT_ID_=:tenantId AND IDEMPOTENCY_KEY_=:key")
                 .param("tenantId", tenantId).param("key", key)

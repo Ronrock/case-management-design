@@ -130,10 +130,10 @@ public class CaseTaskService {
     @Transactional
     public TaskOperation claimOperation(String taskId, long expectedVersion, Actor actor,
                                         String idempotencyKey) {
-        CaseTask task = tasks.require(taskId);
         if (!engine.defersTaskMutations()) {
             return new TaskOperation(claim(taskId, expectedVersion, actor), null);
         }
+        CaseTask task = lockForOperation(taskId, expectedVersion);
         validateClaimable(task);
         CaseInstance instance = cases.require(task.caseId());
         return new TaskOperation(task, requiredOperations().submitClaim(
@@ -210,11 +210,11 @@ public class CaseTaskService {
     public TaskOperation completeOperation(String taskId, long expectedVersion,
                                            Map<String, Object> variables, Actor actor,
                                            String idempotencyKey) {
-        CaseTask task = tasks.require(taskId);
         Map<String, Object> safeVariables = variables == null ? Map.of() : variables;
         if (!engine.defersTaskMutations()) {
             return new TaskOperation(complete(taskId, expectedVersion, safeVariables, actor), null);
         }
+        CaseTask task = lockForOperation(taskId, expectedVersion);
         CaseInstance instance = validateCompletable(task, safeVariables);
         return new TaskOperation(task, requiredOperations().submitComplete(instance, task,
                 expectedVersion, safeVariables, actor, idempotencyKey));
@@ -255,6 +255,14 @@ public class CaseTaskService {
             throw new IllegalStateException("Remote task operations require an EngineOperationService");
         }
         return operations;
+    }
+
+    private CaseTask lockForOperation(String taskId, long expectedVersion) {
+        try {
+            return tasks.lockForOperation(taskId, expectedVersion);
+        } catch (OptimisticLockException exception) {
+            throw new CaseConflictException("version-conflict", exception.getMessage(), List.of());
+        }
     }
 
     public record TaskOperation(CaseTask confirmedTask, EngineOperationService.Operation operation) { }

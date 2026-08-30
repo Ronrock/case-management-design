@@ -71,7 +71,7 @@ class TaskOperationControllerTest {
     }
 
     @Test
-    void activeRemoteClaimSuppressesAConflictingSecondClaim() {
+    void activeRemoteClaimWithTheSameIdempotencyKeyReplaysTheOriginalOperation() {
         CaseTaskService tasks = mock(CaseTaskService.class);
         CaseTaskRepository taskRepo = mock(CaseTaskRepository.class);
         CaseRepository caseRepo = mock(CaseRepository.class);
@@ -83,19 +83,26 @@ class TaskOperationControllerTest {
         CaseInstance instance = instance();
         when(callers.actor(authentication)).thenReturn(actor);
         when(callers.tenantId(actor)).thenReturn("tenant-a");
+        when(callers.roles(task.caseId(), actor)).thenReturn(Set.of("owner"));
+        when(callers.groups(actor)).thenReturn(Set.of("tenant-a"));
+        when(taskRepo.findById(task.id())).thenReturn(Optional.of(task));
         when(taskRepo.require(task.id())).thenReturn(task);
+        when(caseRepo.findById(task.caseId())).thenReturn(Optional.of(instance));
         when(caseRepo.require(task.caseId())).thenReturn(instance);
         when(operations.hasActiveCommand("tenant-a", task)).thenReturn(true);
+        EngineOperationService.Operation operation = new EngineOperationService.Operation(
+                "operation-1", "command-1", task.caseId(), "CLAIM_TASK", task.engineTaskId(),
+                "PENDING", 0L, null, null, List.of("cancel"));
+        when(tasks.claimOperation(task.id(), task.version(), actor, "idem-1"))
+                .thenReturn(new CaseTaskService.TaskOperation(task, operation));
         TaskController controller = new TaskController(tasks, taskRepo, caseRepo,
                 mock(ActionPolicy.class), callers, mock(WorkerPermissionEvaluator.class), operations);
 
-        Throwable refused = org.assertj.core.api.Assertions.catchThrowable(() ->
-                controller.claim(task.id(), "\"7\"", "idem-2", authentication));
-        assertThat(refused).isInstanceOf(org.casemgmt.error.CaseConflictException.class);
-        assertThat(((org.casemgmt.error.CaseConflictException) refused).code())
-                .isEqualTo("operation-pending");
+        ResponseEntity<?> response = controller.claim(task.id(), "\"7\"", "idem-1", authentication);
 
-        verify(tasks, never()).claimOperation(any(), org.mockito.ArgumentMatchers.anyLong(), any(), any());
+        assertThat(response.getStatusCode().value()).isEqualTo(202);
+        assertThat(response.getHeaders().getLocation()).hasToString("/case-api/v2/operations/operation-1");
+        verify(tasks).claimOperation(task.id(), task.version(), actor, "idem-1");
     }
 
     @Test

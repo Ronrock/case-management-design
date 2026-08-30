@@ -55,6 +55,19 @@ public class CaseTaskRepository {
         return findById(id).orElseThrow(() -> new NotFoundException("Task", id));
     }
 
+    /**
+     * Locks the confirmed task row while a remote mutation command is selected or created.
+     * The version predicate makes a stale HTTP request fail before it can compete for an active
+     * command; {@code FOR UPDATE} serializes distinct idempotency keys for the same task.
+     */
+    public CaseTask lockForOperation(String id, long expectedVersion) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM CM_TASK "
+                        + "WHERE ID_ = :id AND VERSION_ = :expected FOR UPDATE")
+                .param("id", id).param("expected", expectedVersion)
+                .query(CaseTaskRepository::map).optional()
+                .orElseThrow(() -> new OptimisticLockException("Task", id, expectedVersion));
+    }
+
     public Optional<CaseTask> findByEngineTaskId(String engineTaskId) {
         return jdbc.sql("SELECT " + COLUMNS + " FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = :tid")
                 .param("tid", engineTaskId).query(CaseTaskRepository::map).optional();
