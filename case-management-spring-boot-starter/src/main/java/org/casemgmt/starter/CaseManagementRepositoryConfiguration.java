@@ -18,6 +18,10 @@ import org.casemgmt.repo.ParticipantRepository;
 import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.repo.SlaRepository;
 import org.casemgmt.repo.WebhookRepository;
+import org.casemgmt.repo.ObservationInboxRepository;
+import org.casemgmt.repo.ObservationCheckpointRepository;
+import org.casemgmt.observation.RemoteObservationIngestionService;
+import org.casemgmt.observation.RemoteObservationInboxWorker;
 import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.projection.CaseCompletionPublisher;
 import org.casemgmt.projection.JdbcCaseProjectionPort;
@@ -32,6 +36,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
 
@@ -97,6 +102,19 @@ public class CaseManagementRepositoryConfiguration {
     @Bean public AppliedObservationRepository appliedObservationRepository(
             @Qualifier("caseJdbcClient") JdbcClient c) {
         return new AppliedObservationRepository(c);
+    }
+    @Bean public ObservationInboxRepository observationInboxRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new ObservationInboxRepository(c); }
+    @Bean public ObservationCheckpointRepository observationCheckpointRepository(
+            @Qualifier("caseJdbcClient") JdbcClient c) { return new ObservationCheckpointRepository(c); }
+    @Bean public RemoteObservationIngestionService remoteObservationIngestionService(
+            ObservationInboxRepository inbox, ObservationCheckpointRepository checkpoints) {
+        return new RemoteObservationIngestionService(inbox, checkpoints);
+    }
+    @Bean public RemoteObservationInboxWorker remoteObservationInboxWorker(
+            ObservationInboxRepository inbox, org.casemgmt.observation.EngineObservationHandler handler,
+            PlatformTransactionManager transactionManager) {
+        return new RemoteObservationInboxWorker(inbox, handler, transactionManager);
     }
     @Bean
     @ConditionalOnMissingBean(CaseCompletionPublisher.class)

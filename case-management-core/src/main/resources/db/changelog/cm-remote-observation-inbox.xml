@@ -32,11 +32,18 @@
       <column name="CREATED_AT_" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="SYSTIMESTAMP"><constraints nullable="false"/></column>
       <column name="APPLIED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
       <column name="FAILURE_DETAIL_" type="VARCHAR2(2000 BYTE)"/>
+      <column name="LEASE_TOKEN_" type="VARCHAR2(64 BYTE)"/>
+      <column name="LEASED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
     </createTable>
   </changeSet>
   <changeSet id="cm-remote-observation-inbox-index" author="casemgmt">
     <createIndex tableName="CM_REMOTE_OBS_INBOX" indexName="IX_CM_REMOTE_OBS_INBOX_STATUS">
       <column name="STATUS_"/><column name="CREATED_AT_"/>
+    </createIndex>
+  </changeSet>
+  <changeSet id="cm-remote-observation-inbox-lease-index" author="casemgmt">
+    <createIndex tableName="CM_REMOTE_OBS_INBOX" indexName="IX_CM_REMOTE_OBS_INBOX_LEASE">
+      <column name="STATUS_"/><column name="LEASED_AT_"/><column name="CREATED_AT_"/>
     </createIndex>
   </changeSet>
 </databaseChangeLog>

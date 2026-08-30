@@ -135,13 +135,12 @@ public class RemoteEngineAutoConfiguration {
 
     @Bean
     public RemoteObservationPoller remoteObservationPoller(
-            RestClient engineRestClient, CaseProjectionPort projections,
-            RemotePollingCheckpointRepository checkpoints,
-            ActiveBpmnCaseRepository activeCases,
-            RemoteProcessActivityClassifier classifier,
-            org.casemgmt.observation.EngineObservationHandler observations) {
-        return new RemoteObservationPoller(engineRestClient, projections, checkpoints, activeCases,
-                classifier, observations);
+            RestClient engineRestClient, ActiveBpmnCaseRepository activeCases,
+            org.casemgmt.repo.CaseRepository cases, RemoteProcessActivityClassifier classifier,
+            org.casemgmt.observation.RemoteObservationIngestionService ingestion,
+            org.casemgmt.observation.RemoteObservationInboxWorker inboxWorker) {
+        return new RemoteObservationPoller(engineRestClient, activeCases, cases, classifier,
+                ingestion, inboxWorker);
     }
 
     @Bean

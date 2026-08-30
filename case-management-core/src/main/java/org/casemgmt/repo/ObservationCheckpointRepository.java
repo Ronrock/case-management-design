@@ -27,6 +27,20 @@ public final class ObservationCheckpointRepository {
                 .optional();
     }
 
+    /** Oldest cursor is the safe lower bound when one remote history endpoint serves tenants. */
+    public Optional<ObservationCursor> findOldest(ObservationStream stream) {
+        return jdbc.sql("""
+                SELECT EVENT_AT_, EVENT_ID_ FROM (
+                    SELECT EVENT_AT_, EVENT_ID_ FROM CM_REMOTE_OBS_CHECKPOINT
+                    WHERE STREAM_ = :stream ORDER BY EVENT_AT_, EVENT_ID_
+                ) WHERE ROWNUM = 1""")
+                .param("stream", stream.name())
+                .query((rs, row) -> new ObservationCursor(
+                        rs.getObject("EVENT_AT_", OffsetDateTime.class).toInstant(),
+                        rs.getString("EVENT_ID_")))
+                .optional();
+    }
+
     /** Advances only after the caller has durably stored the complete page. */
     public void advance(String tenantId, ObservationStream stream, ObservationCursor cursor) {
         OffsetDateTime timestamp = OffsetDateTime.ofInstant(cursor.timestamp(), ZoneOffset.UTC);

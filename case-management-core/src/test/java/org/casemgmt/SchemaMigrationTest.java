@@ -30,7 +30,7 @@ class SchemaMigrationTest extends OracleTestBase {
         // CM_APPLIED_ENGINE_OBSERVATION is the WS3 lifecycle-effect claim ledger; the normalized
         // command action and transition ledgers add the remaining two tables.
         // DATABASECHANGELOG* do not match the CM_ prefix.
-        assertThat(tables).isEqualTo(33);
+        assertThat(tables).isEqualTo(34);
     }
 
     @Test
