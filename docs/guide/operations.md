@@ -23,6 +23,11 @@ Oracle integration tests use Testcontainers and therefore require a working Dock
 checked-in CI workflow runs the full reactor on Temurin 21 and separately runs Node 22
 `npm ci`, `npm test`, and `npm run build` for the Lit package.
 
+The Java job has a bounded timeout and uploads Surefire reports even when a test fails. Treat a
+failed clean reactor as a release stop: a partial module build is useful diagnosis, not production
+evidence. Do not place database passwords, bearer tokens, request payloads, or webhook secrets in
+CI variables echoed by scripts or in uploaded reports.
+
 ## Embedded mode
 
 Embedded mode runs Operaton in the application JVM:
@@ -91,9 +96,13 @@ than remaining silently pending.
 Remote mode uses no custom Operaton plugin and no Kafka dependency. It observes stock runtime and
 history REST resources using:
 
-- A durable watermark in `CM_ENGINE_POLL_CHECKPOINT`.
-- A two-minute overlapping history window.
-- Stable engine IDs and idempotent projection upserts.
+- A durable inbox in `CM_REMOTE_OBS_INBOX`, before a fact changes a case projection.
+- Separate, monotonic `(timestamp, id)` checkpoints per tenant and per history stream in
+  `CM_REMOTE_OBS_CHECKPOINT`. Tasks, completed tasks, activities, completed activities, and
+  processes never advance one another's checkpoint.
+- Fixed-window, stable-id pages of 500 rows. A checkpoint advances only after every page in that
+  window is durable; a failed page is read again on the next pass.
+- Stable engine IDs and idempotent lifecycle application.
 - A periodic authoritative reconciliation of every active BPMN root process.
 
 Overlap intentionally produces duplicates; deduplication makes them safe. It also catches records
@@ -124,8 +133,10 @@ Admin health endpoint:
 GET /case-api/v2/orchestration/remote-status
 ```
 
-It reports the watermark, last success, error, seconds since success, and active BPMN case count.
-Alert on repeated failures or an age greater than the operational freshness objective.
+It reports the poller's high-level watermark, last success, error, seconds since success, and
+active BPMN case count. Alert on repeated failures, a growing inbox backlog, poisoned inbox rows,
+or an age greater than the operational freshness objective. The detailed per-stream checkpoint and
+inbox state is deliberately an internal diagnostic, not a customer-facing API.
 
 ## Dead-letter recovery
 
@@ -144,6 +155,36 @@ Both require administration permission. The list intentionally omits payloads. B
 
 Stable identifiers and duplicate filtering make retries safer, but operators should still inspect
 partially applied multi-step effects.
+
+## BPMN-only upgrade preflight
+
+This release runs in BPMN-only mode. Liquibase stops before changing the schema when either
+`CM_CASE_DEF.ORCHESTRATION_MODE_` or `CM_CASE_DEF_BINDING.ORCHESTRATION_MODE_` still contains
+`PLAN_MODEL`, with error code `CM-BPMN-ONLY-LEGACY-DATA`.
+
+The guard does not delete or convert legacy data. Before scheduling the upgrade, inventory retained
+legacy rows with a read-only query, decide whether to archive/remove them in an approved migration
+outside this release, and rehearse that decision on a restored copy. Do not bypass the guard or
+hand-edit the Liquibase changelog. A contract that declares `PLAN_MODEL` is rejected at publication
+as well; all newly published contracts must explicitly declare `BPMN`.
+
+## BPMN-first operational recovery
+
+Use the case API and supported operational endpoints; do not correct projections, commands,
+checkpoints, or SLA clocks by editing Oracle tables.
+
+| Situation | Safe response |
+|---|---|
+| Pause outbound/remote work for an incident | Deploy the controlled setting `casemgmt.schedulers.enabled=false`. It pauses every library scheduler, including command delivery and SLA sweeping, so record the start time and restore it promptly after the underlying incident is contained. There is no per-poller pause endpoint. |
+| Projection is stale or root completion is missing | Check `/case-api/v2/orchestration/remote-status`, verify Operaton `AUDIT` history and credentials, then allow the scheduled reconciliation to ingest normal evidence. Do not directly mark a case complete. |
+| Remote command is dead | Inspect the redacted dead-letter entry, confirm whether Operaton already performed the effect, fix the cause, then use the supported dead-letter retry endpoint. A retry is not a substitute for deciding an ambiguous, partially applied effect. |
+| Remote inbox fact retries or becomes poison | Preserve the fingerprint, stream, attempts, and failure detail in the incident. The inbox retries recoverable failures automatically; there is intentionally no general-purpose public replay endpoint for poison evidence. Escalate through the approved support/change procedure so the cause is fixed and replay is witnessed rather than altering rows directly. |
+| Cancel a case | Use `POST /case-api/v2/cases/{caseId}/cancel` with the current ETag. It requests root-process cancellation and terminalizes remaining case work through the normal lifecycle path. |
+| Temporarily disable an SLA-triggered downstream message | Do this in the downstream event consumer or routing rule, not in BPMN and not by disabling SLA clocks. This library records SLA events; it does not send a BPMN message from the SLA lifecycle handler. Record the consumer change, keep clocks and audit enabled, and restore the consumer with a replay decision. |
+
+When restarting schedulers after an incident, first check command dead letters, remote freshness,
+and SLA backlog. The durable inbox and idempotent lifecycle handler make repeated polling safe;
+they do not make a wrong source configuration safe.
 
 ## Required application configuration
 
@@ -238,7 +279,8 @@ to reduce duplicate work.
 
 ## Known boundaries
 
-- Existing plan-model cases remain supported; no automatic migration exists.
+- Legacy plan-model runtime is not supported. The upgrade preflight above fails closed when
+  retained legacy definitions or bindings exist; no automatic conversion exists.
 - Remote mode is reconciled eventual consistency, not an engine event-stream replica.
 - Presentation metadata is not secret; field values must be masked server-side.
 - Running-case contract/presentation upgrades, controlled process migration, and embedded Studio are

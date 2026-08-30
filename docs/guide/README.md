@@ -16,6 +16,8 @@ Read the chapters in this order the first time:
    and presentation manifest.
 4. [API cookbook](api-cookbook.md) — call the API correctly from a script or application.
 5. [Operations](operations.md) — configure embedded or remote Operaton and diagnose failures.
+6. [BPMN-first release readiness](bpmn-first-release-readiness.md) — collect objective release
+   evidence and make an operational go/no-go decision.
 
 Additional reference material:
 

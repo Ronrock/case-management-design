@@ -18,6 +18,7 @@ jobs:
   java:
     name: Java reactor
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -27,6 +28,13 @@ jobs:
           cache: maven
       - name: Build and test
         run: ./mvnw --batch-mode clean install
+      - name: Upload Java test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/**'
+          if-no-files-found: error
 
   # The published modeling vocabulary. This is a required check in its own right: a template
   # that binds the wrong namespace produces models the validator silently ignores, and nothing
@@ -34,6 +42,7 @@ jobs:
   modeler-templates:
     name: Modeler templates
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -51,6 +60,7 @@ jobs:
   web-components:
     name: Web components
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
