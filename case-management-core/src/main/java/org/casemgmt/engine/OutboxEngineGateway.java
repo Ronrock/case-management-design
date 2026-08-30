@@ -36,6 +36,11 @@ public class OutboxEngineGateway implements EngineGateway {
     }
 
     @Override
+    public boolean defersTaskMutations() {
+        return true;
+    }
+
+    @Override
     public EngineTaskRef createHumanTask(HumanTaskRequest request) {
         String commandId = CaseIds.newId();
         commands.enqueue(new EngineCommand(commandId, request.caseId(),

@@ -26,6 +26,7 @@ import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.CommentRepository;
 import org.casemgmt.repo.DocumentRepository;
 import org.casemgmt.repo.EventRepository;
+import org.casemgmt.repo.EngineCommandRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.MilestoneRepository;
 import org.casemgmt.repo.ParticipantRepository;
@@ -38,6 +39,7 @@ import org.casemgmt.service.CaseDefinitionReleaseService;
 import org.casemgmt.service.CaseDefinitionVersionService;
 import org.casemgmt.service.CaseService;
 import org.casemgmt.service.CaseTaskService;
+import org.casemgmt.service.EngineOperationService;
 import org.casemgmt.service.CommentService;
 import org.casemgmt.service.DocumentService;
 import org.casemgmt.service.FormValidator;
@@ -205,10 +207,17 @@ public class CaseManagementServiceConfiguration {
     }
 
     @Bean
+    public EngineOperationService engineOperationService(EngineCommandRepository commands,
+                                                         EventPublisher publisher) {
+        return new EngineOperationService(commands, publisher);
+    }
+
+    @Bean
     public CaseTaskService caseTaskService(CaseTaskRepository tasks, CaseRepository cases,
                                            CaseDefinitionRepository definitions, EngineGateway engine,
-                                           FormValidator validator, EventPublisher publisher) {
-        return new CaseTaskService(tasks, cases, definitions, engine, validator, publisher);
+                                           FormValidator validator, EventPublisher publisher,
+                                           EngineOperationService operations) {
+        return new CaseTaskService(tasks, cases, definitions, engine, validator, publisher, operations);
     }
 
     @Bean

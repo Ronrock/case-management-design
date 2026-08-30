@@ -414,11 +414,29 @@ public class ProductionEngineCommandStore {
     }
 
     public StoredCommand require(String tenantId, String operationId) {
+        return find(tenantId, operationId)
+                .orElseThrow(() -> new IllegalArgumentException("Engine operation was not found"));
+    }
+
+    /** Tenant-bound lookup used by operation resources; it never exposes a cross-tenant row. */
+    public Optional<StoredCommand> find(String tenantId, String operationId) {
         return jdbc.sql("SELECT " + PRODUCTION_COLUMNS + " FROM CM_ENGINE_COMMAND "
                         + "WHERE TENANT_ID_=:tenantId AND OPERATION_ID_=:operationId")
                 .param("tenantId", tenantId).param("operationId", operationId)
-                .query((rs, row) -> mapStored(rs)).optional()
-                .orElseThrow(() -> new IllegalArgumentException("Engine operation was not found"));
+                .query((rs, row) -> mapStored(rs)).optional();
+    }
+
+    /** Active task commands suppress conflicting task actions until confirmation arrives. */
+    public boolean hasActiveTaskCommand(
+            String tenantId, EngineCommand.Type type, String expectedTargetIdentity) {
+        Long count = jdbc.sql("""
+                SELECT COUNT(*) FROM CM_ENGINE_COMMAND
+                WHERE TENANT_ID_=:tenantId AND TYPE_=:type AND TARGET_IDENTITY_=:target
+                  AND STATUS_ IN ('PENDING','RETRYABLE','DISPATCHING','AWAITING_CONFIRMATION',
+                                  'CONFLICT','MANUAL_REVIEW')
+                """).param("tenantId", tenantId).param("type", type.name())
+                .param("target", expectedTargetIdentity).query(Long.class).single();
+        return count != null && count > 0;
     }
 
     /**
@@ -1486,7 +1504,7 @@ public class ProductionEngineCommandStore {
             correlationJson = correlationJson == null ? null
                     : JsonCodec.canonicalJson(correlationJson);
             canonicalPatchJson = canonicalPatchJson == null ? null
-                    : JsonCodec.canonicalJson(canonicalPatchJson);
+                    : JsonCodec.canonicalJson(JsonCodec.toMap(canonicalPatchJson));
             submittedAt = EngineCommandPolicy.canonicalPersistedTimestamp(
                     submittedAt, "submittedAt");
         }

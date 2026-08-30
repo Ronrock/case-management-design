@@ -17,6 +17,15 @@ public interface EngineGateway {
         return false;
     }
 
+    /**
+     * True when task mutations are accepted as durable remote commands rather than completed in
+     * the request transaction. Callers must then leave their confirmed projections untouched
+     * until command evidence is confirmed by the common lifecycle handler.
+     */
+    default boolean defersTaskMutations() {
+        return false;
+    }
+
     EngineTaskRef createHumanTask(HumanTaskRequest request);
 
     void claimTask(String engineTaskId, String userId);

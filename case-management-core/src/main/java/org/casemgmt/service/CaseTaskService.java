@@ -54,16 +54,25 @@ public class CaseTaskService {
     private final EngineGateway engine;
     private final FormValidator formValidator;
     private final EventPublisher publisher;
+    private final EngineOperationService operations;
 
     public CaseTaskService(CaseTaskRepository tasks, CaseRepository cases,
                            CaseDefinitionRepository definitions, EngineGateway engine,
                            FormValidator formValidator, EventPublisher publisher) {
+        this(tasks, cases, definitions, engine, formValidator, publisher, null);
+    }
+
+    public CaseTaskService(CaseTaskRepository tasks, CaseRepository cases,
+                           CaseDefinitionRepository definitions, EngineGateway engine,
+                           FormValidator formValidator, EventPublisher publisher,
+                           EngineOperationService operations) {
         this.tasks = tasks;
         this.cases = cases;
         this.definitions = definitions;
         this.engine = engine;
         this.formValidator = formValidator;
         this.publisher = publisher;
+        this.operations = operations;
     }
 
     /**
@@ -88,6 +97,10 @@ public class CaseTaskService {
 
     @Transactional
     public CaseTask claim(String taskId, long expectedVersion, Actor actor) {
+        if (engine.defersTaskMutations()) {
+            throw new IllegalStateException(
+                    "Remote task claims must use claimOperation so confirmation remains truthful");
+        }
         CaseTask task = tasks.require(taskId);
         if (task.state() != TaskState.OPEN) {
             throw new CaseConflictException("task-not-open",
@@ -113,9 +126,27 @@ public class CaseTaskService {
         return saved;
     }
 
+    /** Remote requests keep the task projection confirmed until engine evidence arrives. */
+    @Transactional
+    public TaskOperation claimOperation(String taskId, long expectedVersion, Actor actor,
+                                        String idempotencyKey) {
+        CaseTask task = tasks.require(taskId);
+        if (!engine.defersTaskMutations()) {
+            return new TaskOperation(claim(taskId, expectedVersion, actor), null);
+        }
+        validateClaimable(task);
+        CaseInstance instance = cases.require(task.caseId());
+        return new TaskOperation(task, requiredOperations().submitClaim(
+                instance, task, expectedVersion, actor, idempotencyKey));
+    }
+
     @Transactional
     public CaseTask complete(String taskId, long expectedVersion,
                              Map<String, Object> variables, Actor actor) {
+        if (engine.defersTaskMutations()) {
+            throw new IllegalStateException(
+                    "Remote task completions must use completeOperation so confirmation remains truthful");
+        }
         CaseTask task = tasks.require(taskId);
         if (task.state() != TaskState.CLAIMED) {
             throw new CaseConflictException("task-not-claimed",
@@ -173,6 +204,60 @@ public class CaseTaskService {
 
         return saved;
     }
+
+    /** Remote completion records validated intent but does not mark the task completed. */
+    @Transactional
+    public TaskOperation completeOperation(String taskId, long expectedVersion,
+                                           Map<String, Object> variables, Actor actor,
+                                           String idempotencyKey) {
+        CaseTask task = tasks.require(taskId);
+        Map<String, Object> safeVariables = variables == null ? Map.of() : variables;
+        if (!engine.defersTaskMutations()) {
+            return new TaskOperation(complete(taskId, expectedVersion, safeVariables, actor), null);
+        }
+        CaseInstance instance = validateCompletable(task, safeVariables);
+        return new TaskOperation(task, requiredOperations().submitComplete(instance, task,
+                expectedVersion, safeVariables, actor, idempotencyKey));
+    }
+
+    private void validateClaimable(CaseTask task) {
+        if (task.state() != TaskState.OPEN) {
+            throw new CaseConflictException("task-not-open",
+                    "Task is " + task.state() + (task.assignee() == null ? "" : " (assignee " + task.assignee() + ")"),
+                    task.state() == TaskState.CLAIMED ? List.of("complete") : List.of());
+        }
+        if (task.engineSync() != CaseTask.EngineSync.SYNCED) {
+            throw new CaseConflictException("engine-sync-pending",
+                    "Task is not yet created on the engine (sync state " + task.engineSync() + ")",
+                    List.of());
+        }
+    }
+
+    private CaseInstance validateCompletable(CaseTask task, Map<String, Object> variables) {
+        if (task.state() != TaskState.CLAIMED) {
+            throw new CaseConflictException("task-not-claimed",
+                    "Task is " + task.state() + "; only a claimed task can be completed", List.of());
+        }
+        CaseInstance c = cases.require(task.caseId());
+        if (task.formKey() != null) {
+            Map<String, Object> schema = definitions.formSchemaOfDefinition(c.caseDefId(), task.formKey())
+                    .orElseThrow(() -> new InvalidCaseDefinitionException(c.caseDefKey(),
+                            "Task " + task.id() + " declares formKey '" + task.formKey()
+                                    + "' but case definition '" + c.caseDefKey() + "' (version "
+                                    + c.caseDefVersion() + ") has no matching form schema"));
+            formValidator.validate(schema, variables);
+        }
+        return c;
+    }
+
+    private EngineOperationService requiredOperations() {
+        if (operations == null) {
+            throw new IllegalStateException("Remote task operations require an EngineOperationService");
+        }
+        return operations;
+    }
+
+    public record TaskOperation(CaseTask confirmedTask, EngineOperationService.Operation operation) { }
 
     /**
      * Review fix: {@code variables.get("outcome")} returns Java {@code null} when the key is

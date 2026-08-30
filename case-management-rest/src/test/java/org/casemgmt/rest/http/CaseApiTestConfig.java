@@ -46,6 +46,7 @@ import org.casemgmt.service.CaseDefinitionVersionService;
 import org.casemgmt.service.AdHocActionService;
 import org.casemgmt.service.CaseService;
 import org.casemgmt.service.CaseTaskService;
+import org.casemgmt.service.EngineOperationService;
 import org.casemgmt.service.CommentService;
 import org.casemgmt.service.DocumentService;
 import org.casemgmt.service.FormValidator;
@@ -184,6 +185,10 @@ public class CaseApiTestConfig {
     }
 
     @Bean public EngineGateway engineGateway() { return new RecordingEngineGateway(); }
+    @Bean public EngineOperationService engineOperationService(EngineCommandRepository commands,
+                                                               EventPublisher publisher) {
+        return new EngineOperationService(commands, publisher);
+    }
     @Bean public FormValidator formValidator() { return new FormValidator(); }
     @Bean public StageCompletion stageCompletion() { return new StageCompletion(); }
     @Bean
@@ -222,8 +227,9 @@ public class CaseApiTestConfig {
     @Bean
     public CaseTaskService caseTaskService(CaseTaskRepository tasks, CaseRepository cases,
                                             CaseDefinitionRepository definitions, EngineGateway engine,
-                                            FormValidator formValidator, EventPublisher publisher) {
-        return new CaseTaskService(tasks, cases, definitions, engine, formValidator, publisher);
+                                            FormValidator formValidator, EventPublisher publisher,
+                                            EngineOperationService operations) {
+        return new CaseTaskService(tasks, cases, definitions, engine, formValidator, publisher, operations);
     }
 
     @Bean
