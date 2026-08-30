@@ -27,7 +27,8 @@ public class SlaRepository {
 
     private static final String RECORD_COLUMNS = """
             ID_, CASE_ID_, TARGET_ID_, STATUS_, STARTED_AT_, DUE_AT_, WARN_AT_, PAUSED_AT_,
-            PAUSED_REASON_, PAUSED_TOTAL_SECS_, VERSION_""";
+            PAUSED_REASON_, PAUSED_TOTAL_SECS_, VERSION_,
+            COALESCE(MET_AT_, CANCELLED_AT_, BREACHED_AT_) AS TERMINAL_AT_""";
 
     private static final String TARGET_COLUMNS = """
             ID_, POLICY_ID_, TARGET_KEY_, NAME_, DURATION_ISO_, WARNING_ISO_,
@@ -146,6 +147,42 @@ public class SlaRepository {
                 .param("caseId", caseId).query(SlaRepository::mapRecord).list();
     }
 
+    /**
+     * Changes a currently open occurrence to the root case's declared terminal outcome.  The
+     * status predicate is the concurrency boundary: a sweeper that already proved a breach wins
+     * its earlier fact, while a clock still RUNNING or PAUSED can never be claimed afterwards.
+     * Returning only rows whose update won lets callers emit one audit/event pair per durable
+     * transition and makes a duplicate root observation a true no-op.
+     */
+    public List<SlaRecord> terminalizeNonterminalForCase(String caseId, String terminalStatus,
+                                                           OffsetDateTime terminalAt) {
+        if (!"MET".equals(terminalStatus) && !"CANCELLED".equals(terminalStatus)) {
+            throw new IllegalArgumentException("unsupported SLA terminal status: " + terminalStatus);
+        }
+        List<SlaRecord> candidates = jdbc.sql("SELECT " + RECORD_COLUMNS + " FROM CM_SLA_RECORD "
+                        + "WHERE CASE_ID_ = :caseId AND STATUS_ IN ('RUNNING', 'PAUSED') ORDER BY ID_")
+                .param("caseId", caseId).query(SlaRepository::mapRecord).list();
+        List<SlaRecord> terminalized = new java.util.ArrayList<>();
+        for (SlaRecord candidate : candidates) {
+            int updated = jdbc.sql("""
+                    UPDATE CM_SLA_RECORD
+                    SET STATUS_ = :status, WARN_AT_ = NULL, PAUSED_AT_ = NULL,
+                        PAUSED_REASON_ = NULL, CLAIM_TOKEN_ = NULL, CLAIMED_AT_ = NULL,
+                        MET_AT_ = CASE WHEN :status = 'MET' THEN :terminalAt ELSE MET_AT_ END,
+                        CANCELLED_AT_ = CASE WHEN :status = 'CANCELLED' THEN :terminalAt ELSE CANCELLED_AT_ END,
+                        VERSION_ = VERSION_ + 1
+                    WHERE ID_ = :id AND STATUS_ IN ('RUNNING', 'PAUSED')""")
+                    .param("status", terminalStatus).param("terminalAt", terminalAt)
+                    .param("id", candidate.id()).update();
+            if (updated == 1) {
+                terminalized.add(new SlaRecord(candidate.id(), candidate.caseId(), candidate.targetId(),
+                        terminalStatus, candidate.startedAt(), candidate.dueAt(), null, null, null,
+                        candidate.pausedTotalSeconds(), candidate.version() + 1, terminalAt));
+            }
+        }
+        return List.copyOf(terminalized);
+    }
+
     public SlaRecord require(String id) {
         return jdbc.sql("SELECT " + RECORD_COLUMNS + " FROM CM_SLA_RECORD WHERE ID_ = :id")
                 .param("id", id).query(SlaRepository::mapRecord).optional()
@@ -181,7 +218,8 @@ public class SlaRepository {
             .update();
         if (rows == 0) throw new OptimisticLockException("SlaRecord", r.id(), expectedVersion);
         return new SlaRecord(r.id(), r.caseId(), r.targetId(), r.status(), r.startedAt(), r.dueAt(),
-                r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), expectedVersion + 1);
+                r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), expectedVersion + 1,
+                r.terminalAt());
     }
 
     public SlaRecord updateClaimed(SlaRecord r, long expectedVersion, String claimToken) {
@@ -201,7 +239,8 @@ public class SlaRepository {
             .update();
         if (rows == 0) throw new OptimisticLockException("SlaRecord", r.id(), expectedVersion);
         return new SlaRecord(r.id(), r.caseId(), r.targetId(), r.status(), r.startedAt(), r.dueAt(),
-                r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), expectedVersion + 1);
+                r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), expectedVersion + 1,
+                r.terminalAt());
     }
 
     /**
@@ -299,6 +338,6 @@ public class SlaRepository {
                 rs.getObject("WARN_AT_", OffsetDateTime.class),
                 rs.getObject("PAUSED_AT_", OffsetDateTime.class),
                 rs.getString("PAUSED_REASON_"), rs.getLong("PAUSED_TOTAL_SECS_"),
-                rs.getLong("VERSION_"));
+                rs.getLong("VERSION_"), rs.getObject("TERMINAL_AT_", OffsetDateTime.class));
     }
 }

@@ -11,6 +11,7 @@ import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.event.WebhookSecretStore;
 import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.SlaLifecyclePort;
 import org.casemgmt.observation.EngineProcessAuthorityLookup;
 import org.casemgmt.observation.ProcessCaseAuthority;
 import org.casemgmt.repo.IdempotencyRepository;
@@ -23,6 +24,7 @@ import org.casemgmt.service.CaseService;
 import org.casemgmt.service.FormValidator;
 import org.casemgmt.service.WebhookService;
 import org.casemgmt.sla.SlaSweeper;
+import org.casemgmt.sla.SlaLifecycleService;
 import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.ProcessEngine;
 import org.operaton.bpm.engine.RepositoryService;
@@ -436,6 +438,8 @@ class AutoConfigurationTest {
                     assertThat(context).hasSingleBean(EventPublisher.class);
                     assertThat(context.getBean(CriterionEvaluator.class))
                             .isInstanceOf(JuelCriterionEvaluator.class);
+                    assertThat(context.getBean(SlaLifecyclePort.class))
+                            .isInstanceOf(SlaLifecycleService.class);
                 });
     }
 

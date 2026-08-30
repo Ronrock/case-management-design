@@ -62,7 +62,7 @@ public class SlaService {
             OffsetDateTime warnAt = target.warningIso() == null ? null
                     : calendar.addDuration(now, Duration.parse(target.warningIso()));
             SlaRecord record = new SlaRecord(CaseIds.newId(), caseId, target.id(), "RUNNING",
-                    now, dueAt, warnAt, null, null, 0L, 0L);
+                    now, dueAt, warnAt, null, null, 0L, 0L, null);
             sla.insertRecord(record);
 
             publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(),
@@ -87,7 +87,7 @@ public class SlaService {
 
         SlaRecord paused = save(new SlaRecord(record.id(), record.caseId(), record.targetId(), "PAUSED",
                 record.startedAt(), record.dueAt(), record.warnAt(), OffsetDateTime.now(), reason,
-                record.pausedTotalSeconds(), record.version()), expectedVersion);
+                record.pausedTotalSeconds(), record.version(), record.terminalAt()), expectedVersion);
 
         // reason may be null (a target with no configured PAUSED_STATES_JSON_ accepts any
         // reason, including none — see assertValidPauseReason). Map.of rejects null values, and
@@ -149,7 +149,7 @@ public class SlaService {
 
         SlaRecord resumed = save(new SlaRecord(record.id(), record.caseId(), record.targetId(), "RUNNING",
                 record.startedAt(), newDueAt, newWarnAt, null, null,
-                record.pausedTotalSeconds() + pausedSeconds, record.version()), expectedVersion);
+                record.pausedTotalSeconds() + pausedSeconds, record.version(), record.terminalAt()), expectedVersion);
 
         publisher.publish(new CaseEvent(CaseIds.newId(), publisher.engineId(), EventTypes.SLA_RESUMED,
                 caseId, c.tenantId(), OffsetDateTime.now(),

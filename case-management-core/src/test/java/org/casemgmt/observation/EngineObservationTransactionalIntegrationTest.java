@@ -38,6 +38,7 @@ import org.casemgmt.service.CanonicalPatch;
 import org.casemgmt.service.CaseDataMappingService;
 import org.casemgmt.service.ContractCaseDataMappingService;
 import org.casemgmt.sla.SlaRecord;
+import org.casemgmt.sla.SlaLifecycleService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -212,6 +213,27 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
 
         assertThat(state()).isEqualTo(before);
         assertThat(state().appliedRows()).isEmpty();
+    }
+
+    @Test
+    void acceptedRootCompletionUsesTheProductionSlaLifecyclePortExactlyOnce() {
+        ApplyResult first = handler.apply(completedRootProcess());
+        ApplyResult replay = handler.apply(new ProcessObservation("observation-root-replay", 1,
+                "operaton:embedded", ENGINE_ID, TENANT_ID, CASE_ID, PROCESS_INSTANCE_ID,
+                PROCESS_INSTANCE_ID, 9L, ProcessObservation.EventType.COMPLETED, OCCURRED, RECEIVED,
+                Map.of("processDefinitionId", PROCESS_DEFINITION_ID,
+                        "processDefinitionKey", PROCESS_DEFINITION_KEY)));
+
+        assertThat(first.status()).isEqualTo(ApplyStatus.APPLIED);
+        assertThat(replay.status()).isEqualTo(ApplyStatus.DUPLICATE);
+        assertThat(jdbc().sql("SELECT STATUS_ FROM CM_SLA_RECORD WHERE ID_ = 'sla-1'")
+                .query(String.class).single()).isEqualTo("MET");
+        assertThat(jdbc().sql("SELECT MET_AT_ FROM CM_SLA_RECORD WHERE ID_ = 'sla-1'")
+                .query(OffsetDateTime.class).single()).isEqualTo(OffsetDateTime.ofInstant(OCCURRED, ZoneOffset.UTC));
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE SUBJECT_ = :caseId AND TYPE_ LIKE '%sla.met'")
+                .param("caseId", CASE_ID).query(Integer.class).single()).isEqualTo(1);
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_AUDIT_LOG WHERE CASE_ID_ = :caseId AND ACTION_ = 'sla.terminalize-root'")
+                .param("caseId", CASE_ID).query(Integer.class).single()).isEqualTo(1);
     }
 
     private void seedPublishedBpmnCase() {
@@ -684,10 +706,14 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
     static final class DatabaseSlaLifecyclePort implements SlaLifecyclePort {
         private final JdbcClient jdbc;
         private final FailureControl failures;
+        private final SlaLifecycleService lifecycle;
 
         DatabaseSlaLifecyclePort(JdbcClient jdbc, FailureControl failures) {
             this.jdbc = jdbc;
             this.failures = failures;
+            this.lifecycle = new SlaLifecycleService(new SlaRepository(jdbc), new CaseRepository(jdbc),
+                    new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
+                            new WebhookRepository(jdbc), "org.example.cm", ENGINE_ID));
         }
 
         @Override
@@ -703,13 +729,7 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
 
         @Override
         public void terminalizeRoot(String caseId, TerminalState state, Instant occurredAt) {
-            int updated = jdbc.sql("""
-                    UPDATE CM_SLA_RECORD SET STATUS_ = 'MET', VERSION_ = VERSION_ + 1
-                    WHERE CASE_ID_ = :caseId""")
-                    .param("caseId", caseId).update();
-            if (updated != 1) {
-                throw new IllegalStateException("expected one SLA record");
-            }
+            lifecycle.terminalizeRoot(caseId, state, occurredAt);
             failures.after(FailurePoint.AFTER_ROOT_TERMINAL);
         }
     }

@@ -143,12 +143,14 @@ public class SlaSweeper {
 
     private SlaRecord breached(SlaRecord r) {
         return new SlaRecord(r.id(), r.caseId(), r.targetId(), "BREACHED", r.startedAt(),
-                r.dueAt(), r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), r.version());
+                r.dueAt(), r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), r.version(),
+                OffsetDateTime.now());
     }
 
     private SlaRecord warned(SlaRecord r) {
         return new SlaRecord(r.id(), r.caseId(), r.targetId(), r.status(), r.startedAt(),
-                r.dueAt(), null, r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), r.version());
+                r.dueAt(), null, r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), r.version(),
+                r.terminalAt());
     }
 
     private void emit(CaseInstance c, String type, SlaRecord record) {

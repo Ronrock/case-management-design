@@ -20,6 +20,8 @@ public final class EventTypes {
     public static final String SLA_STARTED = "case.sla.started";
     public static final String SLA_PAUSED = "case.sla.paused";
     public static final String SLA_RESUMED = "case.sla.resumed";
+    public static final String SLA_MET = "case.sla.met";
+    public static final String SLA_CANCELLED = "case.sla.cancelled";
     public static final String SLA_WARNING = "case.sla.warning";
     public static final String SLA_BREACHED = "case.sla.breached";
     public static final String SLA_ESCALATED = "case.sla.escalated";

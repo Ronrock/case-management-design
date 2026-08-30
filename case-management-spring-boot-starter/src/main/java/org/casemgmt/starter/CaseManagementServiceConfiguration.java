@@ -13,6 +13,7 @@ import org.casemgmt.observation.EngineObservationHandler;
 import org.casemgmt.observation.LoggingObservationSecurityTelemetry;
 import org.casemgmt.observation.ObservationSecurityTelemetry;
 import org.casemgmt.observation.SlaLifecyclePort;
+import org.casemgmt.sla.SlaLifecycleService;
 import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.release.JsonSchemaCaseContractValidator;
 import org.casemgmt.repo.AppliedObservationRepository;
@@ -29,6 +30,7 @@ import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.MilestoneRepository;
 import org.casemgmt.repo.ParticipantRepository;
 import org.casemgmt.repo.PlanItemRepository;
+import org.casemgmt.repo.SlaRepository;
 import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.rules.StageCompletion;
 import org.casemgmt.service.CaseDefinitionService;
@@ -79,8 +81,9 @@ public class CaseManagementServiceConfiguration {
 
     @Bean
     @ConditionalOnMissingBean(SlaLifecyclePort.class)
-    public SlaLifecyclePort slaLifecyclePort() {
-        return SlaLifecyclePort.none();
+    public SlaLifecyclePort slaLifecyclePort(SlaRepository sla, CaseRepository cases,
+                                             EventPublisher events) {
+        return new SlaLifecycleService(sla, cases, events);
     }
 
     @Bean
