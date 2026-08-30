@@ -46,4 +46,9 @@
       <column name="STATUS_"/><column name="LEASED_AT_"/><column name="CREATED_AT_"/>
     </createIndex>
   </changeSet>
+  <changeSet id="cm-remote-observation-checkpoint-terminal-streams" author="casemgmt">
+    <sql>ALTER TABLE CM_REMOTE_OBS_CHECKPOINT DROP CONSTRAINT CK_CM_REMOTE_OBS_CP_STREAM</sql>
+    <sql>ALTER TABLE CM_REMOTE_OBS_CHECKPOINT ADD CONSTRAINT CK_CM_REMOTE_OBS_CP_STREAM
+      CHECK (STREAM_ IN ('TASKS','TASK_TERMINALS','ACTIVITIES','ACTIVITY_TERMINALS','PROCESSES'))</sql>
+  </changeSet>
 </databaseChangeLog>

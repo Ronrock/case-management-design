@@ -25,14 +25,20 @@ public class RemoteObservationIngestionService {
 
     @Transactional
     public int persistPage(String tenantId, ObservationStream stream,
-                           List<ObservationEnvelope> envelopes, ObservationCursor last) {
+                           List<ObservationEnvelope> envelopes) {
         if (envelopes.isEmpty()) return 0;
         int inserted = 0;
         for (ObservationEnvelope envelope : envelopes) {
             if (inbox.enqueue(tenantId, stream, envelope)) inserted++;
         }
-        checkpoints.advance(tenantId, stream, last);
         return inserted;
+    }
+
+    /** Advances only after the poller has durably inserted every page in its fixed history window. */
+    @Transactional
+    public void advanceCompletedWindow(String tenantId, ObservationStream stream,
+                                       ObservationCursor last) {
+        checkpoints.advance(tenantId, stream, last);
     }
 
     /** Reconciliation is evidence ingestion too, but is not a history-feed cursor. */

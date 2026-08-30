@@ -23,6 +23,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -69,7 +70,8 @@ public final class RemoteObservationPoller {
 
     public int pollOnce() {
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        int count = pollTasks(now) + pollActivities(now) + pollProcesses(now);
+        int count = pollTasks(now) + pollTaskTerminals(now) + pollActivities(now)
+                + pollActivityTerminals(now) + pollProcesses(now);
         inboxWorker.drainOnce(); return count;
     }
 
@@ -77,9 +79,17 @@ public final class RemoteObservationPoller {
         return pollPages(ObservationStream.TASKS, "/history/task?startedAfter=", "startedBefore",
                 "startTime", "taskId", receivedAt, this::taskEnvelope);
     }
+    private int pollTaskTerminals(OffsetDateTime receivedAt) {
+        return pollPages(ObservationStream.TASK_TERMINALS, "/history/task?finishedAfter=", "finishedBefore",
+                "endTime", "taskId", receivedAt, this::taskEnvelope);
+    }
     private int pollActivities(OffsetDateTime receivedAt) {
         return pollPages(ObservationStream.ACTIVITIES, "/history/activity-instance?startedAfter=", "startedBefore",
                 "startTime", "activityInstanceId", receivedAt, this::activityEnvelope);
+    }
+    private int pollActivityTerminals(OffsetDateTime receivedAt) {
+        return pollPages(ObservationStream.ACTIVITY_TERMINALS, "/history/activity-instance?finishedAfter=", "finishedBefore",
+                "endTime", "activityInstanceId", receivedAt, this::activityEnvelope);
     }
     private int pollProcesses(OffsetDateTime receivedAt) {
         return pollPages(ObservationStream.PROCESSES, "/history/process-instance?finished=true&finishedAfter=", "finishedBefore",
@@ -96,6 +106,7 @@ public final class RemoteObservationPoller {
                 .map(ObservationCursor::timestamp)
                 .map(at -> OffsetDateTime.ofInstant(at, ZoneOffset.UTC).minus(OVERLAP))
                 .orElse(receivedAt.minus(INITIAL_LOOKBACK)); int inserted = 0;
+        Map<String, ObservationCursor> windowCursors = new HashMap<>();
         for (int first = 0; ; first += PAGE_SIZE) {
             // Operaton accepts one sort field, so a pair cursor cannot be expressed remotely.
             // Bound the poll to a fixed time window and page by the endpoint's documented stable
@@ -106,18 +117,26 @@ public final class RemoteObservationPoller {
                     + "=" + encoded(receivedAt) + "&firstResult=" + first + "&maxResults=" + PAGE_SIZE
                     + "&sortBy=" + stableIdentitySort + "&sortOrder=asc");
             List<HistoryRow> ordered = page.stream().map(row -> new HistoryRow(new ObservationCursor(timestamp(row, timestampField).toInstant(), requiredId(row)), row)).sorted(Comparator.comparing(HistoryRow::cursor)).toList();
-            inserted += persistPage(stream, ordered, receivedAt, factory);
-            if (page.size() < PAGE_SIZE) return inserted;
+            inserted += persistPage(stream, ordered, receivedAt, factory, windowCursors);
+            if (page.size() < PAGE_SIZE) {
+                windowCursors.forEach((tenantId, cursor) ->
+                        ingestion.advanceCompletedWindow(tenantId, stream, cursor));
+                return inserted;
+            }
         }
     }
 
-    private int persistPage(ObservationStream stream, List<HistoryRow> rows, OffsetDateTime receivedAt, EnvelopeFactory factory) {
+    private int persistPage(ObservationStream stream, List<HistoryRow> rows, OffsetDateTime receivedAt,
+                            EnvelopeFactory factory, Map<String, ObservationCursor> windowCursors) {
         Map<String,List<Converted>> byTenant = new LinkedHashMap<>();
         for (HistoryRow row : rows) { Converted converted = factory.convert(row, receivedAt); if (converted != null) byTenant.computeIfAbsent(converted.tenantId(), ignored -> new ArrayList<>()).add(converted); }
         int inserted = 0;
         for (var entry : byTenant.entrySet()) {
             List<Converted> values = entry.getValue();
-            inserted += ingestion.persistPage(entry.getKey(), stream, values.stream().map(Converted::envelope).toList(), values.getLast().cursor());
+            inserted += ingestion.persistPage(entry.getKey(), stream, values.stream().map(Converted::envelope).toList());
+            values.stream().map(Converted::cursor).max(Comparator.naturalOrder()).ifPresent(cursor ->
+                    windowCursors.merge(entry.getKey(), cursor,
+                            (current, candidate) -> current.compareTo(candidate) >= 0 ? current : candidate));
         }
         return inserted;
     }
@@ -126,7 +145,7 @@ public final class RemoteObservationPoller {
         Map<String,Object> row = history.row(); String processId = string(row.get("processInstanceId")); CaseIdentity identity = identity(processId, string(row.get("businessKey"))); String taskId = string(row.get("id"));
         if (identity == null || taskId == null) return null;
         OffsetDateTime engineAt = timeOr(row.get("endTime"), timeOr(row.get("startTime"), receivedAt));
-        UserTaskObservation.EventType event = row.get("endTime") == null ? UserTaskObservation.EventType.CREATED : row.get("deleteReason") == null ? UserTaskObservation.EventType.COMPLETED : UserTaskObservation.EventType.DELETED;
+        UserTaskObservation.EventType event = taskEvent(row);
         var metadata = classifier.taskMetadata(string(row.get("processDefinitionId")), string(row.get("taskDefinitionKey")));
         Map<String,Object> attributes = new LinkedHashMap<>(); attributes.put("taskDefinitionKey", string(row.get("taskDefinitionKey"))); attributes.put("activityInstanceId", taskId); attributes.put("name", string(row.get("name"))); attributes.put("assignee", string(row.get("assignee"))); attributes.put("candidateGroups", metadata.candidateGroups()); attributes.put("formKey", metadata.formKey()); attributes.put("priority", intValue(row.get("priority"))); OffsetDateTime due = time(row.get("due")); attributes.put("dueAt", due == null ? null : due.toString());
         return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new UserTaskObservation("remote-task-" + taskId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, taskId, null, event, engineAt.toInstant(), receivedAt.toInstant(), attributes)));
@@ -160,6 +179,13 @@ public final class RemoteObservationPoller {
     private static String string(Object value) { return value == null || value.toString().isBlank() ? null : value.toString(); }
     private static String firstString(Object... values) { for (Object value : values) { String string = string(value); if (string != null) return string; } return null; }
     private static int intValue(Object value) { return value instanceof Number number ? number.intValue() : 0; }
+    private static UserTaskObservation.EventType taskEvent(Map<String, Object> row) {
+        if (row.get("endTime") == null) return UserTaskObservation.EventType.CREATED;
+        String reason = string(row.get("deleteReason"));
+        if ("completed".equals(reason)) return UserTaskObservation.EventType.COMPLETED;
+        if (reason == null) throw new EngineException("Finished remote task history row has no deleteReason");
+        return UserTaskObservation.EventType.DELETED;
+    }
     private record HistoryRow(ObservationCursor cursor, Map<String,Object> row) { }
     private record Converted(String tenantId, ObservationCursor cursor, ObservationEnvelope envelope) { }
     private record CaseIdentity(String caseId, String tenantId, String engineId) { }

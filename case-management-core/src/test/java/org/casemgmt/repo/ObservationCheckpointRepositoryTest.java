@@ -21,6 +21,10 @@ class ObservationCheckpointRepositoryTest extends OracleTestBase {
                 new ObservationCursor(at, "task-0500"));
         checkpoints.advance("tenant-a", ObservationStream.ACTIVITIES,
                 new ObservationCursor(at, "activity-0500"));
+        checkpoints.advance("tenant-a", ObservationStream.TASK_TERMINALS,
+                new ObservationCursor(at, "task-terminal-0500"));
+        checkpoints.advance("tenant-a", ObservationStream.ACTIVITY_TERMINALS,
+                new ObservationCursor(at, "activity-terminal-0500"));
         checkpoints.advance("tenant-b", ObservationStream.TASKS,
                 new ObservationCursor(at, "task-0001"));
 
@@ -28,6 +32,10 @@ class ObservationCheckpointRepositoryTest extends OracleTestBase {
                 .contains(new ObservationCursor(at, "task-0500"));
         assertThat(checkpoints.find("tenant-a", ObservationStream.ACTIVITIES))
                 .contains(new ObservationCursor(at, "activity-0500"));
+        assertThat(checkpoints.find("tenant-a", ObservationStream.TASK_TERMINALS))
+                .contains(new ObservationCursor(at, "task-terminal-0500"));
+        assertThat(checkpoints.find("tenant-a", ObservationStream.ACTIVITY_TERMINALS))
+                .contains(new ObservationCursor(at, "activity-terminal-0500"));
         assertThat(checkpoints.find("tenant-b", ObservationStream.TASKS))
                 .contains(new ObservationCursor(at, "task-0001"));
     }
