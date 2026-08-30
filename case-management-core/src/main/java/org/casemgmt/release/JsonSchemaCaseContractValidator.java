@@ -330,7 +330,13 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
                         text(node, "startAnchor"),
                         text(node, "meetAnchor"),
                         text(node, "cancelAnchor"),
-                        strings(node.get("warnings")))));
+                        strings(node.get("warnings")),
+                        integer(node, "targetVersion", 1),
+                        text(node, "occurrenceKey"),
+                        integer(node, "calendarRevision", 1),
+                        strings(node.get("pauseAnchors")),
+                        strings(node.get("resumeAnchors")),
+                        strings(node.get("breachActions")))));
         return result;
     }
 
@@ -399,6 +405,11 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
     private static String text(JsonNode node, String property) {
         JsonNode value = node == null ? null : node.get(property);
         return value == null || value.isNull() || value.asText().isBlank() ? null : value.asText();
+    }
+
+    private static Integer integer(JsonNode node, String property, int defaultValue) {
+        JsonNode value = node == null ? null : node.get(property);
+        return value == null || value.isNull() ? defaultValue : value.intValue();
     }
 
     private static InvalidCaseDefinitionException invalid(String key, String message) {

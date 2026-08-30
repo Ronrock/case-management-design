@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import org.springframework.dao.DuplicateKeyException;
 
 /** Persistence for {@code CM_BUSINESS_CALENDAR}, {@code CM_SLA_POLICY}, {@code CM_SLA_TARGET}
  * and {@code CM_SLA_RECORD} (spec §7). Policy/target/calendar writers here are test-and-PoC-seeding
@@ -24,6 +25,15 @@ public class SlaRepository {
                             List<String> breachActions) {}
 
     public record ClaimedRecord(SlaRecord record, String claimToken) {}
+
+    /** Immutable evidence captured from a published contract when one clock is started. */
+    public record ContractOccurrence(String id, String caseId, String targetId, String targetKey,
+                                     int targetVersion, String scope, String occurrenceKey,
+                                     String contractReleaseId, String contractSha256,
+                                     String calendarId, int calendarRevision,
+                                     String meetAnchor, String cancelAnchor,
+                                     OffsetDateTime startedAt, OffsetDateTime dueAt,
+                                     OffsetDateTime warnAt, String transitionEvidence) { }
 
     private static final String RECORD_COLUMNS = """
             ID_, CASE_ID_, TARGET_ID_, STATUS_, STARTED_AT_, DUE_AT_, WARN_AT_, PAUSED_AT_,
@@ -76,6 +86,11 @@ public class SlaRepository {
         return jdbc.sql("SELECT DEFINITION_JSON_ FROM CM_BUSINESS_CALENDAR WHERE ID_ = :id")
                 .param("id", calendarId).query(String.class).optional()
                 .map(JsonCodec::toMap).orElse(Map.of());
+    }
+
+    public boolean calendarExists(String calendarId) {
+        return jdbc.sql("SELECT COUNT(*) FROM CM_BUSINESS_CALENDAR WHERE ID_ = :id")
+                .param("id", calendarId).query(Integer.class).single() == 1;
     }
 
     public List<TargetRow> targetsFor(String policyId) {
@@ -142,6 +157,56 @@ public class SlaRepository {
             .update();
     }
 
+    /**
+     * Creates a contract-derived clock exactly once.  The unique occurrence identity is the
+     * durable idempotency boundary for replayed engine observations; its policy/target rows are
+     * only compatibility metadata for the existing sweeper and are not the behavioural source.
+     */
+    public boolean insertContractOccurrenceIfAbsent(ContractOccurrence occurrence) {
+        try {
+            jdbc.sql("""
+                    INSERT INTO CM_SLA_RECORD
+                      (ID_, CASE_ID_, TARGET_ID_, STATUS_, STARTED_AT_, DUE_AT_, WARN_AT_,
+                       PAUSED_TOTAL_SECS_, VERSION_, CONTRACT_RELEASE_ID_, CONTRACT_SHA256_,
+                       TARGET_KEY_, TARGET_VERSION_, SLA_SCOPE_, OCCURRENCE_KEY_, CALENDAR_ID_,
+                       CALENDAR_REVISION_, MEET_ANCHOR_, CANCEL_ANCHOR_, TRANSITION_EVIDENCE_JSON_)
+                    VALUES
+                      (:id, :caseId, :targetId, 'RUNNING', :startedAt, :dueAt, :warnAt,
+                       0, 0, :releaseId, :sha256, :targetKey, :targetVersion, :scope,
+                       :occurrenceKey, :calendarId, :calendarRevision, :meetAnchor,
+                       :cancelAnchor, :evidence)""")
+                    .param("id", occurrence.id()).param("caseId", occurrence.caseId())
+                    .param("targetId", occurrence.targetId()).param("startedAt", occurrence.startedAt())
+                    .param("dueAt", occurrence.dueAt()).param("warnAt", occurrence.warnAt())
+                    .param("releaseId", occurrence.contractReleaseId()).param("sha256", occurrence.contractSha256())
+                    .param("targetKey", occurrence.targetKey()).param("targetVersion", occurrence.targetVersion())
+                    .param("scope", occurrence.scope()).param("occurrenceKey", occurrence.occurrenceKey())
+                    .param("calendarId", occurrence.calendarId()).param("calendarRevision", occurrence.calendarRevision())
+                    .param("meetAnchor", occurrence.meetAnchor()).param("cancelAnchor", occurrence.cancelAnchor())
+                    .param("evidence", occurrence.transitionEvidence()).update();
+            return true;
+        } catch (DuplicateKeyException duplicate) {
+            return false;
+        }
+    }
+
+    /** Ensures the legacy scheduler can locate a contract occurrence without owning its rules. */
+    public void ensureContractTarget(String policyId, String targetId, String targetKey,
+                                     String calendarId, String duration, String warning,
+                                     List<String> breachActions) {
+        try {
+            insertPolicy(policyId, "Published contract " + policyId, null, calendarId);
+        } catch (DuplicateKeyException ignored) {
+            // The immutable release-derived key already owns this compatibility row.
+        }
+        try {
+            insertTarget(targetId, policyId, targetKey, targetKey, duration,
+                    warning, List.of(), breachActions);
+        } catch (DuplicateKeyException ignored) {
+            // Same release/binding replay; the occurrence unique key remains the authority.
+        }
+    }
+
     public List<SlaRecord> findByCase(String caseId) {
         return jdbc.sql("SELECT " + RECORD_COLUMNS + " FROM CM_SLA_RECORD WHERE CASE_ID_ = :caseId")
                 .param("caseId", caseId).query(SlaRepository::mapRecord).list();
@@ -181,6 +246,45 @@ public class SlaRepository {
             }
         }
         return List.copyOf(terminalized);
+    }
+
+    /**
+     * Atomically terminalises contract-derived clocks whose published binding declares the root
+     * anchor as its outcome.  A contract clock with no matching anchor is deliberately left
+     * alone; the runtime never guesses an SLA outcome from a case state.
+     */
+    public List<SlaRecord> terminalizeContractOccurrencesForRoot(String caseId, String rootAnchor,
+                                                                   OffsetDateTime terminalAt) {
+        List<ContractTerminalCandidate> candidates = jdbc.sql("""
+                SELECT ID_, MEET_ANCHOR_, CANCEL_ANCHOR_
+                FROM CM_SLA_RECORD
+                WHERE CASE_ID_ = :caseId AND CONTRACT_RELEASE_ID_ IS NOT NULL
+                  AND STATUS_ IN ('RUNNING', 'PAUSED')
+                ORDER BY ID_""")
+                .param("caseId", caseId)
+                .query((rs, n) -> new ContractTerminalCandidate(rs.getString("ID_"),
+                        rs.getString("MEET_ANCHOR_"), rs.getString("CANCEL_ANCHOR_")))
+                .list();
+        List<SlaRecord> result = new java.util.ArrayList<>();
+        for (ContractTerminalCandidate candidate : candidates) {
+            String status = rootAnchor.equals(candidate.meetAnchor()) ? "MET"
+                    : rootAnchor.equals(candidate.cancelAnchor()) ? "CANCELLED" : null;
+            if (status == null) continue;
+            int changed = jdbc.sql("""
+                    UPDATE CM_SLA_RECORD
+                    SET STATUS_ = :status, WARN_AT_ = NULL, PAUSED_AT_ = NULL,
+                        PAUSED_REASON_ = NULL, CLAIM_TOKEN_ = NULL, CLAIMED_AT_ = NULL,
+                        MET_AT_ = CASE WHEN :status = 'MET' THEN :terminalAt ELSE MET_AT_ END,
+                        CANCELLED_AT_ = CASE WHEN :status = 'CANCELLED' THEN :terminalAt ELSE CANCELLED_AT_ END,
+                        TRANSITION_EVIDENCE_JSON_ = :evidence, VERSION_ = VERSION_ + 1
+                    WHERE ID_ = :id AND STATUS_ IN ('RUNNING', 'PAUSED')""")
+                    .param("id", candidate.id()).param("status", status).param("terminalAt", terminalAt)
+                    .param("evidence", JsonCodec.toJson(Map.of("anchor", rootAnchor,
+                            "outcome", status, "occurredAt", terminalAt.toInstant().toString())))
+                    .update();
+            if (changed == 1) result.add(require(candidate.id()));
+        }
+        return List.copyOf(result);
     }
 
     public SlaRecord require(String id) {
@@ -302,6 +406,24 @@ public class SlaRepository {
             .list();
     }
 
+    /** Claims one previously selected due row after the caller has locked its case. */
+    public java.util.Optional<ClaimedRecord> claimDueRecord(String id, OffsetDateTime now) {
+        String token = UUID.randomUUID().toString();
+        OffsetDateTime staleBefore = now.minus(CLAIM_LEASE);
+        int claimed = jdbc.sql("""
+                UPDATE CM_SLA_RECORD SET CLAIM_TOKEN_ = :token, CLAIMED_AT_ = SYSTIMESTAMP
+                WHERE ID_ = :id AND STATUS_ = 'RUNNING'
+                  AND (DUE_AT_ <= :now OR WARN_AT_ <= :now)
+                  AND (CLAIM_TOKEN_ IS NULL OR CLAIMED_AT_ <= :staleBefore)""")
+                .param("id", id).param("token", token).param("now", now)
+                .param("staleBefore", staleBefore).update();
+        if (claimed == 0) return java.util.Optional.empty();
+        return jdbc.sql("SELECT " + RECORD_COLUMNS + ", CLAIM_TOKEN_ FROM CM_SLA_RECORD WHERE ID_ = :id")
+                .param("id", id)
+                .query((rs, n) -> new ClaimedRecord(mapRecord(rs, n), rs.getString("CLAIM_TOKEN_")))
+                .optional();
+    }
+
     /**
      * Running clocks past their warning or breach threshold, oldest first and bounded to
      * {@link #MAX_SWEEP_BATCH}. This is an unclaimed diagnostic/test lookup; production sweeping
@@ -329,6 +451,8 @@ public class SlaRepository {
             .param("now", now).param("batch", MAX_SWEEP_BATCH)
             .query(SlaRepository::mapRecord).list();
     }
+
+    private record ContractTerminalCandidate(String id, String meetAnchor, String cancelAnchor) { }
 
     private static SlaRecord mapRecord(java.sql.ResultSet rs, int n) throws java.sql.SQLException {
         return new SlaRecord(rs.getString("ID_"), rs.getString("CASE_ID_"), rs.getString("TARGET_ID_"),

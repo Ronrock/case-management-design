@@ -388,10 +388,11 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                     "NEXT_ATTEMPT_AT_", "present-at-commit"));
         }).toList();
         return new DatabaseState(
-                replaceColumn(state.caseRows(), "UPDATED_AT_", "after-created-at"),
+                replaceColumn(replaceColumn(state.caseRows(), "UPDATED_AT_", "after-created-at"),
+                        "LAST_PROJECTED_AT_", "present-at-commit"),
                 state.planItemRows(),
                 state.taskRows(),
-                state.linkedProcessRows(),
+                replaceColumn(state.linkedProcessRows(), "STARTED_AT_", "present-at-commit"),
                 state.slaRows(),
                 state.appliedRows().stream().map(row -> replacing(row, Map.of(
                         "CLAIM_TOKEN_", "generated-claim-token",

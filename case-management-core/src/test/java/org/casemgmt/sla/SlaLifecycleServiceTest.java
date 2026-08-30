@@ -10,15 +10,34 @@ import org.casemgmt.observation.SlaLifecyclePort;
 import org.casemgmt.projection.ProjectionStatus;
 import org.casemgmt.repo.AuditRepository;
 import org.casemgmt.repo.CaseRepository;
+import org.casemgmt.repo.CaseDefinitionReleaseRepository;
+import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.SlaRepository;
 import org.casemgmt.repo.WebhookRepository;
+import org.casemgmt.release.BindingStatus;
+import org.casemgmt.release.CaseDefinitionRelease;
+import org.casemgmt.release.CaseDefinitionVersionBinding;
+import org.casemgmt.release.JsonSchemaCaseContractValidator;
+import org.casemgmt.release.ReleaseKind;
+import org.casemgmt.release.ReleaseStatus;
+import org.casemgmt.orchestration.OrchestrationMode;
+import org.casemgmt.orchestration.EngineDeploymentIdentity;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -102,8 +121,113 @@ class SlaLifecycleServiceTest extends OracleTestBase {
                 assertThat(record.status()).isEqualTo("MET"));
     }
 
+    @Test
+    void publishedBindingCreatesOneSnapshottedOccurrenceAndUsesItsDeclaredRootOutcomes() {
+        String contract = """
+                {"key":"sla-root","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{"resolution":{"scope":"CASE","calendarId":"cal-1",
+                 "calendarRevision":7,"targetVersion":3,"duration":"PT1H",
+                 "startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED",
+                 "cancelAnchor":"CASE_CANCELLED","warnings":["PT30M"]}}}""";
+        String sha = org.casemgmt.repo.JsonCodec.sha256(contract);
+        var releases = new CaseDefinitionReleaseRepository(dataSource());
+        releases.insert(CaseDefinitionRelease.storedWithEngineIdentity("orch", "sla-root", "tenant-a",
+                ReleaseKind.ORCHESTRATION, "application/xml", "<definitions/>".getBytes(StandardCharsets.UTF_8), "a".repeat(64),
+                ReleaseStatus.ACTIVE, new EngineDeploymentIdentity("dep", "proc:1", "sla-root", 1,
+                        "tenant-a"), null, "tester"));
+        releases.insert(CaseDefinitionRelease.stored("contract-sla-root", "sla-root", "tenant-a",
+                ReleaseKind.CONTRACT, "application/json", contract.getBytes(StandardCharsets.UTF_8), sha,
+                ReleaseStatus.ACTIVE, null, null, "tester"));
+        releases.insert(CaseDefinitionRelease.stored("presentation", "sla-root", "tenant-a",
+                ReleaseKind.PRESENTATION, "application/json", "{}".getBytes(StandardCharsets.UTF_8),
+                "b".repeat(64), ReleaseStatus.ACTIVE, null, null, "tester"));
+        new CaseDefinitionVersionBindingRepository(dataSource()).insert(new CaseDefinitionVersionBinding(
+                "sla-root:1", "sla-root", "tenant-a", "orch", "a".repeat(64),
+                "contract-sla-root", sha, "presentation", "b".repeat(64), ReleaseStatus.ACTIVE,
+                OrchestrationMode.BPMN, BindingStatus.ACTIVE,
+                new EngineDeploymentIdentity("dep", "proc:1", "sla-root", 1, "tenant-a"), null,
+                OffsetDateTime.now(), OffsetDateTime.now(), null, "tester"));
+        SlaLifecycleService contractLifecycle = new SlaLifecycleService(sla, new CaseRepository(jdbc()),
+                publisher(), new CaseDefinitionVersionBindingRepository(dataSource()), releases,
+                new JsonSchemaCaseContractValidator());
+        Instant started = Instant.parse("2026-08-30T10:00:00Z");
+
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "process", "STARTED",
+                "root", started));
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "process", "STARTED",
+                "root", started));
+
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'")
+                .query(Integer.class).single()).isEqualTo(1);
+        var snapshot = jdbc().sql("""
+                SELECT TARGET_KEY_, TARGET_VERSION_, SLA_SCOPE_, OCCURRENCE_KEY_, CALENDAR_REVISION_,
+                       TRANSITION_EVIDENCE_JSON_ FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'""")
+                .query((rs, n) -> List.of(rs.getString(1), rs.getInt(2), rs.getString(3),
+                        rs.getString(4), rs.getInt(5), rs.getString(6))).single();
+        assertThat(snapshot.subList(0, 5)).containsExactly("resolution", 3, "CASE", "CASE", 7);
+        assertThat(String.valueOf(snapshot.get(5))).contains("\"anchor\":\"CASE_CREATED\"")
+                .contains("\"occurredAt\":\"2026-08-30T10:00:00Z\"")
+                .contains("\"transition\":\"STARTED\"");
+
+        contractLifecycle.terminalizeRoot(CASE_ID, SlaLifecyclePort.TerminalState.CANCELLED,
+                Instant.parse("2026-08-30T10:20:00Z"));
+
+        assertThat(jdbc().sql("SELECT STATUS_ FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'")
+                .query(String.class).single()).isEqualTo("CANCELLED");
+    }
+
+    @Test
+    void oracleRootCompletionAndSweeperRaceUsesCaseThenSlaOrderAndCannotLeaveABreach() throws Exception {
+        jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE "
+                        + "WHERE ID_ = 'sla-running'").update();
+        TransactionTemplate transactions = new TransactionTemplate(new DataSourceTransactionManager(dataSource()));
+        CaseRepository lockingCases = new CaseRepository(jdbc());
+        CountDownLatch rootHasCaseLock = new CountDownLatch(1);
+        CountDownLatch sweeperReadCandidate = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<Void> root = pool.submit(() -> transactions.execute(status -> {
+                lockingCases.lockForSlaLifecycle(CASE_ID);
+                rootHasCaseLock.countDown();
+                await(sweeperReadCandidate, "sweeper to read its due candidate");
+                lifecycle.terminalizeRoot(CASE_ID, SlaLifecyclePort.TerminalState.COMPLETED,
+                        Instant.parse("2026-08-30T11:00:00Z"));
+                return null;
+            }));
+            assertThat(rootHasCaseLock.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<Integer> sweep = pool.submit(() -> {
+                return transactions.execute(status -> {
+                    SlaRecord candidate = sla.dueRecords(OffsetDateTime.now()).stream()
+                            .filter(record -> record.id().equals("sla-running")).findFirst().orElseThrow();
+                    sweeperReadCandidate.countDown();
+                    // These are exactly SlaSweeper's production steps: obtain the shared case
+                    // lock before leasing the SLA row, then let the claim predicate decide.
+                    lockingCases.lockForSlaLifecycle(candidate.caseId());
+                    return sla.claimDueRecord(candidate.id(), OffsetDateTime.now()).isPresent() ? 1 : 0;
+                });
+            });
+            root.get(10, TimeUnit.SECONDS);
+            assertThat(sweep.get(10, TimeUnit.SECONDS)).isZero();
+            assertThat(sla.require("sla-running").status()).isEqualTo("MET");
+            assertThat(sla.claimDueRecords(OffsetDateTime.now().plusDays(1))).isEmpty();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     private EventPublisher publisher() {
         return new EventPublisher(new EventRepository(jdbc()), new AuditRepository(jdbc()),
                 new WebhookRepository(jdbc()), "org.example.cm", "engine-a");
+    }
+
+    private static void await(CountDownLatch latch, String description) {
+        try {
+            if (!latch.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("Timed out waiting for " + description);
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted waiting for " + description, interrupted);
+        }
     }
 }

@@ -285,7 +285,7 @@ public final class AppliedObservationRepository {
                 .param("entityId", values.entityId())
                 .param("entityRevision", values.entityRevision())
                 .param("eventType", values.eventType())
-                .param("engineOccurredAt", values.engineOccurredAt())
+                .param("engineOccurredAt", asOffsetDateTime(values.engineOccurredAt()))
                 .update();
     }
 
@@ -320,7 +320,7 @@ public final class AppliedObservationRepository {
                 .param("entityId", values.entityId())
                 .param("entityRevision", values.entityRevision())
                 .param("eventType", values.eventType())
-                .param("engineOccurredAt", values.engineOccurredAt())
+                .param("engineOccurredAt", asOffsetDateTime(values.engineOccurredAt()))
                 .param("fingerprint", values.fingerprint())
                 .param("tenantId", values.tenantId())
                 .update();
@@ -344,6 +344,12 @@ public final class AppliedObservationRepository {
                 observation.entityRevision(),
                 requiredBounded(observation.eventType().name(), "eventType", EVENT_TYPE_MAX),
                 observation.engineOccurredAt(), newOwnershipToken());
+    }
+
+    /** Oracle JDBC cannot bind {@link java.time.Instant} through {@code setObject}; bind the
+     * equivalent TIMESTAMP WITH TIME ZONE value explicitly instead. */
+    private static OffsetDateTime asOffsetDateTime(java.time.Instant instant) {
+        return OffsetDateTime.ofInstant(instant, java.time.ZoneOffset.UTC);
     }
 
     private static String observationKind(EngineObservation observation) {

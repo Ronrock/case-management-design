@@ -77,16 +77,23 @@ public class SlaSweeper {
     public int sweep() {
         OffsetDateTime now = OffsetDateTime.now();
         int handled = 0;
-        var claimedRecords = sla.claimDueRecords(now);
+        // Select without locks, then acquire the shared case lock before leasing an SLA row.
+        // The root observation follows the same order (case -> SLA), so the two paths cannot
+        // deadlock and a root completion always makes the following claim predicate fail.
+        var dueCandidates = sla.dueRecords(now);
         Map<String, SlaRepository.TargetRow> targetsById = sla.targetsById(
-                claimedRecords.stream().map(c -> c.record().targetId()).toList());
+                dueCandidates.stream().map(SlaRecord::targetId).toList());
 
-        for (SlaRepository.ClaimedRecord claimed : claimedRecords) {
-            SlaRepository.TargetRow target = targetsById.get(claimed.record().targetId());
+        for (SlaRecord candidate : dueCandidates) {
+            cases.lockForSlaLifecycle(candidate.caseId());
+            var claimed = sla.claimDueRecord(candidate.id(), now);
+            if (claimed.isEmpty()) continue;
+            SlaRepository.ClaimedRecord lease = claimed.orElseThrow();
+            SlaRepository.TargetRow target = targetsById.get(lease.record().targetId());
             if (target == null) {
-                throw new NotFoundException("SlaTarget", claimed.record().targetId());
+                throw new NotFoundException("SlaTarget", lease.record().targetId());
             }
-            if (processOne(claimed, target, now)) {
+            if (processOne(lease, target, now)) {
                 handled++;
             }
         }

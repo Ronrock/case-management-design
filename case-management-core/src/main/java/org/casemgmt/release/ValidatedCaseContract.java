@@ -137,9 +137,24 @@ public record ValidatedCaseContract(
     public record SlaBindingDefinition(String id, SlaScope scope, String calendarId,
                                        String duration, String dueDateExpression,
                                        String startAnchor, String meetAnchor, String cancelAnchor,
-                                       List<String> warnings) {
+                                       List<String> warnings, Integer targetVersion,
+                                       String occurrenceKey, Integer calendarRevision,
+                                       List<String> pauseAnchors, List<String> resumeAnchors,
+                                       List<String> breachActions) {
         public SlaBindingDefinition {
             warnings = List.copyOf(warnings);
+            pauseAnchors = List.copyOf(pauseAnchors);
+            resumeAnchors = List.copyOf(resumeAnchors);
+            breachActions = List.copyOf(breachActions);
+        }
+
+        /** Compatibility constructor for the original published binding shape. */
+        public SlaBindingDefinition(String id, SlaScope scope, String calendarId,
+                                    String duration, String dueDateExpression,
+                                    String startAnchor, String meetAnchor, String cancelAnchor,
+                                    List<String> warnings) {
+            this(id, scope, calendarId, duration, dueDateExpression, startAnchor, meetAnchor,
+                    cancelAnchor, warnings, 1, null, 1, List.of(), List.of(), List.of());
         }
     }
 

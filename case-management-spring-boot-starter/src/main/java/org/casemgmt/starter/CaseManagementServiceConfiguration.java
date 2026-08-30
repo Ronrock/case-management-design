@@ -82,8 +82,11 @@ public class CaseManagementServiceConfiguration {
     @Bean
     @ConditionalOnMissingBean(SlaLifecyclePort.class)
     public SlaLifecyclePort slaLifecyclePort(SlaRepository sla, CaseRepository cases,
-                                             EventPublisher events) {
-        return new SlaLifecycleService(sla, cases, events);
+                                             EventPublisher events,
+                                             CaseDefinitionVersionBindingRepository bindings,
+                                             CaseDefinitionReleaseRepository releases) {
+        return new SlaLifecycleService(sla, cases, events, bindings, releases,
+                new JsonSchemaCaseContractValidator());
     }
 
     @Bean

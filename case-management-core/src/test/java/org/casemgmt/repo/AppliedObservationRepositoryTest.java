@@ -90,6 +90,24 @@ class AppliedObservationRepositoryTest extends OracleTestBase {
     }
 
     @Test
+    void oraclePersistsTheEngineInstantUsingATimestampWithTimeZoneBinding() {
+        Instant occurredAt = Instant.parse("2026-08-30T10:15:30.123456Z");
+        ProcessObservation observation = new ProcessObservation("observation-instant", 1,
+                "operaton:embedded", "tenant-a", "case-1", "process-1", "process-1", 1L,
+                ProcessObservation.EventType.STARTED, occurredAt, occurredAt.plusSeconds(1),
+                Map.of("caseDefinition", "claims"));
+
+        observations.claim(observation);
+
+        OffsetDateTime stored = jdbc().sql("""
+                SELECT ENGINE_OCCURRED_AT_ FROM CM_APPLIED_ENGINE_OBSERVATION
+                WHERE FINGERPRINT_ = :fingerprint""")
+                .param("fingerprint", observation.fingerprint())
+                .query(OffsetDateTime.class).single();
+        assertThat(stored.toInstant()).isEqualTo(occurredAt);
+    }
+
+    @Test
     void duplicateClaimDoesNotReplaceTheOwningObservationOrMutateItsClaim() {
         ProcessObservation original = observation("observation-1", "tenant-a");
         ProcessObservation redelivery = observation("observation-2", "tenant-a");

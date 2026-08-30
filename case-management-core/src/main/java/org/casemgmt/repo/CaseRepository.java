@@ -123,6 +123,18 @@ public class CaseRepository {
     }
 
     /**
+     * Locks the case before an SLA row is claimed.  SLA root terminalisation is called from the
+     * observation path which already holds this same lock, so this establishes one global order
+     * (case then SLA) and prevents an SLA sweeper from breaching a case while its completion is
+     * waiting to terminalise its clocks.  The caller must own the surrounding transaction.
+     */
+    public void lockForSlaLifecycle(String caseId) {
+        boolean exists = jdbc.sql("SELECT ID_ FROM CM_CASE WHERE ID_ = :id FOR UPDATE")
+                .param("id", caseId).query(String.class).optional().isPresent();
+        if (!exists) throw new NotFoundException("Case", caseId);
+    }
+
+    /**
      * Optimistic update. Zero rows affected means someone else wrote first —
      * never retried here, always surfaced as 412 by the REST layer.
      *

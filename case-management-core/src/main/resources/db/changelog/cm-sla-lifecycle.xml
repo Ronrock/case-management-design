@@ -16,8 +16,43 @@
     </addColumn>
   </changeSet>
 
+  <!-- Do not silently drop an operator-customised constraint.  Only the original four-state
+       shape or this exact five-state shape is a known predecessor; any other shape needs an
+       explicit migration rather than weakening an unknown production guard. -->
   <changeSet id="cm-sla-root-terminalization-status" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+      onFailMessage="CK_CM_SLAR_STATUS is not a recognised SLA lifecycle constraint; migration stopped without changing it.">
+      <sqlCheck expectedResult="1"><![CDATA[
+        SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_SLA_RECORD' AND CONSTRAINT_NAME = 'CK_CM_SLAR_STATUS'
+          AND CONSTRAINT_TYPE = 'C'
+          AND (REGEXP_LIKE(REPLACE(UPPER(SEARCH_CONDITION_VC), ' ', ''),
+               'STATUS_?IN\(''RUNNING'',''PAUSED'',''MET'',''BREACHED''\)')
+            OR REGEXP_LIKE(REPLACE(UPPER(SEARCH_CONDITION_VC), ' ', ''),
+               'STATUS_?IN\(''RUNNING'',''PAUSED'',''MET'',''CANCELLED'',''BREACHED''\)'))
+      ]]></sqlCheck>
+    </preConditions>
     <sql>ALTER TABLE CM_SLA_RECORD DROP CONSTRAINT CK_CM_SLAR_STATUS</sql>
     <sql>ALTER TABLE CM_SLA_RECORD ADD CONSTRAINT CK_CM_SLAR_STATUS CHECK (STATUS_ IN ('RUNNING','PAUSED','MET','CANCELLED','BREACHED'))</sql>
+  </changeSet>
+
+  <changeSet id="cm-sla-contract-occurrence-snapshot" author="casemgmt">
+    <addColumn tableName="CM_SLA_RECORD">
+      <column name="CONTRACT_RELEASE_ID_" type="VARCHAR2(128)"/>
+      <column name="CONTRACT_SHA256_" type="VARCHAR2(64)"/>
+      <column name="TARGET_KEY_" type="VARCHAR2(200)"/>
+      <column name="TARGET_VERSION_" type="NUMBER(10)"/>
+      <column name="SLA_SCOPE_" type="VARCHAR2(20)"/>
+      <column name="OCCURRENCE_KEY_" type="VARCHAR2(200)"/>
+      <column name="CALENDAR_ID_" type="VARCHAR2(128)"/>
+      <column name="CALENDAR_REVISION_" type="NUMBER(10)"/>
+      <column name="MEET_ANCHOR_" type="VARCHAR2(128)"/>
+      <column name="CANCEL_ANCHOR_" type="VARCHAR2(128)"/>
+      <column name="TRANSITION_EVIDENCE_JSON_" type="CLOB"/>
+    </addColumn>
+    <!-- A regular unique constraint would also collapse every legacy row with a non-null case
+         id and null snapshots.  The function-based index applies uniqueness only once a row is
+         contract-derived, preserving pre-existing policy clocks. -->
+    <sql>CREATE UNIQUE INDEX UQ_CM_SLAR_OCCURRENCE ON CM_SLA_RECORD (CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN CASE_ID_ END, CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN CONTRACT_RELEASE_ID_ END, CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN TARGET_KEY_ END, CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN OCCURRENCE_KEY_ END)</sql>
   </changeSet>
 </databaseChangeLog>
