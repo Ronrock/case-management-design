@@ -20,6 +20,7 @@ import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.ParticipantRepository;
 import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.rules.CriterionEvaluator;
+import org.casemgmt.rules.EvaluationContext;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -29,6 +30,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -221,8 +223,9 @@ class AdHocActionServiceTest {
         CaseInstance afterLock = instance(CaseState.ACTIVE, Map.of("eligible", false));
         when(cases.require(beforeLock.id())).thenReturn(beforeLock, afterLock);
         when(engine.defersTaskMutations()).thenReturn(true);
-        when(criteria.matches(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any()))
-                .thenReturn(false);
+        when(criteria.matches(eq("${eligible}"), any(EvaluationContext.class)))
+                .thenAnswer(invocation -> Boolean.TRUE.equals(
+                        invocation.<EvaluationContext>getArgument(1).variables().get("eligible")));
         AdHocActionService service = service(cases, engine, mock(PlanItemRepository.class),
                 mock(CaseTaskRepository.class), operations, release("""
                 {"key":"definition","orchestrationMode":"BPMN","fields":{},"forms":{},
@@ -238,6 +241,10 @@ class AdHocActionServiceTest {
                 .isEqualTo("ad-hoc-action-unavailable");
 
         verify(cases).lockForAdHocAction(beforeLock.id());
+        org.mockito.ArgumentCaptor<EvaluationContext> evaluated =
+                org.mockito.ArgumentCaptor.forClass(EvaluationContext.class);
+        verify(criteria).matches(eq("${eligible}"), evaluated.capture());
+        assertThat(evaluated.getValue().variables()).containsEntry("eligible", false);
         verify(operations, never()).submitAdHoc(org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.anyString(),
