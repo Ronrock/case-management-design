@@ -180,6 +180,14 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
                     + "activation; remove '" + property + "' from the contract";
         }
 
+        if ("/slaBindings".equals(location) || location.startsWith("/slaBindings/")) {
+            if ("additionalProperties".equals(violation.getType())
+                    && "dueDateExpression".equals(property)) {
+                return path + ": dueDateExpression is not supported until a deterministic "
+                        + "evaluator is registered";
+            }
+        }
+
         String text = violation.getMessage();
         String prefix = location + ": ";
         if (text.startsWith(prefix)) {

@@ -121,12 +121,8 @@
     "slaBinding": {
       "description": "One executable SLA target, keyed by the id a BPMN casemgmt:slaTargetId attribute resolves against. Publication fixes the start, pause, resume and root-outcome rules that a runtime occurrence snapshots.",
       "type": "object",
-      "required": ["scope", "calendarId", "startAnchor", "meetAnchor"],
+      "required": ["scope", "calendarId", "duration", "startAnchor", "meetAnchor"],
       "additionalProperties": false,
-      "oneOf": [
-        { "required": ["duration"] },
-        { "required": ["dueDateExpression"] }
-      ],
       "properties": {
         "name": { "type": "string", "maxLength": 200 },
         "targetVersion": { "type": "integer", "minimum": 1 },
@@ -135,7 +131,6 @@
         "calendarId": { "type": "string", "minLength": 1, "maxLength": 128 },
         "calendarRevision": { "type": "integer", "minimum": 1 },
         "duration": { "$ref": "#/$defs/duration" },
-        "dueDateExpression": { "type": "string", "minLength": 1, "maxLength": 500 },
         "startAnchor": { "$ref": "#/$defs/anchor" },
         "meetAnchor": { "$ref": "#/$defs/anchor" },
         "cancelAnchor": { "$ref": "#/$defs/anchor" },

@@ -420,6 +420,19 @@ class JsonSchemaCaseContractValidatorTest {
     }
 
     @Test
+    void rejectsAnSlaDueDateExpressionUntilADeterministicEvaluatorIsPublished() {
+        assertThatThrownBy(() -> validate("""
+                {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{"resolution":{"scope":"CASE","calendarId":"nl-business",
+                   "dueDateExpression":"${case.targetDate}",
+                   "startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED"}}}
+                """))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/slaBindings/resolution/dueDateExpression")
+                .hasMessageContaining("not supported until a deterministic evaluator is registered");
+    }
+
+    @Test
     void rejectsOversizedContractBeforeParsingIt() {
         byte[] oversized = new byte[JsonSchemaCaseContractValidator.MAX_CONTRACT_BYTES + 1];
         java.util.Arrays.fill(oversized, (byte) ' ');
