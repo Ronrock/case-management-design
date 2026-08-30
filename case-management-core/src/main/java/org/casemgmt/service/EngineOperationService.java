@@ -73,6 +73,16 @@ public class EngineOperationService {
         return commands.find(tenantId, operationId).map(EngineOperationService::operation);
     }
 
+    /** Same-key action replay is resolved before availability/version checks can reject it. */
+    public Optional<Operation> findAdHocReplay(String tenantId, String caseId, String actionId,
+                                                String idempotencyKey) {
+        if (idempotencyKey == null || idempotencyKey.isBlank()) return Optional.empty();
+        return commands.findByIdempotency(tenantId, idempotencyKey)
+                .filter(command -> caseId.equals(command.caseId()))
+                .filter(command -> actionId.equals(actionId(command)))
+                .map(EngineOperationService::operation);
+    }
+
     /**
      * Submits a declared discretionary action through the same durable command record used by
      * normal remote task operations.  The action id is retained as immutable command
@@ -99,6 +109,13 @@ public class EngineOperationService {
                         JsonCodec.canonicalJson(Map.of("adHocActionId", actionId,
                                 "requestedBy", actor.userId())), expectedCaseVersion,
                         OffsetDateTime.now(clock));
+        // The service caller holds CM_CASE's action-submission lock.  A same-key replay was
+        // returned above; any other live key for this declared action must therefore be denied.
+        if (commands.findByIdempotency(instance.tenantId(), stableKey).isEmpty()
+                && commands.hasActiveAdHocAction(instance.tenantId(), instance.id(), actionId)) {
+            throw new CaseConflictException("ad-hoc-action-pending",
+                    "Ad-hoc action '" + actionId + "' is already awaiting confirmation", List.of());
+        }
         ProductionEngineCommandStore.Submission submission = commands.submit(request);
         Operation operation = operation(submission.command());
         if (!submission.replayed()) {
@@ -211,6 +228,16 @@ public class EngineOperationService {
                 command.state().command().commandType().name(), command.expectedTargetIdentity(),
                 decision.status().name(), command.version(), decision.errorCode(),
                 decision.safeSummary(), availableActions(decision.status()));
+    }
+
+    private static String actionId(ProductionEngineCommandStore.StoredCommand command) {
+        if (command.correlationJson() == null) return null;
+        try {
+            Object actionId = JsonCodec.toMap(command.correlationJson()).get("adHocActionId");
+            return actionId instanceof String text ? text : null;
+        } catch (RuntimeException malformed) {
+            return null;
+        }
     }
 
     private static List<String> availableActions(EngineCommandStatus status) {

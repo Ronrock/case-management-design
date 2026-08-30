@@ -123,6 +123,31 @@ public class CaseRepository {
     }
 
     /**
+     * Serializes discretionary-action submission for one case.  The caller keeps this lock while
+     * it first checks a same-key replay, re-evaluates availability, and creates the durable
+     * command/link.  That makes a distinct key a conflict rather than a second live action.
+     */
+    public void lockForAdHocAction(String caseId) {
+        if (caseId == null || caseId.isBlank()) {
+            throw new IllegalArgumentException("caseId must not be blank");
+        }
+        if (mandatoryCanonicalTransaction == null) {
+            throw new IllegalStateException("Ad-hoc action locking requires an active caller "
+                    + "transaction and a transaction-verifiable repository DataSource");
+        }
+        try {
+            mandatoryCanonicalTransaction.executeWithoutResult(status -> {
+                boolean exists = jdbc.sql("SELECT ID_ FROM CM_CASE WHERE ID_ = :id FOR UPDATE")
+                        .param("id", caseId).query(String.class).optional().isPresent();
+                if (!exists) throw new NotFoundException("Case", caseId);
+            });
+        } catch (IllegalTransactionStateException missingTransaction) {
+            throw new IllegalStateException("Ad-hoc action locking requires an active caller "
+                    + "transaction bound to the repository DataSource", missingTransaction);
+        }
+    }
+
+    /**
      * Locks the case before an SLA row is claimed.  SLA root terminalisation is called from the
      * observation path which already holds this same lock, so this establishes one global order
      * (case then SLA) and prevents an SLA sweeper from breaching a case while its completion is

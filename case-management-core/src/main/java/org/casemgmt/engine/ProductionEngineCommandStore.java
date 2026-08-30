@@ -591,6 +591,17 @@ public class ProductionEngineCommandStore {
                 .query((rs, row) -> mapStored(rs)).optional();
     }
 
+    /** True when another idempotency key still owns a live discretionary action occurrence. */
+    public boolean hasActiveAdHocAction(String tenantId, String caseId, String actionId) {
+        return jdbc.sql("""
+                SELECT COUNT(*) FROM CM_ENGINE_COMMAND
+                WHERE TENANT_ID_ = :tenantId AND CASE_ID_ = :caseId
+                  AND STATUS_ IN ('PENDING','RETRYABLE','AWAITING_CONFIRMATION','MANUAL_REVIEW','CONFLICT')
+                  AND JSON_VALUE(CORRELATION_JSON_, '$.adHocActionId') = :actionId
+                """).param("tenantId", tenantId).param("caseId", caseId).param("actionId", actionId)
+                .query(Long.class).single() > 0;
+    }
+
     private Optional<StoredCommand> findByOperation(String tenantId, String operationId) {
         return jdbc.sql("SELECT " + PRODUCTION_COLUMNS + " FROM CM_ENGINE_COMMAND "
                         + "WHERE TENANT_ID_=:tenantId AND OPERATION_ID_=:operationId")

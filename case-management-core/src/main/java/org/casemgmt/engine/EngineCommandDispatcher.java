@@ -81,6 +81,7 @@ public class EngineCommandDispatcher {
     private final Clock clock;
     private final Duration leaseDuration;
     private final EventPublisher events;
+    private final java.util.function.Consumer<ProductionEngineCommandStore.StoredCommand> lifecycleReporter;
 
     public EngineCommandDispatcher(EngineCommandRepository commands, EngineGateway delegate,
                                    SyncReporter syncReporter) {
@@ -99,6 +100,7 @@ public class EngineCommandDispatcher {
         this.clock = null;
         this.leaseDuration = null;
         this.events = null;
+        this.lifecycleReporter = command -> { };
     }
 
     /** Production dispatcher: all results flow through the typed policy/store boundary. */
@@ -114,6 +116,7 @@ public class EngineCommandDispatcher {
         this.syncReporter = null;
         this.deploymentReporter = null;
         this.events = null;
+        this.lifecycleReporter = command -> { };
     }
 
     /** Production dispatcher with lifecycle publication for command-backed ad-hoc actions. */
@@ -126,6 +129,24 @@ public class EngineCommandDispatcher {
         this.clock = java.util.Objects.requireNonNull(clock, "clock");
         this.leaseDuration = java.util.Objects.requireNonNull(leaseDuration, "leaseDuration");
         this.events = java.util.Objects.requireNonNull(events, "events");
+        this.delegate = null;
+        this.syncReporter = null;
+        this.deploymentReporter = null;
+        this.lifecycleReporter = command -> { };
+    }
+
+    /** Production dispatcher with lifecycle-owned projection of definitive command effects. */
+    public EngineCommandDispatcher(
+            EngineCommandRepository commands, EngineCommandTransport transport,
+            String workerOwner, Clock clock, Duration leaseDuration, EventPublisher events,
+            java.util.function.Consumer<ProductionEngineCommandStore.StoredCommand> lifecycleReporter) {
+        this.commands = java.util.Objects.requireNonNull(commands, "commands");
+        this.transport = java.util.Objects.requireNonNull(transport, "transport");
+        this.workerOwner = java.util.Objects.requireNonNull(workerOwner, "workerOwner");
+        this.clock = java.util.Objects.requireNonNull(clock, "clock");
+        this.leaseDuration = java.util.Objects.requireNonNull(leaseDuration, "leaseDuration");
+        this.events = java.util.Objects.requireNonNull(events, "events");
+        this.lifecycleReporter = java.util.Objects.requireNonNull(lifecycleReporter, "lifecycleReporter");
         this.delegate = null;
         this.syncReporter = null;
         this.deploymentReporter = null;
@@ -173,6 +194,7 @@ public class EngineCommandDispatcher {
             }
             ProductionEngineCommandStore.StoredCommand committed = commands.commitLeaseOutcome(command.state().command().tenantId(),
                     command.operationId(), lease.leaseToken(), command.version(), outcome);
+            lifecycleReporter.accept(committed);
             publishAdHocTerminal(command, committed);
             processed++;
         }

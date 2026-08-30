@@ -181,11 +181,22 @@ public class RemoteEngineAutoConfiguration {
      * in one transaction. A definitive process-start failure updates only the waiting link state.
      */
     @Bean
+    public org.casemgmt.observation.CommandConfirmationLifecycleReporter commandConfirmationLifecycleReporter(
+            org.casemgmt.repo.CaseRepository cases,
+            org.casemgmt.repo.LinkedProcessRepository processes,
+            org.casemgmt.observation.EngineObservationHandler lifecycle) {
+        return new org.casemgmt.observation.CommandConfirmationLifecycleReporter(cases, processes,
+                lifecycle);
+    }
+
+    @Bean
     public EngineCommandDispatcher engineCommandDispatcher(
             EngineCommandRepository commands, RemoteEngineGateway delegate,
-            org.casemgmt.event.EventPublisher events) {
+            org.casemgmt.event.EventPublisher events,
+            org.casemgmt.observation.CommandConfirmationLifecycleReporter lifecycleReporter) {
         return new EngineCommandDispatcher(commands, delegate,
                 "remote-dispatcher-" + java.util.UUID.randomUUID(),
-                java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(5), events);
+                java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(5), events,
+                lifecycleReporter::confirmed);
     }
 }

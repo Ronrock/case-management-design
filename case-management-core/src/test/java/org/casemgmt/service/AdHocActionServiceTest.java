@@ -35,8 +35,35 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 
 class AdHocActionServiceTest {
+
+    @Test
+    void sendsOnlyDeclaredCaseToEngineMappingsForAnAction() {
+        CaseRepository cases = mock(CaseRepository.class);
+        EngineGateway engine = mock(EngineGateway.class);
+        CaseInstance active = instance(CaseState.ACTIVE, Map.of("decision", "approved"));
+        when(cases.require(active.id())).thenReturn(active);
+        when(engine.createHumanTask(any())).thenReturn(new EngineTaskRef("engine-task", "Investigate",
+                null, active.id(), OffsetDateTime.parse("2026-08-30T12:00:00Z")));
+        AdHocActionService service = service(cases, engine, release("""
+                {"key":"definition","orchestrationMode":"BPMN",
+                 "fields":{"decision":{"schema":{"type":"string"}}},"forms":{},
+                 "adHocActions":[{"id":"investigate","type":"TASK","roles":["handler"],
+                   "mappings":[{"direction":"CASE_TO_ENGINE","source":"decision","target":"decisionCode"}]}]}
+                """));
+
+        service.execute(active.id(), "investigate", 4L, Map.of(),
+                new Actor("alice", List.of("handlers")));
+
+        org.mockito.ArgumentCaptor<org.casemgmt.engine.HumanTaskRequest> request =
+                org.mockito.ArgumentCaptor.forClass(org.casemgmt.engine.HumanTaskRequest.class);
+        verify(engine).createHumanTask(request.capture());
+        org.assertj.core.api.Assertions.assertThat(request.getValue().variables())
+                .containsExactlyEntriesOf(Map.of("decisionCode", "approved"));
+    }
 
     @Test
     void rejectsAnActionForACancelledCaseBeforeItCanCreateAnEngineTask() {
@@ -168,9 +195,13 @@ class AdHocActionServiceTest {
     }
 
     private static CaseInstance instance(CaseState state) {
+        return instance(state, Map.of());
+    }
+
+    private static CaseInstance instance(CaseState state, Map<String, Object> variables) {
         OffsetDateTime now = OffsetDateTime.parse("2026-08-30T12:00:00Z");
         return new CaseInstance("case-1", "engine-a", "tenant-a", "definition:1",
                 "definition", 1, null, "Case", state, CasePriority.MEDIUM, null,
-                null, "alice", "NONE", null, null, Map.of(), 4L, now, now, null);
+                null, "alice", "NONE", null, null, variables, 4L, now, now, null);
     }
 }

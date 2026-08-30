@@ -104,6 +104,27 @@ public class LinkedProcessService {
     }
 
     /**
+     * Persists the authority for a command-backed exact process start before bytes can leave the
+     * service. The correlation is the immutable command target, so a lost-response replay finds
+     * this same row and an incoming Operaton observation can confirm it through the usual path.
+     */
+    @Transactional
+    public LinkedProcessRepository.LinkedProcessRow registerPendingExact(
+            String caseId, String correlationId, EngineDeploymentIdentity identity) {
+        requireNonBlank(correlationId, "correlationId");
+        if (identity == null || identity.processDefinitionId() == null
+                || identity.processDefinitionId().isBlank()) {
+            throw new IllegalArgumentException("Exact linked-process start requires process definition identity");
+        }
+        cases.require(caseId);
+        return processes.findByCorrelation(caseId, correlationId).orElseGet(() -> {
+            processes.insert(correlationId, caseId, null, null, identity.processDefinitionId(),
+                    identity.processDefinitionKey(), CaseTask.EngineSync.PENDING);
+            return processes.findByCorrelation(caseId, correlationId).orElseThrow();
+        });
+    }
+
+    /**
      * Starts a linked process from an immutable deployment identity. This is intentionally
      * separate from {@link #start}: discretionary actions must never let the engine resolve a
      * descriptive key to whichever deployment happens to be newest.

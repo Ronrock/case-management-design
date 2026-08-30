@@ -83,24 +83,47 @@ public class AdHocActionService {
     public Result execute(String caseId, String actionId, long expectedVersion,
                           Map<String, Object> input, Actor actor, String idempotencyKey) {
         CaseInstance c = cases.require(caseId);
+        ResolvedAction resolved = resolve(c, actionId);
+        var action = resolved.action();
+        authorize(c.id(), action, actor);
         if (c.version() != expectedVersion) throw new CaseConflictException("version-conflict",
                 "Case version is " + c.version() + "; expected " + expectedVersion, List.of());
         if (c.state() != CaseState.ACTIVE) throw new CaseConflictException("case-not-active",
                 "Ad-hoc actions are available only while the case is ACTIVE (was " + c.state() + ")", List.of());
-        ResolvedAction resolved = resolve(c, actionId);
-        var action = resolved.action();
-        authorize(c.id(), action, actor);
+        Map<String, Object> inputValues = immutableInput(input);
+        validateInput(resolved.contract(), action, inputValues);
+        if (action instanceof ValidatedCaseContract.MessageAction message) {
+            validateCorrelation(c, message, inputValues);
+        }
+        String stableKey = actionKey(c, action, idempotencyKey);
+        if (engine.defersTaskMutations()) {
+            Optional<EngineOperationService.Operation> replay = requiredOperations()
+                    .findAdHocReplay(c.tenantId(), c.id(), action.id(), stableKey);
+            if (replay.isPresent()) {
+                EngineOperationService.Operation operation = replay.orElseThrow();
+                return new Result(action.id(), type(action), null, null, null,
+                        CaseTask.EngineSync.PENDING, operation.id(), operation.status());
+            }
+            // This row lock serializes different idempotency keys through the check/create
+            // decision. It is deliberately after replay: a lost HTTP response must be harmless.
+            cases.lockForAdHocAction(caseId);
+            c = cases.require(caseId);
+            resolved = resolve(c, actionId);
+            action = resolved.action();
+            authorize(c.id(), action, actor);
+        }
+        if (c.state() != CaseState.ACTIVE) throw new CaseConflictException("case-not-active",
+                "Ad-hoc actions are available only while the case is ACTIVE (was " + c.state() + ")", List.of());
         if (action.availabilityExpression() != null && !criteria.matches(action.availabilityExpression(), context(c))) {
             throw new CaseConflictException("ad-hoc-action-unavailable",
                     "Ad-hoc action '" + actionId + "' is not currently available", List.of());
         }
-        Map<String, Object> variables = immutableInput(input);
-        validateInput(resolved.contract(), action, variables);
-        if (action instanceof ValidatedCaseContract.MessageAction message) {
-            validateCorrelation(c, message, variables);
-        }
+        // Form input is never an implicit engine payload.  A discretionary action can expose
+        // engine data only through its contract-declared CASE_TO_ENGINE mappings; this keeps
+        // process variables, canonical case data, search and the API from silently diverging.
+        Map<String, Object> variables = mappedEngineVariables(c, action);
         Result result = engine.defersTaskMutations()
-                ? requestRemote(c, action, variables, actor, idempotencyKey)
+                ? requestRemote(c, action, variables, actor, stableKey)
                 : executeEmbedded(c, action, variables);
         OffsetDateTime now = OffsetDateTime.now();
         if (!engine.defersTaskMutations()) {
@@ -145,28 +168,31 @@ public class AdHocActionService {
     private Result requestRemote(CaseInstance c, ValidatedCaseContract.AdHocActionDefinition action,
                                  Map<String, Object> variables, Actor actor, String idempotencyKey) {
         String stableTarget = target(c, action, idempotencyKey);
-        EngineOperationService.Operation operation = switch (action) {
-            case ValidatedCaseContract.TaskAction task -> requiredOperations().submitAdHoc(c, task.id(),
+        RemoteActionSubmission submission = switch (action) {
+            case ValidatedCaseContract.TaskAction task -> new RemoteActionSubmission(requiredOperations().submitAdHoc(c, task.id(),
                     EngineCommand.Type.CREATE_TASK, Map.of("planItemId", stableTarget,
                             "name", taskName(task), "assignee", "", "candidateGroups", task.candidateGroups(),
                             "formKey", task.formRef() == null ? "" : task.formRef(), "variables", variables),
-                    stableTarget, c.version(), actor, idempotencyKey);
+                    stableTarget, c.version(), actor, idempotencyKey), null);
             case ValidatedCaseContract.ProcessAction process -> {
                 CaseDefinitionRelease release = exactRelease(c, process);
-                yield requiredOperations().submitAdHoc(c, process.id(), EngineCommand.Type.START_PROCESS,
+                var link = processes.registerPendingExact(c.id(), stableTarget,
+                        release.engineIdentity());
+                EngineOperationService.Operation operation = requiredOperations().submitAdHoc(c, process.id(), EngineCommand.Type.START_PROCESS,
                         Map.of("planItemId", "", "selectionType", "ID",
                                 "processDefinitionId", release.engineIdentity().processDefinitionId(),
                                 "processDefinitionKey", process.processDefinitionKey(),
                                 "tenantId", release.engineTenantId(), "variables", variables,
                                 "correlationId", stableTarget),
                         release.engineIdentity().processDefinitionId(), c.version(), actor, idempotencyKey);
+                yield new RemoteActionSubmission(operation, link.id());
             }
-            case ValidatedCaseContract.MessageAction message -> requiredOperations().submitAdHoc(c, message.id(),
+            case ValidatedCaseContract.MessageAction message -> new RemoteActionSubmission(requiredOperations().submitAdHoc(c, message.id(),
                     EngineCommand.Type.CORRELATE_MESSAGE, Map.of("messageName", message.messageName(),
-                            "variables", variables), message.messageName(), c.version(), actor, idempotencyKey);
+                            "variables", variables), message.messageName(), c.version(), actor, idempotencyKey), null);
         };
-        return new Result(action.id(), type(action), null, null, null, CaseTask.EngineSync.PENDING,
-                operation.id(), operation.status());
+        return new Result(action.id(), type(action), null, null, submission.linkedProcessId(), CaseTask.EngineSync.PENDING,
+                submission.operation().id(), submission.operation().status());
     }
 
     private CaseDefinitionRelease exactRelease(CaseInstance c, ValidatedCaseContract.ProcessAction action) {
@@ -227,6 +253,29 @@ public class AdHocActionService {
                 "Message action '" + action.id() + "' does not match required correlation '" + key + "'", List.of());
     }
 
+    private Map<String, Object> mappedEngineVariables(CaseInstance c,
+                                                       ValidatedCaseContract.AdHocActionDefinition action) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (int index = 0; index < action.mappings().size(); index++) {
+            ValidatedCaseContract.MappingDefinition mapping = action.mappings().get(index);
+            if (mapping.direction() != ValidatedCaseContract.MappingDirection.CASE_TO_ENGINE) {
+                continue;
+            }
+            if (!c.variables().containsKey(mapping.source())) {
+                if (mapping.required()) {
+                    throw invalid(c.caseDefKey(), "Ad-hoc action '" + action.id()
+                            + "' requires canonical field '" + mapping.source() + "'");
+                }
+                continue;
+            }
+            if (result.putIfAbsent(mapping.target(), c.variables().get(mapping.source())) != null) {
+                throw invalid(c.caseDefKey(), "Ad-hoc action '" + action.id()
+                        + "' declares duplicate engine mapping target '" + mapping.target() + "'");
+            }
+        }
+        return Collections.unmodifiableMap(result);
+    }
+
     private EngineOperationService requiredOperations() {
         if (operations == null) throw new IllegalStateException(
                 "Remote ad-hoc actions require an EngineOperationService");
@@ -239,6 +288,12 @@ public class AdHocActionService {
                 ? "adhoc:" + c.id() + ":" + action.id() + ":" + c.version() : idempotencyKey;
         return "adhoc:" + action.id() + ":" + java.util.UUID.nameUUIDFromBytes(
                 (c.id() + ":" + stableKey).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static String actionKey(CaseInstance c, ValidatedCaseContract.AdHocActionDefinition action,
+                                    String idempotencyKey) {
+        return idempotencyKey == null || idempotencyKey.isBlank()
+                ? "adhoc:" + c.id() + ":" + action.id() + ":" + c.version() : idempotencyKey;
     }
 
     private static String taskName(ValidatedCaseContract.TaskAction task) {
@@ -256,4 +311,6 @@ public class AdHocActionService {
         case ValidatedCaseContract.MessageAction ignored -> "MESSAGE";
     }; }
     private record ResolvedAction(ValidatedCaseContract contract, ValidatedCaseContract.AdHocActionDefinition action) { }
+    private record RemoteActionSubmission(EngineOperationService.Operation operation,
+                                           String linkedProcessId) { }
 }
