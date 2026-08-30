@@ -15,8 +15,17 @@ class SlaLifecycleMigrationGuardTest extends OracleTestBase {
 
     @Test
     void rejectsAnExistingCancelledAtColumnWithTheWrongOracleType() throws Exception {
+        assertWrongCancelledAtShape("VARCHAR2(40)");
+    }
+
+    @Test
+    void rejectsAnExistingCancelledAtColumnWithTheWrongTimestampPrecision() throws Exception {
+        assertWrongCancelledAtShape("TIMESTAMP(9) WITH TIME ZONE");
+    }
+
+    private void assertWrongCancelledAtShape(String shape) throws Exception {
         jdbc().sql("ALTER TABLE CM_SLA_RECORD DROP COLUMN CANCELLED_AT_").update();
-        jdbc().sql("ALTER TABLE CM_SLA_RECORD ADD CANCELLED_AT_ VARCHAR2(40)").update();
+        jdbc().sql("ALTER TABLE CM_SLA_RECORD ADD CANCELLED_AT_ " + shape).update();
         jdbc().sql("""
                 DELETE FROM DATABASECHANGELOG
                 WHERE ID = 'cm-sla-root-terminalization-column-shape-guard'

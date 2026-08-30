@@ -19,7 +19,7 @@
         <sqlCheck expectedResult="1"><![CDATA[
           SELECT COUNT(*) FROM USER_TAB_COLUMNS
           WHERE TABLE_NAME = 'CM_SLA_RECORD' AND COLUMN_NAME = 'CANCELLED_AT_'
-            AND DATA_TYPE LIKE 'TIMESTAMP%WITH TIME ZONE'
+            AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE'
         ]]></sqlCheck>
       </or>
     </preConditions>
