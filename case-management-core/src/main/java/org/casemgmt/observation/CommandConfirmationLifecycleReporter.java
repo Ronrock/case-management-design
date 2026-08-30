@@ -31,7 +31,16 @@ public final class CommandConfirmationLifecycleReporter {
     }
 
     public void confirmed(ProductionEngineCommandStore.StoredCommand command) {
-        if (command.state().committedDecision().status() != EngineCommandStatus.CONFIRMED) return;
+        EngineCommandStatus status = command.state().committedDecision().status();
+        if (status == EngineCommandStatus.FAILED
+                && command.state().command().commandType() == EngineCommand.Type.START_PROCESS) {
+            String correlation = text(command.payload(), "correlationId");
+            if (correlation != null) {
+                processes.markSync(correlation, org.casemgmt.domain.CaseTask.EngineSync.FAILED, null);
+            }
+            return;
+        }
+        if (status != EngineCommandStatus.CONFIRMED) return;
         switch (command.state().command().commandType()) {
             case START_PROCESS -> confirmProcess(command);
             case CREATE_TASK -> projectCreatedTask(command);

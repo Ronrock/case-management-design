@@ -111,6 +111,15 @@ public class AdHocActionService {
             resolved = resolve(c, actionId);
             action = resolved.action();
             authorize(c.id(), action, actor);
+            // The lock is the linearization point for a new idempotency key.  Every fact that
+            // made the original request safe must still be true here; otherwise a concurrent
+            // case update could send an action that was authorised only for stale data.
+            if (c.version() != expectedVersion) throw new CaseConflictException("version-conflict",
+                    "Case version is " + c.version() + "; expected " + expectedVersion, List.of());
+            validateInput(resolved.contract(), action, inputValues);
+            if (action instanceof ValidatedCaseContract.MessageAction message) {
+                validateCorrelation(c, message, inputValues);
+            }
         }
         if (c.state() != CaseState.ACTIVE) throw new CaseConflictException("case-not-active",
                 "Ad-hoc actions are available only while the case is ACTIVE (was " + c.state() + ")", List.of());

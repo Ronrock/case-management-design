@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.net.URI;
 
 @RestController
 @RequestMapping("/case-api/v2/cases/{caseId}/ad-hoc-actions")
@@ -63,6 +64,10 @@ public class AdHocActionController {
         body.put("status", result.status());
         HttpStatus status = result.engineSync() == CaseTask.EngineSync.PENDING
                 ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
-        return ResponseEntity.status(status).body(body);
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(status);
+        if (status == HttpStatus.ACCEPTED && result.operationId() != null && !result.operationId().isBlank()) {
+            response.location(URI.create("/case-api/v2/operations/" + result.operationId()));
+        }
+        return response.body(body);
     }
 }

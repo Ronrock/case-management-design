@@ -105,6 +105,21 @@ class LinkedProcessRootConfirmationTest extends OracleTestBase {
     }
 
     @Test
+    void definitiveStartFailureTerminalizesOnlyThePendingLinkedCorrelation() {
+        processes.insert("linked-correlation", "case-1", null, null, "letter-process",
+                CaseTask.EngineSync.PENDING);
+
+        processes.markSync("linked-correlation", CaseTask.EngineSync.FAILED, null);
+        processes.markSync("linked-correlation", CaseTask.EngineSync.FAILED, null);
+
+        assertThat(processes.findByCorrelation("case-1", "linked-correlation")).get()
+                .extracting(LinkedProcessRepository.LinkedProcessRow::engineSync,
+                        LinkedProcessRepository.LinkedProcessRow::state,
+                        LinkedProcessRepository.LinkedProcessRow::processInstanceId)
+                .containsExactly(CaseTask.EngineSync.FAILED, "ACTIVE", null);
+    }
+
+    @Test
     void legacyConfirmationPreservesStoredExactDefinitionIdentity() {
         processes.insert("linked-correlation", "case-1", null, null,
                 "letter-process:9", "letter-process", CaseTask.EngineSync.PENDING);

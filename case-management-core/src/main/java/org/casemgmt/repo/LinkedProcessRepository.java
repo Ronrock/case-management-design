@@ -313,8 +313,10 @@ public class LinkedProcessRepository {
             throw new IllegalArgumentException("A failed start cannot carry an engine identity");
         }
         jdbc.sql("""
-                UPDATE CM_LINKED_PROCESS SET ENGINE_SYNC_ = :sync
-                WHERE CORRELATION_ID_ = :id AND ENGINE_SYNC_ != 'SYNCED'""")
+                UPDATE CM_LINKED_PROCESS
+                SET ENGINE_SYNC_ = :sync,
+                    LAST_PROJECTED_AT_ = SYSTIMESTAMP
+                WHERE CORRELATION_ID_ = :id AND ENGINE_SYNC_ = 'PENDING'""")
             .param("sync", sync.name())
             .param("id", id).update();
     }

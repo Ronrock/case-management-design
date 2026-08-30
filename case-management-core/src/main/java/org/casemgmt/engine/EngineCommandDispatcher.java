@@ -224,6 +224,13 @@ public class EngineCommandDispatcher {
                 Map.of("actionId", actionId, "operationId", committed.operationId(),
                         "commandType", submitted.state().command().commandType().name(),
                         "status", status.name())));
+        Object requestedBy = correlation.get("requestedBy");
+        String actor = requestedBy instanceof String user && !user.isBlank() ? user : "system";
+        events.audit(committed.caseId(), submitted.state().command().tenantId(), actor,
+                "ad-hoc." + status.name().toLowerCase(java.util.Locale.ROOT), "AdHocAction", actionId,
+                Map.of(), Map.of("operationId", committed.operationId(),
+                        "commandType", submitted.state().command().commandType().name(),
+                        "status", status.name()));
     }
 
     private void execute(EngineCommand command) {

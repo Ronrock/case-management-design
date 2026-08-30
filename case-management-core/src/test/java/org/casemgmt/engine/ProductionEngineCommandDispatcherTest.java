@@ -1,6 +1,8 @@
 package org.casemgmt.engine;
 
 import org.casemgmt.repo.EngineCommandRepository;
+import org.casemgmt.repo.JsonCodec;
+import org.casemgmt.event.EventPublisher;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -9,6 +11,7 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 
 import static org.mockito.Mockito.*;
 
@@ -117,6 +120,36 @@ class ProductionEngineCommandDispatcherTest {
         dispatcher.drainOnce();
         verify(repository).commitLeaseOutcome(
                 "tenant-1", "operation-2", "lease-b", 1, outcome);
+    }
+
+    @Test
+    void definitiveAdHocProcessStartFailureEmitsExactlyOneFailureAudit() {
+        EngineCommandRepository repository = mock(EngineCommandRepository.class);
+        EngineCommandTransport transport = mock(EngineCommandTransport.class);
+        EventPublisher events = mock(EventPublisher.class);
+        ProductionEngineCommandStore.StoredCommand command = command(8);
+        EngineCommandPolicy.Decision decision = mock(EngineCommandPolicy.Decision.class);
+        when(command.state().committedDecision()).thenReturn(decision);
+        when(decision.status()).thenReturn(EngineCommandStatus.FAILED);
+        when(command.caseId()).thenReturn("case-1");
+        when(command.commandId()).thenReturn("command-1");
+        when(command.correlationJson()).thenReturn(JsonCodec.canonicalJson(Map.of(
+                "adHocActionId", "letter", "requestedBy", "alice")));
+        var lease = new ProductionEngineCommandStore.LeasedCommand(command,
+                "lease-1", "worker-1", OffsetDateTime.ofInstant(NOW.plusSeconds(30), ZoneOffset.UTC));
+        CommandDispatchOutcome outcome = CommandDispatchOutcome.transportFailure(
+                CommandDispatchOutcome.TransportFailure.PRE_CONNECT_FAILURE);
+        when(repository.claimDue(anyString(), anyInt(), any(), any())).thenReturn(List.of(lease), List.of());
+        when(transport.dispatch(command)).thenReturn(outcome);
+        when(repository.commitLeaseOutcome("tenant-1", "operation-1", "lease-1", 8, outcome))
+                .thenReturn(command);
+
+        new EngineCommandDispatcher(repository, transport, "worker-1",
+                Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofSeconds(30), events, ignored -> { }).drainOnce();
+
+        verify(events).audit("case-1", "tenant-1", "alice", "ad-hoc.failed", "AdHocAction",
+                "letter", Map.of(), Map.of("operationId", "operation-1", "commandType", "START_PROCESS",
+                        "status", "FAILED"));
     }
 
     private static ProductionEngineCommandStore.StoredCommand command(long version) {
