@@ -228,6 +228,8 @@ public abstract class OracleTestBase {
             return;
         }
         List<String> tablesChildToParent = List.of(
+                "CM_REMOTE_OBS_INBOX",
+                "CM_REMOTE_OBS_CHECKPOINT",
                 "CM_APPLIED_ENGINE_OBSERVATION",
                 "CM_CASE_DEF_BINDING",
                 "CM_CASE_DEF_RELEASE",

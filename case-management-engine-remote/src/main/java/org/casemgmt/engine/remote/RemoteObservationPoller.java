@@ -86,7 +86,11 @@ public final class RemoteObservationPoller {
                 .map(at -> OffsetDateTime.ofInstant(at, ZoneOffset.UTC).minus(OVERLAP))
                 .orElse(receivedAt.minus(INITIAL_LOOKBACK)); int inserted = 0;
         for (int first = 0; ; first += PAGE_SIZE) {
-            List<Map<String,Object>> page = getList(path + encoded(from) + "&firstResult=" + first + "&maxResults=" + PAGE_SIZE + "&sortBy=" + timestampField + "&sortOrder=asc");
+            // Operaton accepts one sort field.  Use immutable history id for the actual offset
+            // traversal (rather than a timestamp whose ties have no server-side order), then
+            // impose timestamp/id order locally for the durable cursor.  The timestamp overlap
+            // plus inbox fingerprint makes the next poll lossless even at a boundary.
+            List<Map<String,Object>> page = getList(path + encoded(from) + "&firstResult=" + first + "&maxResults=" + PAGE_SIZE + "&sortBy=id&sortOrder=asc");
             List<HistoryRow> ordered = page.stream().map(row -> new HistoryRow(new ObservationCursor(timestamp(row, timestampField).toInstant(), requiredId(row)), row)).sorted(Comparator.comparing(HistoryRow::cursor)).toList();
             inserted += persistPage(stream, ordered, receivedAt, factory);
             if (page.size() < PAGE_SIZE) return inserted;
