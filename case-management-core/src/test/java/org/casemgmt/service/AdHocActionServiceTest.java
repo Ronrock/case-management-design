@@ -210,6 +210,42 @@ class AdHocActionServiceTest {
                 org.mockito.ArgumentMatchers.any());
     }
 
+    @Test
+    void remoteProcessActionRechecksAvailabilityAfterTheCaseLockBeforeCreatingACommandOrLink() {
+        CaseRepository cases = mock(CaseRepository.class);
+        EngineGateway engine = mock(EngineGateway.class);
+        EngineOperationService operations = mock(EngineOperationService.class);
+        LinkedProcessService processes = mock(LinkedProcessService.class);
+        CriterionEvaluator criteria = mock(CriterionEvaluator.class);
+        CaseInstance beforeLock = instance(CaseState.ACTIVE, Map.of("eligible", true));
+        CaseInstance afterLock = instance(CaseState.ACTIVE, Map.of("eligible", false));
+        when(cases.require(beforeLock.id())).thenReturn(beforeLock, afterLock);
+        when(engine.defersTaskMutations()).thenReturn(true);
+        when(criteria.matches(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any()))
+                .thenReturn(false);
+        AdHocActionService service = service(cases, engine, mock(PlanItemRepository.class),
+                mock(CaseTaskRepository.class), operations, release("""
+                {"key":"definition","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "adHocActions":[{"id":"launch","type":"PROCESS","roles":["handler"],
+                   "availabilityExpression":"${eligible}","processDefinitionKey":"child",
+                   "orchestrationReleaseId":"orchestration:1"}]}
+                """), criteria, processes);
+
+        assertThatThrownBy(() -> service.execute(beforeLock.id(), "launch", 4L, Map.of(),
+                new Actor("alice", List.of("handlers")), "request-1"))
+                .isInstanceOf(CaseConflictException.class)
+                .extracting(error -> ((CaseConflictException) error).code())
+                .isEqualTo("ad-hoc-action-unavailable");
+
+        verify(cases).lockForAdHocAction(beforeLock.id());
+        verify(operations, never()).submitAdHoc(org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+        verifyNoInteractions(processes);
+    }
+
     private static AdHocActionService service(CaseRepository cases, EngineGateway engine,
                                               CaseDefinitionRelease release) {
         return service(cases, engine, mock(PlanItemRepository.class), mock(CaseTaskRepository.class),
@@ -226,6 +262,16 @@ class AdHocActionServiceTest {
                                               PlanItemRepository planItems, CaseTaskRepository tasks,
                                               EngineOperationService operations,
                                               CaseDefinitionRelease release) {
+        return service(cases, engine, planItems, tasks, operations, release,
+                mock(CriterionEvaluator.class), mock(LinkedProcessService.class));
+    }
+
+    private static AdHocActionService service(CaseRepository cases, EngineGateway engine,
+                                              PlanItemRepository planItems, CaseTaskRepository tasks,
+                                              EngineOperationService operations,
+                                              CaseDefinitionRelease release,
+                                              CriterionEvaluator criteria,
+                                              LinkedProcessService processes) {
         CaseDefinitionVersionBindingRepository bindings =
                 mock(CaseDefinitionVersionBindingRepository.class);
         CaseDefinitionReleaseRepository releases = mock(CaseDefinitionReleaseRepository.class);
@@ -236,7 +282,7 @@ class AdHocActionServiceTest {
                 .thenReturn(Set.of("handler"));
         return new AdHocActionService(cases, bindings, releases, participants,
                 planItems, tasks,
-                mock(LinkedProcessService.class), engine, mock(CriterionEvaluator.class),
+                processes, engine, criteria,
                 mock(EventPublisher.class), operations,
                 new org.casemgmt.release.JsonSchemaCaseContractValidator(), new FormValidator());
     }
