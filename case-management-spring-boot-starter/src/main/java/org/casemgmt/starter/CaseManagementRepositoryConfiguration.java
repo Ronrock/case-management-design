@@ -22,6 +22,7 @@ import org.casemgmt.repo.ObservationInboxRepository;
 import org.casemgmt.repo.ObservationCheckpointRepository;
 import org.casemgmt.observation.RemoteObservationIngestionService;
 import org.casemgmt.observation.RemoteObservationInboxWorker;
+import org.casemgmt.observation.CompleteTaskObservationCommandReconciler;
 import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.projection.CaseCompletionPublisher;
 import org.casemgmt.projection.JdbcCaseProjectionPort;
@@ -113,8 +114,9 @@ public class CaseManagementRepositoryConfiguration {
     }
     @Bean public RemoteObservationInboxWorker remoteObservationInboxWorker(
             ObservationInboxRepository inbox, org.casemgmt.observation.EngineObservationHandler handler,
-            PlatformTransactionManager transactionManager) {
-        return new RemoteObservationInboxWorker(inbox, handler, transactionManager);
+            PlatformTransactionManager transactionManager, EngineCommandRepository commands) {
+        return new RemoteObservationInboxWorker(inbox, handler, transactionManager,
+                new CompleteTaskObservationCommandReconciler(commands));
     }
     @Bean
     @ConditionalOnMissingBean(CaseCompletionPublisher.class)

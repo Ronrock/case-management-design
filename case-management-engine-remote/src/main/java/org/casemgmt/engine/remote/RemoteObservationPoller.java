@@ -14,6 +14,7 @@ import org.casemgmt.repo.CaseRepository;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -72,12 +73,22 @@ public final class RemoteObservationPoller {
         inboxWorker.drainOnce(); return count;
     }
 
-    private int pollTasks(OffsetDateTime receivedAt) { return pollPages(ObservationStream.TASKS, "/history/task?startedAfter=", "startTime", receivedAt, this::taskEnvelope); }
-    private int pollActivities(OffsetDateTime receivedAt) { return pollPages(ObservationStream.ACTIVITIES, "/history/activity-instance?startedAfter=", "startTime", receivedAt, this::activityEnvelope); }
-    private int pollProcesses(OffsetDateTime receivedAt) { return pollPages(ObservationStream.PROCESSES, "/history/process-instance?finished=true&finishedAfter=", "endTime", receivedAt, this::processEnvelope); }
+    private int pollTasks(OffsetDateTime receivedAt) {
+        return pollPages(ObservationStream.TASKS, "/history/task?startedAfter=", "startedBefore",
+                "startTime", "taskId", receivedAt, this::taskEnvelope);
+    }
+    private int pollActivities(OffsetDateTime receivedAt) {
+        return pollPages(ObservationStream.ACTIVITIES, "/history/activity-instance?startedAfter=", "startedBefore",
+                "startTime", "activityInstanceId", receivedAt, this::activityEnvelope);
+    }
+    private int pollProcesses(OffsetDateTime receivedAt) {
+        return pollPages(ObservationStream.PROCESSES, "/history/process-instance?finished=true&finishedAfter=", "finishedBefore",
+                "endTime", "instanceId", receivedAt, this::processEnvelope);
+    }
 
     /** A page's rows are pair-ordered and durably inserted before any matching tenant cursor moves. */
-    private int pollPages(ObservationStream stream, String path, String timestampField,
+    private int pollPages(ObservationStream stream, String path, String untilParameter,
+                          String timestampField, String stableIdentitySort,
                           OffsetDateTime receivedAt, EnvelopeFactory factory) {
         // A cursor is persisted per tenant/feed. Querying a conservative overlap ensures a
         // restarted process may safely replay page boundaries; fingerprints deduplicate the replay.
@@ -86,11 +97,14 @@ public final class RemoteObservationPoller {
                 .map(at -> OffsetDateTime.ofInstant(at, ZoneOffset.UTC).minus(OVERLAP))
                 .orElse(receivedAt.minus(INITIAL_LOOKBACK)); int inserted = 0;
         for (int first = 0; ; first += PAGE_SIZE) {
-            // Operaton accepts one sort field.  Use immutable history id for the actual offset
-            // traversal (rather than a timestamp whose ties have no server-side order), then
-            // impose timestamp/id order locally for the durable cursor.  The timestamp overlap
-            // plus inbox fingerprint makes the next poll lossless even at a boundary.
-            List<Map<String,Object>> page = getList(path + encoded(from) + "&firstResult=" + first + "&maxResults=" + PAGE_SIZE + "&sortBy=id&sortOrder=asc");
+            // Operaton accepts one sort field, so a pair cursor cannot be expressed remotely.
+            // Bound the poll to a fixed time window and page by the endpoint's documented stable
+            // identity key.  The set cannot move while this pass is in progress; subsequent
+            // overlap polling redelivers its boundary and the durable fingerprint makes that
+            // replay idempotent.
+            List<Map<String,Object>> page = getList(path + encoded(from) + "&" + untilParameter
+                    + "=" + encoded(receivedAt) + "&firstResult=" + first + "&maxResults=" + PAGE_SIZE
+                    + "&sortBy=" + stableIdentitySort + "&sortOrder=asc");
             List<HistoryRow> ordered = page.stream().map(row -> new HistoryRow(new ObservationCursor(timestamp(row, timestampField).toInstant(), requiredId(row)), row)).sorted(Comparator.comparing(HistoryRow::cursor)).toList();
             inserted += persistPage(stream, ordered, receivedAt, factory);
             if (page.size() < PAGE_SIZE) return inserted;
@@ -134,10 +148,13 @@ public final class RemoteObservationPoller {
     private CaseIdentity identity(String processId, String businessKey) { String caseId = businessKey == null ? processBusinessKey(processId) : businessKey; if (caseId == null) return null; var c = cases.findById(caseId).orElse(null); return c == null ? null : new CaseIdentity(c.id(), c.tenantId(), c.engineId()); }
     private String processBusinessKey(String processId) { try { Map<String,Object> row = getMap("/history/process-instance/" + processId); return row == null ? null : string(row.get("businessKey")); } catch (RestClientException e) { throw new EngineException("Remote history process lookup failed: " + e.getMessage(), e); } }
     @SuppressWarnings("unchecked") private Map<String,Object> getMap(String path) { try { return client.get().uri(path).retrieve().body(Map.class); } catch (RestClientException e) { throw new EngineException("Remote history lookup failed for " + path + ": " + e.getMessage(), e); } }
-    @SuppressWarnings("unchecked") private List<Map<String,Object>> getList(String path) { try { List<Map<String,Object>> rows = client.get().uri(path).retrieve().body(List.class); return rows == null ? List.of() : rows; } catch (RestClientException e) { throw new EngineException("Remote history poll failed for " + path + ": " + e.getMessage(), e); } }
+    @SuppressWarnings("unchecked") private List<Map<String,Object>> getList(String path) { try { List<Map<String,Object>> rows = client.get().uri(URI.create(path)).retrieve().body(List.class); return rows == null ? List.of() : rows; } catch (RestClientException e) { throw new EngineException("Remote history poll failed for " + path + ": " + e.getMessage(), e); } }
     private static OffsetDateTime timestamp(Map<String,Object> row, String field) { OffsetDateTime value = time(row.get(field)); if (value == null) throw new EngineException("Remote history row has no " + field); return value; }
     private static String requiredId(Map<String,Object> row) { String id = firstString(row.get("id"), row.get("activityInstanceId")); if (id == null) throw new EngineException("Remote history row has no stable id"); return id; }
-    private static String encoded(OffsetDateTime value) { return URLEncoder.encode(QUERY_TIME.format(value), StandardCharsets.UTF_8); }
+    /** Query values are encoded exactly once before being supplied as an already-built URI. */
+    private static String encoded(OffsetDateTime value) {
+        return URLEncoder.encode(QUERY_TIME.format(value), StandardCharsets.UTF_8);
+    }
     private static OffsetDateTime time(Object value) { return value == null ? null : RemoteEngineGateway.parseCreatedAt(value); }
     private static OffsetDateTime timeOr(Object first, OffsetDateTime fallback) { OffsetDateTime value = time(first); return value == null ? fallback : value; }
     private static String string(Object value) { return value == null || value.toString().isBlank() ? null : value.toString(); }

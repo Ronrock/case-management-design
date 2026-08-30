@@ -421,6 +421,22 @@ public class ProductionEngineCommandStore {
                 .orElseThrow(() -> new IllegalArgumentException("Engine operation was not found"));
     }
 
+    /**
+     * Finds only commands whose immutable target can be proved by one remote lifecycle fact.
+     * Callers must still supply the matching evidence to {@link #applyOutcome}; this lookup never
+     * changes a command state by itself.
+     */
+    public List<StoredCommand> awaitingConfirmation(
+            String tenantId, EngineCommand.Type commandType, String expectedTargetIdentity) {
+        return jdbc.sql("SELECT " + PRODUCTION_COLUMNS + " FROM CM_ENGINE_COMMAND "
+                        + "WHERE TENANT_ID_=:tenantId AND TYPE_=:type "
+                        + "AND TARGET_IDENTITY_=:target AND STATUS_='AWAITING_CONFIRMATION' "
+                        + "ORDER BY ID_")
+                .param("tenantId", tenantId).param("type", commandType.name())
+                .param("target", expectedTargetIdentity)
+                .query((rs, row) -> mapStored(rs)).list();
+    }
+
     public long countCommands() {
         return jdbc.sql("SELECT COUNT(*) FROM CM_ENGINE_COMMAND").query(Long.class).single();
     }

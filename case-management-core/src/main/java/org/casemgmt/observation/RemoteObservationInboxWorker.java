@@ -14,13 +14,22 @@ public class RemoteObservationInboxWorker {
     private static final int POISON_AFTER = 5;
     private final ObservationInboxRepository inbox;
     private final EngineObservationHandler handler;
+    private final CompleteTaskObservationCommandReconciler commandReconciler;
     private final TransactionTemplate transactions;
 
     public RemoteObservationInboxWorker(ObservationInboxRepository inbox,
                                         EngineObservationHandler handler,
                                         PlatformTransactionManager transactionManager) {
+        this(inbox, handler, transactionManager, null);
+    }
+
+    public RemoteObservationInboxWorker(ObservationInboxRepository inbox,
+                                        EngineObservationHandler handler,
+                                        PlatformTransactionManager transactionManager,
+                                        CompleteTaskObservationCommandReconciler commandReconciler) {
         this.inbox = Objects.requireNonNull(inbox, "inbox");
         this.handler = Objects.requireNonNull(handler, "handler");
+        this.commandReconciler = commandReconciler;
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager,
                 "transactionManager"));
     }
@@ -41,7 +50,12 @@ public class RemoteObservationInboxWorker {
         try {
             // Handler owns its lifecycle transaction.  The acknowledgement is only committed
             // after that transaction succeeds, so a crash/retry is harmless via fingerprinting.
-            handler.apply(ObservationEnvelope.decode(claim.payload()).observation());
+            EngineObservation observation = ObservationEnvelope.decode(claim.payload()).observation();
+            handler.apply(observation);
+            // A command can be confirmed only after its normal lifecycle fact was durable and
+            // applied. The reconciler itself is intentionally restricted to evidence that proves
+            // one immutable command target; all other command kinds remain awaiting review.
+            if (commandReconciler != null) commandReconciler.reconcile(observation);
             transactions.executeWithoutResult(status -> inbox.markApplied(claim));
         } catch (RuntimeException failure) {
             transactions.executeWithoutResult(status ->
