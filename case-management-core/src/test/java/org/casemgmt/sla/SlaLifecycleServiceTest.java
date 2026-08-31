@@ -124,7 +124,13 @@ class SlaLifecycleServiceTest extends OracleTestBase {
     }
 
     @Test
-    void publishedBindingCreatesOneSnapshottedOccurrenceAndUsesItsDeclaredRootOutcomes() {
+    void publishedBindingWithOnlyExactCalendarRevisionCreatesSnapshottedOccurrence() {
+        jdbc().sql("DELETE FROM CM_SLA_RECORD").update();
+        jdbc().sql("DELETE FROM CM_SLA_TARGET").update();
+        jdbc().sql("DELETE FROM CM_SLA_POLICY").update();
+        jdbc().sql("DELETE FROM CM_BUSINESS_CALENDAR").update();
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_BUSINESS_CALENDAR WHERE ID_ = 'cal-1'")
+                .query(Integer.class).single()).isZero();
         String contract = """
                 {"key":"sla-root","orchestrationMode":"BPMN","fields":{},"forms":{},
                  "slaBindings":{"resolution":{"scope":"CASE","calendarId":"cal-1",
@@ -153,8 +159,6 @@ class SlaLifecycleServiceTest extends OracleTestBase {
         sla.insertCalendarRevision("tenant-a", "cal-1", 2, "Calendar v2",
                 Map.of("timezone", "UTC", "workingHours", Map.of(
                         "MONDAY", List.of(Map.of("from", "09:00", "to", "17:00")))));
-        jdbc().sql("UPDATE CM_BUSINESS_CALENDAR SET DEFINITION_JSON_ = '{}' WHERE ID_ = 'cal-1'")
-                .update();
         SlaLifecycleService contractLifecycle = new SlaLifecycleService(sla, new CaseRepository(jdbc()),
                 publisher(), new CaseDefinitionVersionBindingRepository(dataSource()), releases,
                 new JsonSchemaCaseContractValidator());
@@ -167,6 +171,12 @@ class SlaLifecycleServiceTest extends OracleTestBase {
 
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'")
                 .query(Integer.class).single()).isEqualTo(1);
+        assertThat(jdbc().sql("""
+                SELECT COUNT(*) FROM CM_SLA_RECORD R
+                JOIN CM_SLA_TARGET T ON T.ID_ = R.TARGET_ID_
+                JOIN CM_SLA_POLICY P ON P.ID_ = T.POLICY_ID_
+                WHERE R.CONTRACT_RELEASE_ID_ = 'contract-sla-root'
+                  AND P.CALENDAR_ID_ IS NULL""").query(Integer.class).single()).isEqualTo(1);
         var snapshot = jdbc().sql("""
                 SELECT TARGET_KEY_, TARGET_VERSION_, SLA_SCOPE_, OCCURRENCE_KEY_, CALENDAR_REVISION_,
                        CALENDAR_SHA256_, CALENDAR_DEFINITION_JSON_, TRANSITION_EVIDENCE_JSON_

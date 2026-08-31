@@ -262,10 +262,10 @@ public class SlaRepository implements SlaCalendarCatalog {
 
     /** Ensures the legacy scheduler can locate a contract occurrence without owning its rules. */
     public void ensureContractTarget(String policyId, String targetId, String targetKey,
-                                     String calendarId, String duration, String warning,
+                                     String duration, String warning,
                                      List<String> breachActions) {
         try {
-            insertPolicy(policyId, "Published contract " + policyId, null, calendarId);
+            insertPolicy(policyId, "Published contract " + policyId, null, null);
         } catch (DuplicateKeyException ignored) {
             // The immutable release-derived key already owns this compatibility row.
         }

@@ -10,6 +10,7 @@ import java.sql.Connection;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SlaCalendarRevisionMigrationTest extends OracleTestBase {
 
@@ -48,6 +49,32 @@ class SlaCalendarRevisionMigrationTest extends OracleTestBase {
                 .query(Integer.class).single()).isEqualTo(1);
     }
 
+    @Test
+    void rejectsExistingRevisionTableWithWrongConstraintColumnOrder() throws Exception {
+        replaceRevisionTable("CALENDAR_ID_, TENANT_ID_, REVISION_",
+                "TENANT_ID_, SHA256_, CALENDAR_ID_", "SYSTIMESTAMP");
+        try {
+            assertThatThrownBy(this::applyMaster)
+                    .isInstanceOf(Exception.class)
+                    .hasStackTraceContaining("CM_BUSINESS_CALENDAR_REVISION must have the exact");
+        } finally {
+            restoreRevisionTable();
+        }
+    }
+
+    @Test
+    void rejectsExistingRevisionTableWithWrongCreatedAtDefault() throws Exception {
+        replaceRevisionTable("TENANT_ID_, CALENDAR_ID_, REVISION_",
+                "TENANT_ID_, CALENDAR_ID_, SHA256_", "CURRENT_TIMESTAMP");
+        try {
+            assertThatThrownBy(this::applyMaster)
+                    .isInstanceOf(Exception.class)
+                    .hasStackTraceContaining("CM_BUSINESS_CALENDAR_REVISION must have the exact");
+        } finally {
+            restoreRevisionTable();
+        }
+    }
+
     private void assertRevisionSchema() {
         assertThat(jdbc().sql("""
                 SELECT COLUMN_NAME FROM USER_TAB_COLUMNS
@@ -62,6 +89,56 @@ class SlaCalendarRevisionMigrationTest extends OracleTestBase {
                                           'CK_CM_BCAL_REV_JSON')
                 ORDER BY CONSTRAINT_NAME""").query(String.class).list()).containsExactly(
                 "CK_CM_BCAL_REV_JSON", "PK_CM_BCAL_REV", "UQ_CM_BCAL_REV_SHA");
+        assertThat(constraintColumns("PK_CM_BCAL_REV"))
+                .isEqualTo("TENANT_ID_,CALENDAR_ID_,REVISION_");
+        assertThat(constraintColumns("UQ_CM_BCAL_REV_SHA"))
+                .isEqualTo("TENANT_ID_,CALENDAR_ID_,SHA256_");
+        assertThat(jdbc().sql("""
+                SELECT REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC), '[[:space:]]', '')
+                FROM USER_TAB_COLUMNS
+                WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                  AND COLUMN_NAME = 'CREATED_AT_'""").query(String.class).single())
+                .isEqualTo("SYSTIMESTAMP");
+    }
+
+    private String constraintColumns(String constraintName) {
+        return jdbc().sql("""
+                SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY POSITION)
+                FROM USER_CONS_COLUMNS WHERE CONSTRAINT_NAME = :constraintName""")
+                .param("constraintName", constraintName).query(String.class).single();
+    }
+
+    private void replaceRevisionTable(String primaryKeyColumns, String uniqueColumns,
+                                      String createdAtDefault) {
+        jdbc().sql("DROP TABLE CM_BUSINESS_CALENDAR_REVISION PURGE").update();
+        jdbc().sql("""
+                CREATE TABLE CM_BUSINESS_CALENDAR_REVISION (
+                  TENANT_ID_       VARCHAR2(64 BYTE)  NOT NULL,
+                  CALENDAR_ID_     VARCHAR2(128 BYTE) NOT NULL,
+                  REVISION_        NUMBER(10) NOT NULL,
+                  NAME_            VARCHAR2(255 BYTE) NOT NULL,
+                  DEFINITION_JSON_ CLOB NOT NULL,
+                  SHA256_          VARCHAR2(64 BYTE) NOT NULL,
+                  CREATED_AT_      TIMESTAMP WITH TIME ZONE DEFAULT %s NOT NULL,
+                  CONSTRAINT PK_CM_BCAL_REV PRIMARY KEY (%s),
+                  CONSTRAINT UQ_CM_BCAL_REV_SHA UNIQUE (%s),
+                  CONSTRAINT CK_CM_BCAL_REV_JSON CHECK (DEFINITION_JSON_ IS JSON)
+                )""".formatted(createdAtDefault, primaryKeyColumns, uniqueColumns)).update();
+        jdbc().sql("""
+                DELETE FROM DATABASECHANGELOG
+                WHERE ID = 'cm-sla-calendar-revision-table-shape-guard'
+                  AND AUTHOR = 'casemgmt'""").update();
+    }
+
+    private void restoreRevisionTable() throws Exception {
+        jdbc().sql("DROP TABLE CM_BUSINESS_CALENDAR_REVISION PURGE").update();
+        jdbc().sql("""
+                DELETE FROM DATABASECHANGELOG
+                WHERE ID IN ('cm-sla-calendar-revision-table-shape-guard',
+                             'cm-sla-calendar-revision-table')
+                  AND AUTHOR = 'casemgmt'""").update();
+        applyMaster();
+        assertRevisionSchema();
     }
 
     private void applyMaster() throws Exception {

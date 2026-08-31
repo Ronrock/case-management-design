@@ -42,13 +42,24 @@
                    WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
                      AND COLUMN_NAME = 'CREATED_AT_'
                      AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'N'
-                     AND DEFAULT_LENGTH > 0) = 1
-              AND (SELECT COUNT(*) FROM USER_CONSTRAINTS
-                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
-                     AND CONSTRAINT_NAME = 'PK_CM_BCAL_REV' AND CONSTRAINT_TYPE = 'P') = 1
-              AND (SELECT COUNT(*) FROM USER_CONSTRAINTS
-                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
-                     AND CONSTRAINT_NAME = 'UQ_CM_BCAL_REV_SHA' AND CONSTRAINT_TYPE = 'U') = 1
+                     AND REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC), '[[:space:]]', '')
+                         = 'SYSTIMESTAMP') = 1
+              AND EXISTS (SELECT 1 FROM USER_CONSTRAINTS C
+                   WHERE C.TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND C.CONSTRAINT_NAME = 'PK_CM_BCAL_REV' AND C.CONSTRAINT_TYPE = 'P'
+                     AND (SELECT LISTAGG(CC.COLUMN_NAME, ',')
+                                      WITHIN GROUP (ORDER BY CC.POSITION)
+                          FROM USER_CONS_COLUMNS CC
+                          WHERE CC.CONSTRAINT_NAME = C.CONSTRAINT_NAME)
+                         = 'TENANT_ID_,CALENDAR_ID_,REVISION_')
+              AND EXISTS (SELECT 1 FROM USER_CONSTRAINTS C
+                   WHERE C.TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND C.CONSTRAINT_NAME = 'UQ_CM_BCAL_REV_SHA' AND C.CONSTRAINT_TYPE = 'U'
+                     AND (SELECT LISTAGG(CC.COLUMN_NAME, ',')
+                                      WITHIN GROUP (ORDER BY CC.POSITION)
+                          FROM USER_CONS_COLUMNS CC
+                          WHERE CC.CONSTRAINT_NAME = C.CONSTRAINT_NAME)
+                         = 'TENANT_ID_,CALENDAR_ID_,SHA256_')
               AND (SELECT COUNT(*) FROM USER_CONSTRAINTS
                    WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
                      AND CONSTRAINT_NAME = 'CK_CM_BCAL_REV_JSON' AND CONSTRAINT_TYPE = 'C'

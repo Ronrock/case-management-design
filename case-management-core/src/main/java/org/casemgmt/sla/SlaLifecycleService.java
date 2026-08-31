@@ -124,7 +124,7 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
         String hash = JsonCodec.sha256(bound.releaseId() + "|" + binding.id());
         String policyId = "cp-" + hash.substring(0, 40);
         String targetId = "ct-" + hash.substring(0, 40);
-        sla.ensureContractTarget(policyId, targetId, binding.id(), binding.calendarId(),
+        sla.ensureContractTarget(policyId, targetId, binding.id(),
                 binding.duration(), binding.warnings().isEmpty() ? null : binding.warnings().getFirst(),
                 binding.breachActions());
         String occurrenceHash = JsonCodec.sha256(instance.id() + "|" + bound.releaseId() + "|"
