@@ -8,6 +8,10 @@ import org.casemgmt.domain.CaseState;
 import org.casemgmt.observation.ObservationCursor;
 import org.casemgmt.observation.ObservationEnvelope;
 import org.casemgmt.observation.ObservationStream;
+import org.casemgmt.observation.ApplyResult;
+import org.casemgmt.observation.ApplyStatus;
+import org.casemgmt.observation.EngineObservation;
+import org.casemgmt.observation.EngineObservationHandler;
 import org.casemgmt.observation.RemoteObservationInboxWorker;
 import org.casemgmt.observation.RemoteObservationIngestionService;
 import org.casemgmt.observation.ActivityLifecycleObservation;
@@ -17,7 +21,12 @@ import org.casemgmt.observation.UserTaskObservation;
 import org.casemgmt.projection.ActivityObservation;
 import org.casemgmt.projection.ActiveBpmnCaseRepository;
 import org.casemgmt.repo.CaseRepository;
+import org.casemgmt.repo.ObservationCheckpointRepository;
+import org.casemgmt.repo.ObservationInboxRepository;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.SimpleDriverDataSource;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.ExpectedCount;
 import org.springframework.test.web.client.MockRestServiceServer;
@@ -26,12 +35,14 @@ import org.springframework.web.client.RestClient;
 import java.net.URI;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import javax.sql.DataSource;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -127,7 +138,8 @@ class RemoteObservationPollerHttpTest {
                 return withSuccess(json(List.of(
                         activity("stage-running", "stage", null),
                         activity("stage-completed", "stage", "2026-08-02T10:00:00.000Z"),
-                        activity("milestone-reached", "milestone", "2026-08-03T10:00:00.000Z"))),
+                        activity("milestone-reached", "milestone", "2026-08-03T10:00:00.000Z"),
+                        activity("milestone-still-active", "milestone", null))),
                         MediaType.APPLICATION_JSON).createResponse(request);
             }
             if (uri.getPath().equals("/history/process-instance/root-old")) {
@@ -198,9 +210,83 @@ class RemoteObservationPollerHttpTest {
                                         == ProcessObservation.EventType.TERMINATED)))
                 .noneSatisfy(observation -> assertThat(observation)
                         .isInstanceOf(UserTaskObservation.class)
-                        .matches(task -> task.eventType() == UserTaskObservation.EventType.DELETED));
-        verify(worker, org.mockito.Mockito.times(2)).drainOnce();
+                        .matches(task -> task.eventType() == UserTaskObservation.EventType.DELETED))
+                .noneSatisfy(observation -> assertThat(observation)
+                        .isInstanceOf(MilestoneObservation.class)
+                        .matches(milestone -> milestone.eventType()
+                                == MilestoneObservation.EventType.REOPENED));
+        verify(worker).drainOnce();
+        verify(worker).drainUntilIdle();
         verify(ingestion, never()).advanceCompletedWindow(any(), any(), any());
+        server.verify();
+    }
+
+    @Test
+    void reconciliationDrainsEveryDurableFactAndIsReplaySafeAcrossWorkerBatches()
+            throws Exception {
+        RestClient.Builder builder = RestClient.builder().baseUrl("http://engine.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        InboxFixture fixture = inboxFixture();
+        JdbcClient jdbc = fixture.jdbc();
+        ObservationInboxRepository inbox = new ObservationInboxRepository(jdbc);
+        RemoteObservationIngestionService ingestion = new RemoteObservationIngestionService(inbox,
+                new ObservationCheckpointRepository(jdbc));
+        Map<String, EngineObservation> effects = new java.util.LinkedHashMap<>();
+        EngineObservationHandler handler = observation -> {
+            effects.putIfAbsent(observation.fingerprint(), observation);
+            return new ApplyResult(observation.observationId(), ApplyStatus.APPLIED, 1, List.of());
+        };
+        RemoteObservationInboxWorker worker = new RemoteObservationInboxWorker(inbox, handler,
+                new DataSourceTransactionManager(fixture.dataSource()));
+        ActiveBpmnCaseRepository activeCases = mock(ActiveBpmnCaseRepository.class);
+        RemoteProcessActivityClassifier classifier = mock(RemoteProcessActivityClassifier.class);
+        when(activeCases.findAllProcessesForActiveCases()).thenReturn(List.of(
+                new ActiveBpmnCaseRepository.ReconciliationProcess("case-1", "tenant-a",
+                        "engine-west", "root-old", "definition-1", true)));
+        when(classifier.taskMetadata(any(), any())).thenReturn(
+                new RemoteProcessActivityClassifier.TaskMetadata(List.of(), null, null));
+        when(classifier.classify("definition-1", "stage")).thenReturn(Optional.of(
+                new RemoteProcessActivityClassifier.Classification(ActivityObservation.Kind.STAGE, null,
+                        null)));
+        when(classifier.classify("definition-1", "milestone")).thenReturn(Optional.of(
+                new RemoteProcessActivityClassifier.Classification(
+                        ActivityObservation.Kind.MILESTONE, "case-opened", null)));
+        server.expect(ExpectedCount.manyTimes(), request -> {
+        }).andRespond(request -> {
+            URI uri = request.getURI();
+            Map<String, String> query = uri.getRawQuery() == null ? Map.of() : query(uri);
+            if (uri.getPath().equals("/history/task")) {
+                return withSuccess(json(reconciliationTasks(
+                        Integer.parseInt(query.get("firstResult")))), MediaType.APPLICATION_JSON)
+                        .createResponse(request);
+            }
+            if (uri.getPath().equals("/history/activity-instance")) {
+                return withSuccess(json(List.of(
+                        activity("stage-running", "stage", null),
+                        activity("stage-completed", "stage", "2026-08-02T10:00:00.000Z"),
+                        activity("milestone-reached", "milestone", "2026-08-03T10:00:00.000Z"),
+                        activity("milestone-still-active", "milestone", null))),
+                        MediaType.APPLICATION_JSON).createResponse(request);
+            }
+            if (uri.getPath().equals("/history/process-instance/root-old")) {
+                return withSuccess(json(Map.of("id", "root-old", "businessKey", "case-1")),
+                        MediaType.APPLICATION_JSON).createResponse(request);
+            }
+            throw new AssertionError("unexpected endpoint " + uri);
+        });
+
+        RemoteObservationPoller poller = new RemoteObservationPoller(builder.build(), activeCases,
+                mock(CaseRepository.class), classifier, ingestion, worker);
+
+        assertThat(poller.reconcileAllActive()).isEqualTo(504);
+        assertThat(effects).hasSize(504);
+        assertThat(jdbc.sql("SELECT COUNT(*) FROM CM_REMOTE_OBS_INBOX WHERE STATUS_ = 'APPLIED'")
+                .query(Long.class).single()).isEqualTo(504L);
+        assertThat(poller.reconcileAllActive()).isZero();
+        assertThat(effects).hasSize(504);
+        assertThat(effects.values()).noneMatch(observation -> observation instanceof MilestoneObservation
+                && ((MilestoneObservation) observation).eventType()
+                == MilestoneObservation.EventType.REOPENED);
         server.verify();
     }
 
@@ -468,6 +554,28 @@ class RemoteObservationPollerHttpTest {
         return row;
     }
 
+    private static InboxFixture inboxFixture() {
+        DataSource dataSource = new SimpleDriverDataSource(new org.h2.Driver(),
+                "jdbc:h2:mem:remote-reconciliation-" + UUID.randomUUID()
+                        + ";MODE=Oracle;DB_CLOSE_DELAY=-1");
+        JdbcClient jdbc = JdbcClient.create(dataSource);
+        jdbc.sql("""
+                CREATE TABLE CM_REMOTE_OBS_INBOX (
+                    FINGERPRINT_ VARCHAR(64) PRIMARY KEY,
+                    TENANT_ID_ VARCHAR(128) NOT NULL,
+                    STREAM_ VARCHAR(64) NOT NULL,
+                    PAYLOAD_ CLOB NOT NULL,
+                    STATUS_ VARCHAR(20) NOT NULL,
+                    ATTEMPTS_ INTEGER NOT NULL,
+                    CREATED_AT_ TIMESTAMP WITH TIME ZONE NOT NULL,
+                    LEASE_TOKEN_ VARCHAR(64),
+                    LEASED_AT_ TIMESTAMP WITH TIME ZONE,
+                    FAILURE_DETAIL_ CLOB,
+                    APPLIED_AT_ TIMESTAMP WITH TIME ZONE)
+                """).update();
+        return new InboxFixture(dataSource, jdbc);
+    }
+
     private static List<Map<String, Object>> tasks(int first) {
         List<Map<String, Object>> rows = new ArrayList<>();
         for (int i = first; i < Math.min(first + 500, ROWS); i++) {
@@ -529,4 +637,6 @@ class RemoteObservationPollerHttpTest {
                 "case-1", "Complaint", CaseState.ACTIVE, CasePriority.MEDIUM, null, null, "user-1",
                 "NONE", null, null, Map.of(), 1, EVENT_AT, EVENT_AT, null);
     }
+
+    private record InboxFixture(DataSource dataSource, JdbcClient jdbc) { }
 }

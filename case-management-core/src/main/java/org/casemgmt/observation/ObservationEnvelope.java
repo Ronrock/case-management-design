@@ -42,6 +42,8 @@ public record ObservationEnvelope(EngineObservation observation) {
                     UserTaskObservation.EventType.valueOf(event), occurred, received, attributes);
             case "ACTIVITY" -> new ActivityLifecycleObservation(id, version, source, engine, tenant, caseId, process, entity, revision,
                     ActivityLifecycleObservation.EventType.valueOf(event), occurred, received, attributes);
+            case "MILESTONE" -> new MilestoneObservation(id, version, source, engine, tenant, caseId, process, entity, revision,
+                    MilestoneObservation.EventType.valueOf(event), occurred, received, attributes);
             default -> throw new IllegalArgumentException("Unsupported observation kind " + kind);
         };
         return new ObservationEnvelope(observation);
@@ -51,6 +53,7 @@ public record ObservationEnvelope(EngineObservation observation) {
         if (o instanceof ProcessObservation) return "PROCESS";
         if (o instanceof UserTaskObservation) return "TASK";
         if (o instanceof ActivityLifecycleObservation) return "ACTIVITY";
+        if (o instanceof MilestoneObservation) return "MILESTONE";
         throw new IllegalArgumentException("Unsupported remote observation type " + o.getClass().getSimpleName());
     }
     private static String required(Map<String, Object> body, String key) { String value = string(body.get(key)); if (value == null) throw new IllegalArgumentException("Missing " + key); return value; }

@@ -57,7 +57,7 @@ public final class RemoteObservationPoller {
                 activeCases.findAllProcessesForActiveCases()) {
             count += reconcileProcess(process, receivedAt);
         }
-        inboxWorker.drainOnce(); return count;
+        inboxWorker.drainUntilIdle(); return count;
     }
 
     private int reconcileProcess(ActiveBpmnCaseRepository.ReconciliationProcess process,
@@ -215,9 +215,9 @@ public final class RemoteObservationPoller {
         var value = classification.orElseThrow();
         attributes.put("slaTargetId", value.slaTargetId());
         if (value.kind() == org.casemgmt.projection.ActivityObservation.Kind.MILESTONE) {
+            if (!Boolean.TRUE.equals(row.get("canceled")) && row.get("endTime") == null) return null;
             MilestoneObservation.EventType event = Boolean.TRUE.equals(row.get("canceled"))
-                    ? MilestoneObservation.EventType.CANCELLED : row.get("endTime") == null
-                    ? MilestoneObservation.EventType.REOPENED : MilestoneObservation.EventType.REACHED;
+                    ? MilestoneObservation.EventType.CANCELLED : MilestoneObservation.EventType.REACHED;
             attributes.put("milestoneId", value.milestoneId());
             return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new MilestoneObservation(
                     "remote-milestone-" + instanceId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, instanceId, null, event, engineAt.toInstant(), receivedAt.toInstant(), attributes)));

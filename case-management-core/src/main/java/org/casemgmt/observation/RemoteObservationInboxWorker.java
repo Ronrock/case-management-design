@@ -36,6 +36,16 @@ public class RemoteObservationInboxWorker {
 
     public int drainOnce() { return drainOnce(100); }
 
+    /** Drains every currently due batch; failed facts are retried until the normal poison policy resolves them. */
+    public int drainUntilIdle() {
+        int drained = 0;
+        while (true) {
+            int claimed = drainOnce();
+            drained += claimed;
+            if (claimed == 0) return drained;
+        }
+    }
+
     public int drainOnce(int limit) {
         if (limit < 1) throw new IllegalArgumentException("limit must be positive");
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
