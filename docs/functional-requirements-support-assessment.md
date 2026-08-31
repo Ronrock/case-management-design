@@ -86,13 +86,13 @@ This section assesses every row in the source summary table. Detailed FR referen
 | Comments | 1 | **Partially supported** | Authorized case-level comments with internal/external visibility exist. Module/task comments and propagation rules do not. See FR-12. |
 | Activity / Audit Log | 1 | **Partially supported** | Mutations write audit rows and domain events, but there is no user-facing audit/history query that combines them into the requested activity log. See FR-12. |
 | Progress Tracker | 0 | **Partially supported** | Stage, task, process, and milestone states can be read as plan-item projections. There is no first-class module progress or aggregate progress measure, and plan items are deliberately read-only. See FR-04. |
-| SLA Management | 1 | **Partially supported** | Declarative case/stage/task/milestone SLA targets, business calendars, pause/resume, warning, breach, and escalation behavior exist. “Business module” is not a modeled scope. |
+| SLA Management | 1 | **Partially supported** | Typed `CASE`, `STAGE`, `TASK`, `MILESTONE`, and native-loop `OCCURRENCE` SLA targets, business calendars, pause/resume, warning, breach, and escalation behavior exist. “Business module” is not a modeled scope. |
 | Case Creation | 0 | **Partially supported** | Authorized applications can create a case by API with type, business key, title, priority, and data. The delivered UI and inbound business-event initiation path are missing. See FR-02. |
 | Case Level Actions | 2 | **Partially supported** | Update and cancel are available for eligible active cases. Case pause/resume and case linking do not exist; normal completion is controlled by the BPMN root process. See FR-03 and FR-05. |
 | Linked Cases | 3 | **Not supported** | A target database table exists, but there is no production case-link repository, service, API, or UI. Linked processes are not linked cases. |
 | Manual intervention / ad-hoc Actions | — | **Partially supported** | Predeclared, role-controlled ad-hoc task/process/message actions can execute in both engine modes. They are not exposed as discoverable case actions in the delivered UI/API response. |
 
-Supporting evidence for these cross-cutting conclusions includes automatic owner creation in [`CaseService.java`](../case-management-core/src/main/java/org/casemgmt/service/CaseService.java#L68-L102), participant role storage in [`ParticipantRepository.java`](../case-management-core/src/main/java/org/casemgmt/repo/ParticipantRepository.java#L18-L42), SLA configuration scopes in [`case-contract-v1.schema.json`](../case-management-core/src/main/resources/schemas/case-contract-v1.schema.json#L121-L142), and ad-hoc execution in [`AdHocActionService.java`](../case-management-core/src/main/java/org/casemgmt/service/AdHocActionService.java#L76-L174).
+Supporting evidence for these cross-cutting conclusions includes automatic owner creation and root-process start in [`CaseService.java`](../case-management-core/src/main/java/org/casemgmt/service/CaseService.java#L57-L89), participant role storage in [`ParticipantRepository.java`](../case-management-core/src/main/java/org/casemgmt/repo/ParticipantRepository.java#L18-L42), typed SLA scopes in [`case-contract-v1.schema.json`](../case-management-core/src/main/resources/schemas/case-contract-v1.schema.json#L121-L142), and ad-hoc execution in [`AdHocActionService.java`](../case-management-core/src/main/java/org/casemgmt/service/AdHocActionService.java#L76-L174).
 
 ## 5. Detailed functional requirements
 
@@ -120,7 +120,7 @@ Supporting evidence for these cross-cutting conclusions includes automatic owner
 
 **How it is supported today:** An authorized API caller can create a case with a case type, business key, title, priority, and initial data. Another application can therefore initiate a case through the REST API.
 
-**Technical implementation:** `POST /case-api/v2/cases` checks create permission and supports idempotency before calling the case service ([`CaseController.java`](../case-management-rest/src/main/java/org/casemgmt/rest/controller/CaseController.java#L126-L157)). The service selects the latest active version, persists the case, makes the initiator owner, creates initial plan items, starts orchestration, and records event/audit evidence in one transaction ([`CaseService.java`](../case-management-core/src/main/java/org/casemgmt/service/CaseService.java#L68-L102)).
+**Technical implementation:** `POST /case-api/v2/cases` checks create permission and supports idempotency before calling the case service ([`CaseController.java`](../case-management-rest/src/main/java/org/casemgmt/rest/controller/CaseController.java#L126-L157)). The service selects the latest active version, persists the case, makes the initiator owner, starts its pinned BPMN definition, and records event/audit evidence in one transaction ([`CaseService.java`](../case-management-core/src/main/java/org/casemgmt/service/CaseService.java#L57-L89); [`BpmnOrchestration.java`](../case-management-core/src/main/java/org/casemgmt/orchestration/BpmnOrchestration.java#L33-L60)). Engine observations then build task, activity/stage, and milestone projections ([`DefaultEngineObservationHandler.java`](../case-management-core/src/main/java/org/casemgmt/observation/DefaultEngineObservationHandler.java#L186-L256)).
 
 **Honest limitations:**
 
@@ -154,7 +154,7 @@ Supporting evidence for these cross-cutting conclusions includes automatic owner
 
 **How it is supported today:** A case coordinates a tree of stages, human tasks, process tasks, and milestones. Completing work can advance BPMN and update projected stage/case lifecycle state.
 
-**Technical implementation:** Plan items have types `STAGE`, `HUMAN_TASK`, `PROCESS_TASK`, and `MILESTONE`; definitions support parent-stage nesting and task/process metadata ([`PlanItemDefinition.java`](../case-management-core/src/main/java/org/casemgmt/domain/PlanItemDefinition.java#L5-L11)). Human-task activation creates a case task, and transition handling applies lifecycle side effects ([`TransitionApplier.java`](../case-management-core/src/main/java/org/casemgmt/service/TransitionApplier.java#L76-L113)). Stage completion considers required children and exit conditions ([`StageCompletion.java`](../case-management-core/src/main/java/org/casemgmt/rules/StageCompletion.java#L77-L101)).
+**Technical implementation:** BPMN is the sole authority for stage/task sequencing and lifecycle. The observation handler turns neutral engine task, activity, and milestone facts into projection inputs ([`DefaultEngineObservationHandler.java`](../case-management-core/src/main/java/org/casemgmt/observation/DefaultEngineObservationHandler.java#L186-L256)); the projection port upserts the corresponding task, stage, and milestone read-model rows ([`JdbcCaseProjectionPort.java`](../case-management-core/src/main/java/org/casemgmt/projection/JdbcCaseProjectionPort.java#L102-L163)).
 
 **Honest limitations:**
 
@@ -496,7 +496,7 @@ The “displayed and executable” pattern is architecturally important: `Action
 | 1. Search for a business entity. | **Blocked** | No business-entity provider or grouped-context search exists. |
 | 2. Show entity details, products, and related cases. | **Blocked** | No entity/product/communications aggregate exists. |
 | 3. Open an existing case or create a new case. | **Partial** | Case list/read/create APIs exist; creation UI and grouped-context entry do not. |
-| 4. Create configured business modules and tasks. | **Partial** | BPMN materializes plan items/tasks; business modules do not exist. |
+| 4. Create configured business modules and tasks. | **Partial** | BPMN observations project plan-item/task read models; business modules do not exist. |
 | 5. Show tasks in user/team worklists. | **Partial** | Personal/candidate-group worklist exists; complete team/worklist behavior does not. |
 | 6. Open task, complete form, add task documents. | **Partial** | Backend form completion exists; task UI/detail and task-scoped documents do not. |
 | 7. Update task, module, and case progress. | **Partial** | Engine/projection lifecycle updates task/plan/case state; module/aggregate progress is absent. |
@@ -527,7 +527,7 @@ The “displayed and executable” pattern is architecturally important: `Action
 The source priorities suggest the following gap order:
 
 1. **Priority 0:** finish the task/worklist experience and define explicit progress semantics. The backend claim/complete path exists, so this is the shortest route to a usable worker flow.
-2. **Priority 1:** implement customer/business-entity federation and grouped context; runtime-enforce search profiles; add participant management; expose case/module/task collaboration and activity history; complete SLA scope semantics.
+2. **Priority 1:** implement customer/business-entity federation and grouped context; runtime-enforce search profiles; add participant management; expose case/module/task collaboration and activity history.
 3. **Priority 2:** add SLA reporting/dashboarding, DMS integration, and the remaining case lifecycle actions.
 4. **Priority 3:** implement case-to-case relationships and navigation.
 5. **Cross-cutting before production acceptance:** define measurable performance, availability, scalability, observability, CIT/identity integration, and IRIS/IBS integration criteria, then prove them in production-shaped tests.

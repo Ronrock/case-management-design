@@ -1,14 +1,15 @@
 # Declarative Case Model Architecture
 
-Status: target architecture for discussion. This document does not describe the case-definition
-format currently accepted by the runtime.
+Status: target architecture for discussion, constrained by the implemented BPMN-only authority
+boundary. Proposed artifacts beyond the published BPMN, contract, and presentation releases are
+not runtime formats.
 
 ## Purpose
 
-The declarative case model is the versioned source from which case behavior, data validation,
-authorization bindings, search capabilities, presentation descriptors, projection plans, contracts,
-and conformance tests are derived. It must be precise enough for independent implementations and
-automation while remaining understandable to domain teams.
+The declarative case model binds BPMN orchestration to data validation, authorization bindings,
+search capabilities, presentation descriptors, projection plans, contracts, and conformance tests.
+It must be precise enough for independent implementations and automation while remaining
+understandable to domain teams. BPMN, not contract metadata, defines executable sequencing.
 
 The source of truth is a **model bundle**, not one ever-growing YAML document. The bundle manifest
 binds immutable, independently owned artifacts into one deployable case-type version.
@@ -34,8 +35,8 @@ flowchart LR
   manifest["Case model bundle manifest"]
 
   subgraph normative["Normative model artifacts"]
-    data["Data schema + normalized field catalog"]
-    behavior["Commands + lifecycle + tasks"]
+    orchestration["BPMN orchestration release"]
+    data["Contract: data schema + normalized field catalog"]
     policies["Authorization + compliance policies"]
     events["Event contracts"]
     projections["Projection definitions"]
@@ -48,8 +49,8 @@ flowchart LR
     operations["Operational profile references"]
   end
 
+  manifest --> orchestration
   manifest --> data
-  manifest --> behavior
   manifest --> policies
   manifest --> events
   manifest --> projections
@@ -59,8 +60,8 @@ flowchart LR
   manifest --> operations
 
   compiler["Model validator and compiler"]
+  orchestration --> compiler
   data --> compiler
-  behavior --> compiler
   policies --> compiler
   events --> compiler
   projections --> compiler
@@ -68,7 +69,7 @@ flowchart LR
   views --> compiler
   tests --> compiler
 
-  compiler --> runtime["Runtime definition"]
+  compiler --> runtime["BPMN runtime + contract bindings"]
   compiler --> contracts["OpenAPI + AsyncAPI + typed clients"]
   compiler --> physical["Projection and index plans"]
   compiler --> descriptors["View + Search descriptors"]
@@ -81,17 +82,10 @@ flowchart LR
 ```text
 case-models/widget-review/7/
   case-model.yaml
-  schemas/case-data.schema.json
-  behavior/commands.yaml
-  behavior/lifecycle.yaml
-  behavior/tasks.yaml
-  policies/authorization.yaml
-  policies/compliance.yaml
-  contracts/events.asyncapi.yaml
-  read-models/projections.yaml
-  discovery/search.yaml
-  experience/views.yaml
-  experience/forms/
+  orchestration/widget-review.bpmn
+  contract/case-contract.schema.json
+  contract/forms/
+  presentation/views.yaml
   tests/conformance.yaml
 ```
 
@@ -110,16 +104,9 @@ metadata:
 compatibility:
   platform: ">=2.0 <3.0"
 artifacts:
-  data: schemas/case-data.schema.json
-  commands: behavior/commands.yaml
-  lifecycle: behavior/lifecycle.yaml
-  tasks: behavior/tasks.yaml
-  authorization: policies/authorization.yaml
-  compliance: policies/compliance.yaml
-  events: contracts/events.asyncapi.yaml
-  projections: read-models/projections.yaml
-  search: discovery/search.yaml
-  views: experience/views.yaml
+  orchestration: orchestration/widget-review.bpmn
+  contract: contract/case-contract.schema.json
+  presentation: presentation/views.yaml
   tests: tests/conformance.yaml
 requirements:
   hostCapabilities: [navigation, notifications, file-upload, design-tokens]
@@ -197,27 +184,35 @@ Canonical field rules:
 - Derived fields declare source lineage, transformation version, freshness, and rebuild behavior.
 - External fields declare a provider and are never silently persisted into authoritative case data.
 
-## Commands and behavior
+## Authority boundary and contract actions
 
-Commands are first-class contracts rather than UI buttons or state-transition labels. They bind
-input, authorization, concurrency, idempotency, effects, and emitted events.
+The current runtime has one transition authority. **BPMN owns sequencing, gateways, stage and
+activity lifecycle, task activation, timers, and call activities.** The **contract owns** canonical
+fields, forms, authorization, search and presentation metadata, explicit engine/case mappings,
+typed SLA monitoring bindings, and external capabilities. `CM_TASK`, stage, milestone, and linked-
+process state are projections/read models derived from engine observations; they never form a second
+transition authority.
+
+Contract actions are capabilities, not state-machine transitions. They bind input, authorization,
+concurrency, idempotency, mappings, and emitted evidence. An action may invoke an allowed external
+or engine operation, but its lifecycle effects are observed from BPMN rather than applied by the
+contract.
 
 ```yaml
 commands:
-  approve-review:
+  request-review:
     inputSchemaRef: "schemas/case-data.schema.json#/$defs/approvalInput"
-    allowedStates: [in-review]
-    authorizationPolicy: approve-review-policy
+    authorizationPolicy: request-review-policy
     concurrency: if-match-required
     idempotency: required
-    effects:
-      state: approved
-      writes: [decision-reason]
-    emits: [case-approved-v1]
+    operation: correlate-message
+    mapping: review-request-input
+    emits: [review-requested-v1]
 ```
 
-Lifecycle, tasks, forms, available actions, and view descriptors reference the command id. The
-server recomputes availability and authorizes every command at execution time.
+Forms, available actions, and view descriptors may reference an action id. The server recomputes
+availability and authorizes every action at execution time; neither those references nor a contract
+action can advance a stage, activate a task, or complete BPMN work independently.
 
 ## Search parameters and profiles
 
@@ -437,7 +432,7 @@ for each bundle change:
 | Impact axis | Examples |
 |---|---|
 | Data | Required field, type change, path move, default, migration. |
-| Behavior | Command, transition, task, timer, criterion, decision. |
+| Behavior | BPMN sequence, gateway, task, timer, call activity, criterion, decision. |
 | Contract | API input/output, event schema, search parameter, descriptor primitive. |
 | Policy | Read/write/discovery policy or classification change. |
 | Projection | Mapping, source event, rebuild, tombstone, lag objective. |
@@ -465,7 +460,7 @@ Model validation runs before publication and includes:
 - JSON Schema validation for every artifact.
 - Digest and immutable-reference verification.
 - Stable-id uniqueness, reserved-id, alias, and deprecation checks.
-- Cross-reference checks across fields, commands, events, projections, search, views, and tests.
+- Cross-reference checks across BPMN, fields, contract actions, events, projections, search, views, and tests.
 - Static criterion and transformation symbol validation.
 - Policy checks that downstream capabilities never exceed field ceilings.
 - Search operator/type compatibility and provider capability checks.
@@ -478,10 +473,13 @@ schema-evolution fixtures, accessibility checks, and model-to-artifact traceabil
 
 ## Current implementation boundary
 
-The repository currently accepts one JSON definition containing roles, forms, attachment categories,
-and plan items. Case variables are an untyped map, search providers are registered in code, and the
-Lit shell does not interpret case-type views. None of the bundle, field catalog, search parameter,
-Search Descriptor, or compilation contracts above is implemented yet.
+The repository accepts BPMN orchestration plus versioned contract and presentation releases. BPMN
+is the executable lifecycle authority. Engine observations build the task, activity/stage,
+milestone, and linked-process projections; they are not independently materialized definition
+state. The contract already supplies canonical fields, forms, authorization, search/presentation
+metadata, mappings, typed SLA bindings, and declarative external capabilities. The broader bundle,
+field-catalog compiler, search-parameter compiler, Search Descriptor, and generated-evidence
+contracts above remain proposed.
 
 Recommended delivery order:
 
@@ -515,4 +513,3 @@ Recommended delivery order:
 - [HL7 FHIR SearchParameter](https://hl7.org/fhir/searchparameter.html)
 - [OData Capabilities Vocabulary](https://docs.oasis-open.org/odata/odata-vocabularies/v4.0/odata-vocabularies-v4.0.html)
 - [Oracle JSON indexing guidance](https://docs.oracle.com/en/database/oracle/oracle-database/26/adjsn/overview-performance-tuning-json.html)
-

@@ -21,9 +21,11 @@ webhook and UI-integration mechanics; it is not a centrally operated case-manage
 
 **What exists today:** a backend case-management service built on the Operaton process engine.
 It manages *cases* (long-running, human-driven work items) whose behavior is defined by BPMN.
-Operaton owns token flow, gateways, task activation, process timers, subprocesses, and
-compensation. The service owns the shared case API, canonical data, authorization, audit, SLA,
-search, and presentation contracts.
+Operaton owns token flow, gateways, stage/activity lifecycle, task activation, process timers,
+call activities, subprocesses, and compensation. The service owns the shared case API, canonical
+data, authorization, audit, typed SLA bindings, search, presentation contracts, and the projections
+derived from engine observations. Those projections are read models, never a second transition
+authority.
 
 **UI scope:** the backend remains the main implemented surface, but a Lit Web Components package
 now provides the standalone shell and a generic enterprise portal-adapter contract.
@@ -232,22 +234,18 @@ with reserved participant role names, so a global group cannot accidentally beco
 
 ### 5.1 Model
 
-`CaseDefinition` (+ `PlanItemDefinition`) is the declarative template. `CaseInstance` is a running
-case; `PlanItem` is a running element within it; `CaseTask` is a human task mirrored from the engine.
-
-Enums: `CaseState`, `CasePriority`, `PlanItemState`, `PlanItemType` (`STAGE`, `HUMAN_TASK`,
-`PROCESS_TASK`, `MILESTONE`), `TaskState`.
+`CaseDefinition` is the pinned binding of BPMN orchestration, contract, and presentation releases.
+`CaseInstance` is a running case. `CM_PLAN_ITEM`, `CM_TASK`, `CM_MILESTONE`, and
+`CM_LINKED_PROCESS` are BPMN-observation projections used for API reads, worklists, and audit
+context. Their `STAGE`, `HUMAN_TASK`, `PROCESS_TASK`, and `MILESTONE` classifications do not grant
+them authority to activate, complete, or route work.
 
 ```mermaid
-stateDiagram-v2
-    [*] --> AVAILABLE: "definition materialised"
-    AVAILABLE --> ACTIVE: "entry criteria met"
-    ACTIVE --> COMPLETED: "task complete, milestone achieved, or stage complete"
-    ACTIVE --> TERMINATED: "case closed/cancelled or parent terminated"
-    AVAILABLE --> TERMINATED: "case closed/cancelled or parent terminated"
-    COMPLETED --> AVAILABLE: "repeatable item re-enters"
-    COMPLETED --> [*]
-    TERMINATED --> [*]
+flowchart LR
+  bpmn["BPMN engine facts"] --> observations["Engine observations"]
+  observations --> projections["task / stage / milestone / linked-process projections"]
+  projections --> reads["case API and worklists"]
+  bpmn --> lifecycle["sequencing and lifecycle authority"]
 ```
 
 ### 5.3 Services
@@ -256,8 +254,9 @@ stateDiagram-v2
 `MilestoneService`, `LinkedProcessService`, `WebhookService`, `CaseDefinitionService`,
 `SlaService`.
 
-The module pattern for a mutation is **row + event + audit in one transaction**, applied via
-`TransitionApplier`. `case-management-core` has a real `DataSourceTransactionManager`, so
+The module pattern for a platform mutation is **row + event + audit in one transaction**. Engine
+observation handling applies the associated projection effects atomically; it does not replay a
+separate case lifecycle. `case-management-core` has a real `DataSourceTransactionManager`, so
 `@Transactional` genuinely works — **but only through a Spring proxy**.
 
 ---
@@ -285,11 +284,11 @@ sequenceDiagram
     participant Dispatcher as "Engine command dispatcher"
     participant Remote as "Remote Operaton REST"
 
-    API->>Core: "Create or activate plan item"
+    API->>Core: "Create case / request engine operation"
     alt "embedded mode"
-        Core->>Engine: "Start process / create task in same transaction"
-        Engine-->>Core: "Engine ids"
-        Core-->>API: "Committed case view"
+        Core->>Engine: "Start process / complete engine task in same transaction"
+        Engine-->>Core: "Lifecycle observations"
+        Core-->>API: "Committed case and projections"
     else "remote mode"
         Core->>Outbox: "Insert command with claim metadata"
         Core-->>API: "Committed case view with ENGINE_SYNC_=PENDING"
@@ -297,7 +296,7 @@ sequenceDiagram
         Dispatcher->>Remote: "Execute engine call"
         Remote-->>Dispatcher: "Engine ids"
         Dispatcher->>Outbox: "Mark completed"
-        Dispatcher->>Core: "Mark linked row SYNCED"
+        Dispatcher->>Core: "Observation confirms projections"
     end
 ```
 
@@ -351,8 +350,11 @@ dates, which is the dangerous direction for a breach calculation.
 
 Resume re-derives the deadline through the calendar rather than adding wall-clock time.
 
-SLA targets may whitelist pause reasons. The legacy database column is named
-`PAUSED_STATES_JSON_`, but it is interpreted as pause reasons, not lifecycle states.
+SLA targets use the contract vocabulary `CASE`, `STAGE`, `TASK`, `MILESTONE`, and `OCCURRENCE`.
+An `OCCURRENCE` binding is keyed by the native BPMN loop/activity occurrence observed from the
+engine; it is not inferred from a separate case lifecycle. SLA targets may whitelist pause reasons.
+The legacy database column is named `PAUSED_STATES_JSON_`, but it is interpreted as pause reasons,
+not lifecycle states.
 
 ---
 

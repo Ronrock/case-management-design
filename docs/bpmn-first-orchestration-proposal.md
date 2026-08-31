@@ -1,8 +1,9 @@
 # BPMN-First Case Orchestration — Accepted Architecture
 
 Operaton is the sole orchestrator of record. The later BPMN-only decision removed the unused JSON
-plan-model runtime because the library has no consumers. Existing installations are protected by
-an upgrade preflight that stops when active legacy rows exist; they are never silently converted.
+plan-model runtime because the library has no consumers. Existing installations are protected by a
+migration preflight that blocks upgrade while retained legacy `PLAN_MODEL` definitions or bindings
+exist; they are never silently converted.
 
 Status: accepted for incremental implementation. Companion documents:
 
@@ -65,7 +66,9 @@ only after compatibility validation against the pinned contract.
 
 `OrchestrationMode` accepts only `BPMN`. `BpmnOrchestration` starts and cancels the root process,
 exposes engine-backed actions, and accepts engine observations through vendor-neutral core ports.
-The contract cannot define a parallel lifecycle, task activation rules, gateways, or timers.
+The contract cannot define a parallel lifecycle, task activation rules, gateways, timers, or call
+activities. It owns canonical fields, forms, authorization, search/presentation metadata, explicit
+engine/case mappings, typed SLA monitoring bindings, and external capabilities.
 
 Engine integration is split into command and observation operations. Commands cover deploy,
 start/cancel, claim/complete, message correlation, and migration. Observations cover active
@@ -158,6 +161,13 @@ executions. Embedded migration is synchronous; remote migration is an outbox com
 pinned release references change only after the corresponding compatibility check, data upgrade, or
 engine migration succeeds.
 
+The BPMN-only library does not support legacy plan-model behavior in every release. Before an
+upgrade that activates the BPMN-only schema/runtime, migration preflight blocks when legacy
+`PLAN_MODEL` data remains. Operators must explicitly migrate, export, retire, or dispose of that
+data before activation. Rollback is application/schema compatible only inside this documented data
+boundary; it does not restore removed plan-model behavior or make retained legacy definitions
+executable.
+
 ## Delivery order
 
 1. Stabilize the reactor, executable PoC, locale-stable API contract, and Java/Node CI.
@@ -168,7 +178,7 @@ engine migration succeeds.
 6. Add stock-Operaton polling, stale-state reporting, and reconciliation.
 7. Add Studio and controlled presentation, contract, and process upgrades.
 
-Each release remains runnable and keeps plan-model definitions supported.
+Each release remains runnable within the BPMN-only compatibility boundary described above.
 
 ## Sources
 
