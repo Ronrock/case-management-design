@@ -14,6 +14,7 @@ import org.casemgmt.release.ValidatedCaseContract;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.JsonCodec;
+import org.casemgmt.sla.SlaCalendarCatalog;
 
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
@@ -29,21 +30,25 @@ public class CaseDefinitionVersionService {
     private final CaseDefinitionVersionBindingRepository bindings;
     private final CaseDefinitionService definitions;
     private final CaseContractValidator contracts;
+    private final SlaCalendarCatalog calendars;
 
     public CaseDefinitionVersionService(CaseDefinitionReleaseRepository releases,
                                         CaseDefinitionVersionBindingRepository bindings,
-                                        CaseDefinitionService definitions) {
-        this(releases, bindings, definitions, new JsonSchemaCaseContractValidator());
+                                        CaseDefinitionService definitions,
+                                        SlaCalendarCatalog calendars) {
+        this(releases, bindings, definitions, new JsonSchemaCaseContractValidator(), calendars);
     }
 
     public CaseDefinitionVersionService(CaseDefinitionReleaseRepository releases,
                                         CaseDefinitionVersionBindingRepository bindings,
                                         CaseDefinitionService definitions,
-                                        CaseContractValidator contracts) {
+                                        CaseContractValidator contracts,
+                                        SlaCalendarCatalog calendars) {
         this.releases = releases;
         this.bindings = bindings;
         this.definitions = definitions;
         this.contracts = contracts;
+        this.calendars = Objects.requireNonNull(calendars, "calendars");
     }
 
     @Transactional
@@ -74,7 +79,7 @@ public class CaseDefinitionVersionService {
                 contractReleaseId, tenantId, key, ReleaseKind.CONTRACT);
         CaseDefinitionRelease presentation = require(
                 presentationReleaseId, tenantId, key, ReleaseKind.PRESENTATION);
-        validateBoundArtifacts(key, orchestration, contract, presentation);
+        validateBoundArtifacts(key, tenantId, orchestration, contract, presentation);
         if (orchestration.status() == ReleaseStatus.ACTIVE) {
             var identity = orchestration.engineIdentity();
             if (identity == null) {
@@ -116,10 +121,10 @@ public class CaseDefinitionVersionService {
      * {@code Map<String,Object>}: the shape is already guaranteed, so what remains is genuinely
      * about whether two artifacts agree.
      */
-    private void validateBoundArtifacts(String key, CaseDefinitionRelease orchestration,
+    private void validateBoundArtifacts(String key, String tenantId, CaseDefinitionRelease orchestration,
                                         CaseDefinitionRelease contractRelease,
                                         CaseDefinitionRelease presentationRelease) {
-        validateArtifacts(key, orchestration.content(), orchestration.mediaType(),
+        validateArtifacts(key, tenantId, orchestration.content(), orchestration.mediaType(),
                 contractRelease.content(), presentationRelease.content());
     }
 
@@ -128,10 +133,20 @@ public class CaseDefinitionVersionService {
      * bundle is published or deployed. Binding calls the same gate again because it is also a
      * public entry point and releases can be published independently.
      */
-    public void validateArtifacts(String key, byte[] orchestrationContent, String orchestrationMediaType,
+    public void validateArtifacts(String key, String tenantId, byte[] orchestrationContent,
+                                  String orchestrationMediaType,
                                   byte[] contractContent, byte[] presentationContent) {
         requireDeclaredOrchestrationMode(key, contractContent);
         ValidatedCaseContract contract = contracts.validate(key, contractContent);
+        for (ValidatedCaseContract.SlaBindingDefinition binding : contract.slaBindings()) {
+            try {
+                calendars.require(tenantId, binding.calendarId(), binding.calendarRevision());
+            } catch (org.casemgmt.error.NotFoundException missing) {
+                throw invalid(key, "SLA binding '" + binding.id() + "' references missing calendar '"
+                        + binding.calendarId() + "' revision " + binding.calendarRevision()
+                        + " for tenant '" + tenantId + "'");
+            }
+        }
         if (contract.orchestrationMode() != org.casemgmt.orchestration.OrchestrationMode.BPMN) {
             throw invalid(key, "A BPMN release binding requires orchestrationMode BPMN");
         }

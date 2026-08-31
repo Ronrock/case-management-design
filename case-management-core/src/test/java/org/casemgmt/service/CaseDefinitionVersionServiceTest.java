@@ -2,6 +2,7 @@ package org.casemgmt.service;
 
 import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.error.InvalidCaseDefinitionException;
+import org.casemgmt.error.NotFoundException;
 import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.release.CaseDefinitionRelease;
 import org.casemgmt.release.CaseDefinitionVersionBinding;
@@ -9,6 +10,7 @@ import org.casemgmt.release.ReleaseKind;
 import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
+import org.casemgmt.sla.SlaCalendarCatalog;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -30,6 +32,35 @@ import static org.mockito.Mockito.when;
 
 class CaseDefinitionVersionServiceTest {
 
+    @Test
+    void directBindingRejectsAMissingTenantCalendarRevisionBeforeDefinitionOrBindingWrites() {
+        CaseDefinitionReleaseRepository releases = mock(CaseDefinitionReleaseRepository.class);
+        CaseDefinitionVersionBindingRepository bindings =
+                mock(CaseDefinitionVersionBindingRepository.class);
+        CaseDefinitionService definitions = mock(CaseDefinitionService.class);
+        SlaCalendarCatalog calendars = mock(SlaCalendarCatalog.class);
+        stubOrchestrationAndPresentation(releases);
+        when(releases.require("contract-1", "t1")).thenReturn(release("contract-1",
+                ReleaseKind.CONTRACT,
+                "{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\","
+                        + "\"fields\":{},\"forms\":{},\"slaBindings\":{\"resolution\":{"
+                        + "\"scope\":\"CASE\",\"calendarId\":\"support\",\"calendarRevision\":4,"
+                        + "\"duration\":\"PT1H\",\"startAnchor\":\"CASE_CREATED\","
+                        + "\"meetAnchor\":\"CASE_CLOSED\"}}}", "2"));
+        when(calendars.require("t1", "support", 4))
+                .thenThrow(new NotFoundException("SlaCalendarRevision", "t1/support/4"));
+
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(
+                releases, bindings, definitions, calendars).bind(
+                "sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("support")
+                .hasMessageContaining("revision 4")
+                .hasMessageContaining("tenant 't1'");
+
+        verifyNoInteractions(bindings, definitions);
+    }
+
     @ParameterizedTest(name = "rejects {0} contract release")
     @EnumSource(value = ReleaseStatus.class, names = "ACTIVE", mode = EnumSource.Mode.EXCLUDE)
     void publicBindingRejectsEveryNonActiveConstituentRelease(ReleaseStatus status) {
@@ -49,7 +80,8 @@ class CaseDefinitionVersionServiceTest {
         when(releases.require("presentation-1", "t1")).thenReturn(release("presentation-1",
                 ReleaseKind.PRESENTATION, "{\"version\":\"1.0\",\"sections\":[]}", "3"));
 
-        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(
+                releases, bindings, definitions, noSlaBindings())
                 .bind("sample-case", "t1", "orch-1", "contract-1",
                         "presentation-1", "alice"))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
@@ -83,7 +115,7 @@ class CaseDefinitionVersionServiceTest {
                 .thenReturn(definition);
 
         CaseDefinitionVersionBinding bound = new CaseDefinitionVersionService(
-                releases, bindings, definitions).bind("sample-case", "t1", "orch-1",
+                releases, bindings, definitions, noSlaBindings()).bind("sample-case", "t1", "orch-1",
                 "contract-1", "presentation-1", "alice");
 
         assertThat(bound.caseDefinitionId()).isEqualTo("t1:sample-case:1");
@@ -119,7 +151,7 @@ class CaseDefinitionVersionServiceTest {
                 .thenReturn(definition);
 
         CaseDefinitionVersionBinding bound = new CaseDefinitionVersionService(
-                releases, bindings, definitions).bindPendingDeployment(
+                releases, bindings, definitions, noSlaBindings()).bindPendingDeployment(
                 "sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice");
 
         assertThat(bound.status()).isEqualTo(org.casemgmt.release.BindingStatus.DRAFT);
@@ -149,7 +181,8 @@ class CaseDefinitionVersionServiceTest {
         when(releases.require("presentation-1", "t1")).thenReturn(release("presentation-1",
                 ReleaseKind.PRESENTATION, "{\"version\":\"1.0\",\"sections\":[]}", "3"));
 
-        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(
+                releases, bindings, definitions, noSlaBindings())
                 .bind("sample-case", "t1", "orch-1", "contract-1",
                         "presentation-1", "alice"))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
@@ -177,7 +210,7 @@ class CaseDefinitionVersionServiceTest {
 
         assertThatThrownBy(() -> new CaseDefinitionVersionService(releases,
                 mock(CaseDefinitionVersionBindingRepository.class),
-                mock(CaseDefinitionService.class)).bind("sample-case", "t1", "orch-1",
+                mock(CaseDefinitionService.class), noSlaBindings()).bind("sample-case", "t1", "orch-1",
                 "contract-1", "presentation-1", "alice"))
                 .hasMessageContaining("undeclared candidate group 'secret-reviewers'");
     }
@@ -204,7 +237,8 @@ class CaseDefinitionVersionServiceTest {
                         + "\"startAnchor\":\"CASE_CREATED\",\"meetAnchor\":\"CASE_CLOSED\","
                         + "\"warnngs\":[\"P4D\"]}}}", "2"));
 
-        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(
+                releases, bindings, definitions, noSlaBindings())
                 .bind("sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice"))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("/slaBindings/resolution/warnngs");
@@ -228,7 +262,8 @@ class CaseDefinitionVersionServiceTest {
                 ReleaseKind.CONTRACT,
                 "{\"key\":\"sample-case\",\"roles\":[],\"forms\":{},\"fields\":{}}", "2"));
 
-        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(
+                releases, bindings, definitions, noSlaBindings())
                 .bind("sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice"))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("orchestrationMode");
@@ -254,7 +289,8 @@ class CaseDefinitionVersionServiceTest {
                         + "\"fields\":{},\"planItems\":[{\"defKey\":\"intake\","
                         + "\"type\":\"STAGE\"}]}", "2"));
 
-        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(
+                releases, bindings, definitions, noSlaBindings())
                 .bind("sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice"))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("/planItems")
@@ -275,7 +311,8 @@ class CaseDefinitionVersionServiceTest {
                 "{\"key\":\"sample-case\",\"orchestrationMode\":\"PLAN_MODEL\",\"forms\":{}}",
                 "2"));
 
-        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(
+                releases, bindings, definitions, noSlaBindings())
                 .bind("sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice"))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("PLAN_MODEL")
@@ -311,7 +348,8 @@ class CaseDefinitionVersionServiceTest {
                 "{\"version\":\"1.0\",\"sections\":[{\"fields\":[\"missingField\"]}]}",
                 "3"));
 
-        assertThatThrownBy(() -> new CaseDefinitionVersionService(releases, bindings, definitions)
+        assertThatThrownBy(() -> new CaseDefinitionVersionService(
+                releases, bindings, definitions, noSlaBindings())
                 .bind("sample-case", "t1", "orch-1", "contract-1", "presentation-1", "alice"))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("missingForm")
@@ -327,13 +365,13 @@ class CaseDefinitionVersionServiceTest {
         CaseDefinitionVersionService service = new CaseDefinitionVersionService(
                 mock(CaseDefinitionReleaseRepository.class),
                 mock(CaseDefinitionVersionBindingRepository.class),
-                mock(CaseDefinitionService.class));
+                mock(CaseDefinitionService.class), noSlaBindings());
         String missingFields = IntStream.range(0, 25)
                 .mapToObj(index -> "\"missing-%02d\"".formatted(index))
                 .reduce((left, right) -> left + "," + right)
                 .orElseThrow();
 
-        assertThatThrownBy(() -> service.validateArtifacts("sample-case", """
+        assertThatThrownBy(() -> service.validateArtifacts("sample-case", "t1", """
                         <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
                           <process id="sample-case" isExecutable="true"/>
                         </definitions>""".getBytes(StandardCharsets.UTF_8),
@@ -347,6 +385,12 @@ class CaseDefinitionVersionServiceTest {
                 .hasMessageContaining("missing-19")
                 .hasMessageNotContaining("missing-20")
                 .hasMessageContaining("...and 5 additional reference findings");
+    }
+
+    private static SlaCalendarCatalog noSlaBindings() {
+        return (tenantId, calendarId, revision) -> {
+            throw new AssertionError("test contract unexpectedly referenced an SLA calendar");
+        };
     }
 
     private static void stubOrchestrationAndPresentation(CaseDefinitionReleaseRepository releases) {

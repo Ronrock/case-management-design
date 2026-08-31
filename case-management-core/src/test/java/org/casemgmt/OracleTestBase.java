@@ -248,6 +248,7 @@ public abstract class OracleTestBase {
                 "CM_CASE_DEF",
                 "CM_SLA_TARGET",
                 "CM_SLA_POLICY",
+                "CM_BUSINESS_CALENDAR_REVISION",
                 "CM_BUSINESS_CALENDAR",
                 "CM_WEBHOOK_DELIVERY",
                 "CM_WEBHOOK_SUB",

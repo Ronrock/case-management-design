@@ -3,6 +3,7 @@ package org.casemgmt.repo;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.error.OptimisticLockException;
 import org.casemgmt.sla.SlaRecord;
+import org.casemgmt.sla.SlaCalendarCatalog;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 import java.util.Collection;
@@ -18,7 +19,7 @@ import org.springframework.dao.DuplicateKeyException;
 /** Persistence for {@code CM_BUSINESS_CALENDAR}, {@code CM_SLA_POLICY}, {@code CM_SLA_TARGET}
  * and {@code CM_SLA_RECORD} (spec §7). Policy/target/calendar writers here are test-and-PoC-seeding
  * only — no admin API creates them yet. */
-public class SlaRepository {
+public class SlaRepository implements SlaCalendarCatalog {
 
     public record TargetRow(String id, String policyId, String targetKey, String name,
                             String durationIso, String warningIso, List<String> pauseReasons,
@@ -30,7 +31,7 @@ public class SlaRepository {
     public record ContractOccurrence(String id, String caseId, String targetId, String targetKey,
                                      int targetVersion, String scope, String occurrenceKey,
                                      String contractReleaseId, String contractSha256,
-                                     String calendarId, int calendarRevision,
+                                     String calendarId, int calendarRevision, String calendarSha256,
                                      String meetAnchor, String cancelAnchor,
                                      OffsetDateTime startedAt, OffsetDateTime dueAt,
                                      OffsetDateTime warnAt, String calendarDefinition,
@@ -59,6 +60,64 @@ public class SlaRepository {
     public void insertCalendar(String id, Map<String, Object> definition) {
         jdbc.sql("INSERT INTO CM_BUSINESS_CALENDAR (ID_, NAME_, DEFINITION_JSON_) VALUES (:id, :id, :def)")
             .param("id", id).param("def", JsonCodec.toJson(definition)).update();
+    }
+
+    /** Inserts one immutable tenant calendar revision, treating an exact replay as a no-op. */
+    public void insertCalendarRevision(String tenantId, String calendarId, int revision,
+                                       String name, Map<String, Object> definition) {
+        Objects.requireNonNull(tenantId, "tenantId");
+        Objects.requireNonNull(calendarId, "calendarId");
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(definition, "definition");
+        if (revision < 1) throw new IllegalArgumentException("calendar revision must be positive");
+        String canonical = JsonCodec.canonicalJson(definition);
+        String digest = JsonCodec.sha256(canonical);
+        try {
+            jdbc.sql("""
+                    INSERT INTO CM_BUSINESS_CALENDAR_REVISION
+                      (TENANT_ID_, CALENDAR_ID_, REVISION_, NAME_, DEFINITION_JSON_, SHA256_)
+                    VALUES (:tenantId, :calendarId, :revision, :name, :definition, :sha256)""")
+                    .param("tenantId", tenantId).param("calendarId", calendarId)
+                    .param("revision", revision).param("name", name)
+                    .param("definition", canonical).param("sha256", digest).update();
+        } catch (DuplicateKeyException duplicate) {
+            SlaCalendarCatalog.Revision existing = findCalendarRevision(tenantId, calendarId, revision)
+                    .orElseThrow(() -> calendarRevisionConflict(
+                            tenantId, calendarId, revision, duplicate));
+            if (!existing.sha256().equals(digest)) {
+                throw calendarRevisionConflict(tenantId, calendarId, revision, duplicate);
+            }
+        }
+    }
+
+    @Override
+    public SlaCalendarCatalog.Revision require(String tenantId, String calendarId, int revision) {
+        return findCalendarRevision(tenantId, calendarId, revision)
+                .orElseThrow(() -> new NotFoundException("SlaCalendarRevision",
+                        tenantId + "/" + calendarId + "/" + revision));
+    }
+
+    private java.util.Optional<SlaCalendarCatalog.Revision> findCalendarRevision(
+            String tenantId, String calendarId, int revision) {
+        return jdbc.sql("""
+                SELECT TENANT_ID_, CALENDAR_ID_, REVISION_, SHA256_, DEFINITION_JSON_
+                FROM CM_BUSINESS_CALENDAR_REVISION
+                WHERE TENANT_ID_ = :tenantId AND CALENDAR_ID_ = :calendarId
+                  AND REVISION_ = :revision""")
+                .param("tenantId", tenantId).param("calendarId", calendarId)
+                .param("revision", revision)
+                .query((rs, row) -> new SlaCalendarCatalog.Revision(
+                        rs.getString("TENANT_ID_"), rs.getString("CALENDAR_ID_"),
+                        rs.getInt("REVISION_"), rs.getString("SHA256_"),
+                        JsonCodec.toMap(rs.getString("DEFINITION_JSON_"))))
+                .optional();
+    }
+
+    private static IllegalStateException calendarRevisionConflict(
+            String tenantId, String calendarId, int revision, DuplicateKeyException cause) {
+        return new IllegalStateException("SLA calendar for tenant '" + tenantId + "', id '"
+                + calendarId + "', revision " + revision
+                + " is immutable and already has a different identity", cause);
     }
 
     public void insertPolicy(String id, String name, String selector, String calendarId) {
@@ -175,12 +234,12 @@ public class SlaRepository {
                       (ID_, CASE_ID_, TARGET_ID_, STATUS_, STARTED_AT_, DUE_AT_, WARN_AT_,
                        PAUSED_TOTAL_SECS_, VERSION_, CONTRACT_RELEASE_ID_, CONTRACT_SHA256_,
                        TARGET_KEY_, TARGET_VERSION_, SLA_SCOPE_, OCCURRENCE_KEY_, CALENDAR_ID_,
-                       CALENDAR_REVISION_, MEET_ANCHOR_, CANCEL_ANCHOR_, CALENDAR_DEFINITION_JSON_,
+                       CALENDAR_REVISION_, CALENDAR_SHA256_, MEET_ANCHOR_, CANCEL_ANCHOR_, CALENDAR_DEFINITION_JSON_,
                        PAUSE_ANCHORS_JSON_, RESUME_ANCHORS_JSON_, TRANSITION_EVIDENCE_JSON_)
                     VALUES
                       (:id, :caseId, :targetId, 'RUNNING', :startedAt, :dueAt, :warnAt,
                        0, 0, :releaseId, :sha256, :targetKey, :targetVersion, :scope,
-                       :occurrenceKey, :calendarId, :calendarRevision, :meetAnchor,
+                       :occurrenceKey, :calendarId, :calendarRevision, :calendarSha256, :meetAnchor,
                        :cancelAnchor, :calendarDefinition, :pauseAnchors, :resumeAnchors, :evidence)""")
                     .param("id", occurrence.id()).param("caseId", occurrence.caseId())
                     .param("targetId", occurrence.targetId()).param("startedAt", occurrence.startedAt())
@@ -189,6 +248,7 @@ public class SlaRepository {
                     .param("targetKey", occurrence.targetKey()).param("targetVersion", occurrence.targetVersion())
                     .param("scope", occurrence.scope()).param("occurrenceKey", occurrence.occurrenceKey())
                     .param("calendarId", occurrence.calendarId()).param("calendarRevision", occurrence.calendarRevision())
+                    .param("calendarSha256", occurrence.calendarSha256())
                     .param("meetAnchor", occurrence.meetAnchor()).param("cancelAnchor", occurrence.cancelAnchor())
                     .param("calendarDefinition", occurrence.calendarDefinition())
                     .param("pauseAnchors", JsonCodec.toJson(occurrence.pauseAnchors()))

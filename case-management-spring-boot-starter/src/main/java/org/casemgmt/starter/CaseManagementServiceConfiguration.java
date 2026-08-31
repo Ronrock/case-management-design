@@ -166,8 +166,9 @@ public class CaseManagementServiceConfiguration {
     public CaseDefinitionVersionService caseDefinitionVersionService(
             CaseDefinitionReleaseRepository releases,
             CaseDefinitionVersionBindingRepository bindings,
-            CaseDefinitionService definitions) {
-        return new CaseDefinitionVersionService(releases, bindings, definitions);
+            CaseDefinitionService definitions,
+            SlaRepository calendars) {
+        return new CaseDefinitionVersionService(releases, bindings, definitions, calendars);
     }
 
     @Bean

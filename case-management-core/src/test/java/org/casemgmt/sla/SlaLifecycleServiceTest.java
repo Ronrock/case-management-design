@@ -13,6 +13,7 @@ import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.EventRepository;
+import org.casemgmt.repo.JsonCodec;
 import org.casemgmt.repo.SlaRepository;
 import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.release.BindingStatus;
@@ -61,6 +62,7 @@ class SlaLifecycleServiceTest extends OracleTestBase {
                 now, now, null, null, ProjectionStatus.CURRENT, null, now));
         sla = new SlaRepository(jdbc());
         sla.insertCalendar("cal-1", alwaysOpenCalendar());
+        sla.insertCalendarRevision("tenant-a", "cal-1", 1, "Calendar v1", alwaysOpenCalendar());
         sla.insertPolicy("policy-1", "Policy", null, "cal-1");
         sla.insertTarget("target-running", "policy-1", "running", "Running", "PT1H", null,
                 List.of(), List.of("EMIT_EVENT"));
@@ -126,7 +128,7 @@ class SlaLifecycleServiceTest extends OracleTestBase {
         String contract = """
                 {"key":"sla-root","orchestrationMode":"BPMN","fields":{},"forms":{},
                  "slaBindings":{"resolution":{"scope":"CASE","calendarId":"cal-1",
-                 "calendarRevision":7,"targetVersion":3,"duration":"PT1H",
+                 "calendarRevision":1,"targetVersion":3,"duration":"PT1H",
                  "startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED",
                  "cancelAnchor":"CASE_CANCELLED","pauseAnchors":["USER_TASK_CREATED"],
                  "resumeAnchors":["USER_TASK_COMPLETED"],"warnings":["PT30M"]}}}""";
@@ -148,6 +150,11 @@ class SlaLifecycleServiceTest extends OracleTestBase {
                 OrchestrationMode.BPMN, BindingStatus.ACTIVE,
                 new EngineDeploymentIdentity("dep", "proc:1", "sla-root", 1, "tenant-a"), null,
                 OffsetDateTime.now(), OffsetDateTime.now(), null, "tester"));
+        sla.insertCalendarRevision("tenant-a", "cal-1", 2, "Calendar v2",
+                Map.of("timezone", "UTC", "workingHours", Map.of(
+                        "MONDAY", List.of(Map.of("from", "09:00", "to", "17:00")))));
+        jdbc().sql("UPDATE CM_BUSINESS_CALENDAR SET DEFINITION_JSON_ = '{}' WHERE ID_ = 'cal-1'")
+                .update();
         SlaLifecycleService contractLifecycle = new SlaLifecycleService(sla, new CaseRepository(jdbc()),
                 publisher(), new CaseDefinitionVersionBindingRepository(dataSource()), releases,
                 new JsonSchemaCaseContractValidator());
@@ -162,11 +169,15 @@ class SlaLifecycleServiceTest extends OracleTestBase {
                 .query(Integer.class).single()).isEqualTo(1);
         var snapshot = jdbc().sql("""
                 SELECT TARGET_KEY_, TARGET_VERSION_, SLA_SCOPE_, OCCURRENCE_KEY_, CALENDAR_REVISION_,
-                       TRANSITION_EVIDENCE_JSON_ FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'""")
+                       CALENDAR_SHA256_, CALENDAR_DEFINITION_JSON_, TRANSITION_EVIDENCE_JSON_
+                FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'""")
                 .query((rs, n) -> List.of(rs.getString(1), rs.getInt(2), rs.getString(3),
-                        rs.getString(4), rs.getInt(5), rs.getString(6))).single();
-        assertThat(snapshot.subList(0, 5)).containsExactly("resolution", 3, "CASE", "CASE", 7);
-        assertThat(String.valueOf(snapshot.get(5))).contains("\"anchor\":\"CASE_CREATED\"")
+                        rs.getString(4), rs.getInt(5), rs.getString(6), rs.getString(7),
+                        rs.getString(8))).single();
+        assertThat(snapshot.subList(0, 5)).containsExactly("resolution", 3, "CASE", "CASE", 1);
+        assertThat(snapshot.get(5)).isEqualTo(JsonCodec.canonicalSha256(alwaysOpenCalendar()));
+        assertThat(snapshot.get(6)).isEqualTo(JsonCodec.canonicalJson(alwaysOpenCalendar()));
+        assertThat(String.valueOf(snapshot.get(7))).contains("\"anchor\":\"CASE_CREATED\"")
                 .contains("\"occurredAt\":\"2026-08-30T10:00:00Z\"")
                 .contains("\"transition\":\"STARTED\"");
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.started'")
@@ -186,9 +197,6 @@ class SlaLifecycleServiceTest extends OracleTestBase {
         // A later edit to the calendar must not rewrite a clock that is already governed by
         // the published revision captured at start. An empty calendar would make a mutable
         // lookup fail to calculate the remaining business time at resume.
-        jdbc().sql("UPDATE CM_BUSINESS_CALENDAR SET DEFINITION_JSON_ = '{}' WHERE ID_ = 'cal-1'")
-                .update();
-
         contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "COMPLETED",
                 "task-1", Instant.parse("2026-08-30T10:20:00Z")));
         contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "COMPLETED",

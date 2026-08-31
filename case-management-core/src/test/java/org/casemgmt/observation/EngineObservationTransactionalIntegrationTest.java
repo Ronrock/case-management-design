@@ -316,6 +316,8 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
 
         SlaRepository sla = new SlaRepository(jdbc);
         sla.insertCalendar("calendar-1", alwaysOpenCalendar());
+        sla.insertCalendarRevision(TENANT_ID, "calendar-1", 1, "Calendar 1",
+                alwaysOpenCalendar());
         sla.insertPolicy("policy-1", "Policy", null, "calendar-1");
         sla.insertTarget("target-1", "policy-1", "taskAnchor", "Task anchor",
                 "PT1H", null, List.of(), List.of());

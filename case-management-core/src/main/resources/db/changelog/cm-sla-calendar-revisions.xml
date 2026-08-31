@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+  <changeSet id="cm-sla-calendar-revision-table-shape-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+      onFailMessage="CM_BUSINESS_CALENDAR_REVISION must have the exact tenant/id/revision immutable catalog shape; migration stopped without changing the existing table.">
+      <or>
+        <not><tableExists tableName="CM_BUSINESS_CALENDAR_REVISION"/></not>
+        <and>
+          <sqlCheck expectedResult="1"><![CDATA[
+            SELECT CASE WHEN
+              (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+               WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION') = 7
+              AND (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND COLUMN_NAME = 'TENANT_ID_' AND DATA_TYPE = 'VARCHAR2'
+                     AND DATA_LENGTH = 64 AND CHAR_USED = 'B' AND NULLABLE = 'N') = 1
+              AND (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND COLUMN_NAME = 'CALENDAR_ID_' AND DATA_TYPE = 'VARCHAR2'
+                     AND DATA_LENGTH = 128 AND CHAR_USED = 'B' AND NULLABLE = 'N') = 1
+              AND (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND COLUMN_NAME = 'REVISION_' AND DATA_TYPE = 'NUMBER'
+                     AND DATA_PRECISION = 10 AND DATA_SCALE = 0 AND NULLABLE = 'N') = 1
+              AND (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND COLUMN_NAME = 'NAME_' AND DATA_TYPE = 'VARCHAR2'
+                     AND DATA_LENGTH = 255 AND CHAR_USED = 'B' AND NULLABLE = 'N') = 1
+              AND (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND COLUMN_NAME = 'DEFINITION_JSON_' AND DATA_TYPE = 'CLOB'
+                     AND NULLABLE = 'N') = 1
+              AND (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND COLUMN_NAME = 'SHA256_' AND DATA_TYPE = 'VARCHAR2'
+                     AND DATA_LENGTH = 64 AND CHAR_USED = 'B' AND NULLABLE = 'N') = 1
+              AND (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND COLUMN_NAME = 'CREATED_AT_'
+                     AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'N'
+                     AND DEFAULT_LENGTH > 0) = 1
+              AND (SELECT COUNT(*) FROM USER_CONSTRAINTS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND CONSTRAINT_NAME = 'PK_CM_BCAL_REV' AND CONSTRAINT_TYPE = 'P') = 1
+              AND (SELECT COUNT(*) FROM USER_CONSTRAINTS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND CONSTRAINT_NAME = 'UQ_CM_BCAL_REV_SHA' AND CONSTRAINT_TYPE = 'U') = 1
+              AND (SELECT COUNT(*) FROM USER_CONSTRAINTS
+                   WHERE TABLE_NAME = 'CM_BUSINESS_CALENDAR_REVISION'
+                     AND CONSTRAINT_NAME = 'CK_CM_BCAL_REV_JSON' AND CONSTRAINT_TYPE = 'C'
+                     AND REGEXP_LIKE(REPLACE(UPPER(SEARCH_CONDITION_VC), ' ', ''),
+                         'DEFINITION_JSON_?ISJSON')) = 1
+            THEN 1 ELSE 0 END FROM DUAL
+          ]]></sqlCheck>
+        </and>
+      </or>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-sla-calendar-revision-table" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><tableExists tableName="CM_BUSINESS_CALENDAR_REVISION"/></not>
+    </preConditions>
+    <sql><![CDATA[
+      CREATE TABLE CM_BUSINESS_CALENDAR_REVISION (
+        TENANT_ID_       VARCHAR2(64 BYTE)  NOT NULL,
+        CALENDAR_ID_     VARCHAR2(128 BYTE) NOT NULL,
+        REVISION_        NUMBER(10)    NOT NULL,
+        NAME_            VARCHAR2(255 BYTE) NOT NULL,
+        DEFINITION_JSON_ CLOB          NOT NULL,
+        SHA256_          VARCHAR2(64 BYTE)  NOT NULL,
+        CREATED_AT_      TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+        CONSTRAINT PK_CM_BCAL_REV PRIMARY KEY (TENANT_ID_, CALENDAR_ID_, REVISION_),
+        CONSTRAINT UQ_CM_BCAL_REV_SHA UNIQUE (TENANT_ID_, CALENDAR_ID_, SHA256_),
+        CONSTRAINT CK_CM_BCAL_REV_JSON CHECK (DEFINITION_JSON_ IS JSON)
+      )
+    ]]></sql>
+  </changeSet>
+
+  <changeSet id="cm-sla-calendar-digest-column-shape-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+      onFailMessage="CM_SLA_RECORD.CALENDAR_SHA256_ must be nullable VARCHAR2(64); migration stopped without changing the existing column.">
+      <or>
+        <not><columnExists tableName="CM_SLA_RECORD" columnName="CALENDAR_SHA256_"/></not>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT COUNT(*) FROM USER_TAB_COLUMNS
+          WHERE TABLE_NAME = 'CM_SLA_RECORD' AND COLUMN_NAME = 'CALENDAR_SHA256_'
+            AND DATA_TYPE = 'VARCHAR2' AND DATA_LENGTH = 64 AND CHAR_USED = 'B'
+            AND NULLABLE = 'Y'
+        ]]></sqlCheck>
+      </or>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-sla-calendar-digest-column" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_SLA_RECORD" columnName="CALENDAR_SHA256_"/></not>
+    </preConditions>
+    <addColumn tableName="CM_SLA_RECORD">
+      <column name="CALENDAR_SHA256_" type="VARCHAR2(64 BYTE)"/>
+    </addColumn>
+  </changeSet>
+</databaseChangeLog>

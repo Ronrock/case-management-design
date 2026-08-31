@@ -1,9 +1,14 @@
 package org.casemgmt.release;
 
 import org.casemgmt.error.InvalidCaseDefinitionException;
+import org.casemgmt.error.NotFoundException;
+import org.casemgmt.repo.CaseDefinitionReleaseRepository;
+import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
+import org.casemgmt.service.CaseDefinitionService;
 import org.casemgmt.service.CaseDefinitionReleaseService;
 import org.casemgmt.service.CaseDefinitionVersionService;
 import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
+import org.casemgmt.sla.SlaCalendarCatalog;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
@@ -17,8 +22,43 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class CombinedCaseDefinitionArchiveTest {
+
+    @Test
+    void missingCalendarRevisionRejectsCombinedBundleBeforeAnyReleaseEvidence() throws Exception {
+        CaseDefinitionReleaseRepository releaseRepository = mock(CaseDefinitionReleaseRepository.class);
+        var deployments = mock(org.casemgmt.orchestration.OrchestrationDeploymentPort.class);
+        CaseDefinitionReleaseService releases = new CaseDefinitionReleaseService(
+                releaseRepository, deployments);
+        SlaCalendarCatalog calendars = mock(SlaCalendarCatalog.class);
+        when(calendars.require("t1", "support", 4))
+                .thenThrow(new NotFoundException("SlaCalendarRevision", "t1/support/4"));
+        CaseDefinitionVersionService versions = new CaseDefinitionVersionService(
+                mock(CaseDefinitionReleaseRepository.class),
+                mock(CaseDefinitionVersionBindingRepository.class),
+                mock(CaseDefinitionService.class), calendars);
+        byte[] archive = zip(Map.of(
+                "processes/sample-case.bpmn", """
+                        <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL">
+                          <process id="sample-case" isExecutable="true"/>
+                        </definitions>""",
+                "contract.json", "{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\","
+                        + "\"fields\":{},\"forms\":{},\"slaBindings\":{\"resolution\":{"
+                        + "\"scope\":\"CASE\",\"calendarId\":\"support\",\"calendarRevision\":4,"
+                        + "\"duration\":\"PT1H\",\"startAnchor\":\"CASE_CREATED\","
+                        + "\"meetAnchor\":\"CASE_CLOSED\"}}}",
+                "presentation.json", "{\"version\":\"1.0\",\"sections\":[]}"));
+
+        assertThatThrownBy(() -> new CombinedCaseDefinitionDeploymentService(releases, versions)
+                .deploy("t1", archive, "alice"))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("support")
+                .hasMessageContaining("revision 4");
+
+        verifyNoInteractions(releaseRepository, deployments);
+    }
 
     @Test
     void readsRequiredArtifactsAndBuildsAnOrchestrationOnlyArchive() throws Exception {
@@ -105,7 +145,10 @@ class CombinedCaseDefinitionArchiveTest {
         CaseDefinitionVersionService versions = new CaseDefinitionVersionService(
                 mock(org.casemgmt.repo.CaseDefinitionReleaseRepository.class),
                 mock(org.casemgmt.repo.CaseDefinitionVersionBindingRepository.class),
-                mock(org.casemgmt.service.CaseDefinitionService.class));
+                mock(org.casemgmt.service.CaseDefinitionService.class),
+                (tenantId, calendarId, revision) -> {
+                    throw new AssertionError("test contract unexpectedly referenced an SLA calendar");
+                });
         byte[] archive = zip(Map.of(
                 "processes/sample-case.bpmn", """
                         <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"

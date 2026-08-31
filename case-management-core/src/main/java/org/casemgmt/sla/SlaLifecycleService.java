@@ -110,11 +110,9 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
             throw new IllegalStateException("SLA binding '" + binding.id()
                     + "' uses dueDateExpression, which has no registered deterministic evaluator");
         }
-        if (!sla.calendarExists(binding.calendarId())) {
-            throw new IllegalStateException("SLA binding '" + binding.id() + "' references missing calendar '"
-                    + binding.calendarId() + "'");
-        }
-        Map<String, Object> calendarDefinition = sla.calendarDefinition(binding.calendarId());
+        SlaCalendarCatalog.Revision calendarRevision = sla.require(instance.tenantId(),
+                binding.calendarId(), binding.calendarRevision());
+        Map<String, Object> calendarDefinition = calendarRevision.definition();
         BusinessCalendar calendar = BusinessCalendar.fromJson("SLA calendar '" + binding.calendarId()
                 + "' revision " + binding.calendarRevision(), calendarDefinition);
         OffsetDateTime startedAt = OffsetDateTime.ofInstant(anchor.occurredAt(), ZoneOffset.UTC);
@@ -135,9 +133,10 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
         boolean inserted = sla.insertContractOccurrenceIfAbsent(new SlaRepository.ContractOccurrence(
                 occurrenceId, instance.id(), targetId, binding.id(),
                 binding.targetVersion(), binding.scope().name(), occurrenceKey, bound.releaseId(),
-                bound.sha256(), binding.calendarId(), binding.calendarRevision(), binding.meetAnchor(),
+                bound.sha256(), binding.calendarId(), binding.calendarRevision(),
+                calendarRevision.sha256(), binding.meetAnchor(),
                 binding.cancelAnchor(), startedAt, dueAt, warnAt,
-                JsonCodec.toJson(calendarDefinition), binding.pauseAnchors(), binding.resumeAnchors(),
+                JsonCodec.canonicalJson(calendarDefinition), binding.pauseAnchors(), binding.resumeAnchors(),
                 JsonCodec.toJson(Map.of("anchor", observedAnchor, "occurredAt",
                         anchor.occurredAt().toString(), "transition", "STARTED"))));
         if (inserted) {

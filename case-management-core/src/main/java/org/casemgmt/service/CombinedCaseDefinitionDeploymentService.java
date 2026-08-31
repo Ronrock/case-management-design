@@ -64,7 +64,7 @@ public class CombinedCaseDefinitionDeploymentService {
                 parsed.contractJson().getBytes(StandardCharsets.UTF_8));
         releases.validateForPublication(key, ReleaseKind.PRESENTATION, "application/json",
                 parsed.presentationJson().getBytes(StandardCharsets.UTF_8));
-        versions.validateArtifacts(key, parsed.orchestrationZip(), "application/zip",
+        versions.validateArtifacts(key, tenantId, parsed.orchestrationZip(), "application/zip",
                 parsed.contractJson().getBytes(StandardCharsets.UTF_8),
                 parsed.presentationJson().getBytes(StandardCharsets.UTF_8));
         CaseDefinitionRelease orchestration = releases.publish(key, tenantId,

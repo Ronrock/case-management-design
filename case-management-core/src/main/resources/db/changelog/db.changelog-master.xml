@@ -21,4 +21,5 @@
   <include file="db/changelog/cm-bpmn-only.xml"/>
   <include file="db/changelog/cm-remote-observation-inbox.xml"/>
   <include file="db/changelog/cm-sla-lifecycle.xml"/>
+  <include file="db/changelog/cm-sla-calendar-revisions.xml"/>
 </databaseChangeLog>
