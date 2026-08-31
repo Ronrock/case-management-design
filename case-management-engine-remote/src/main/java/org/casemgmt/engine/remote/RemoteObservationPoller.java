@@ -2,6 +2,7 @@ package org.casemgmt.engine.remote;
 
 import org.casemgmt.engine.EngineException;
 import org.casemgmt.observation.ActivityLifecycleObservation;
+import org.casemgmt.observation.MilestoneObservation;
 import org.casemgmt.observation.ObservationCursor;
 import org.casemgmt.observation.ObservationEnvelope;
 import org.casemgmt.observation.ObservationStream;
@@ -52,20 +53,68 @@ public final class RemoteObservationPoller {
     /** Reconciliation produces normal inbox evidence; it never mutates projections directly. */
     public int reconcileAllActive() {
         OffsetDateTime receivedAt = OffsetDateTime.now(ZoneOffset.UTC); int count = 0;
-        for (ActiveBpmnCaseRepository.ActiveCase active : activeCases.findAll()) {
-            Map<String, Object> process = getMap("/history/process-instance/" + active.rootProcessInstanceId());
-            if (process != null && process.get("endTime") != null) {
-                OffsetDateTime engineAt = timeOr(process.get("endTime"), receivedAt);
-                ProcessObservation.EventType event = process.get("deleteReason") == null ? ProcessObservation.EventType.COMPLETED : ProcessObservation.EventType.TERMINATED;
-                ObservationEnvelope envelope = new ObservationEnvelope(new ProcessObservation(
-                        "remote-process-" + active.rootProcessInstanceId() + "-" + event, 1, "remote-history",
-                        active.engineId(), active.tenantId(), active.caseId(), active.rootProcessInstanceId(),
-                        active.rootProcessInstanceId(), null, event, engineAt.toInstant(), receivedAt.toInstant(),
-                        Map.of("processDefinitionKey", string(process.get("processDefinitionKey")))));
-                count += ingestion.persist(active.tenantId(), ObservationStream.PROCESSES, List.of(envelope));
-            }
+        for (ActiveBpmnCaseRepository.ReconciliationProcess process :
+                activeCases.findAllProcessesForActiveCases()) {
+            count += reconcileProcess(process, receivedAt);
         }
         inboxWorker.drainOnce(); return count;
+    }
+
+    private int reconcileProcess(ActiveBpmnCaseRepository.ReconciliationProcess process,
+                                 OffsetDateTime receivedAt) {
+        CaseIdentity identity = new CaseIdentity(process.caseId(), process.tenantId(),
+                process.engineId());
+        int inserted = reconcilePages(ObservationStream.TASKS, process, receivedAt,
+                this::taskEnvelope, converted -> converted.envelope().observation()
+                        instanceof UserTaskObservation task
+                        && task.eventType() != UserTaskObservation.EventType.CREATED
+                        ? ObservationStream.TASK_TERMINALS : ObservationStream.TASKS);
+        inserted += reconcilePages(ObservationStream.ACTIVITIES, process, receivedAt,
+                this::activityEnvelope, converted -> converted.envelope().observation()
+                        instanceof ActivityLifecycleObservation activity
+                        && activity.eventType() != ActivityLifecycleObservation.EventType.STARTED
+                        ? ObservationStream.ACTIVITY_TERMINALS
+                        : converted.envelope().observation() instanceof MilestoneObservation milestone
+                        && milestone.eventType() != MilestoneObservation.EventType.REOPENED
+                        ? ObservationStream.ACTIVITY_TERMINALS : ObservationStream.ACTIVITIES);
+        Map<String, Object> current = getMap("/history/process-instance/" + process.processInstanceId());
+        if (current != null && current.get("endTime") != null) {
+            Converted converted = processEnvelope(historyRow(current, receivedAt), receivedAt, identity);
+            if (converted != null) inserted += ingestion.persist(identity.tenantId(),
+                    ObservationStream.PROCESSES, List.of(converted.envelope()));
+        }
+        return inserted;
+    }
+
+    private int reconcilePages(ObservationStream sourceStream,
+                               ActiveBpmnCaseRepository.ReconciliationProcess process,
+                               OffsetDateTime receivedAt, EnvelopeFactory factory,
+                               StreamSelector streamSelector) {
+        int inserted = 0;
+        for (int first = 0; ; first += PAGE_SIZE) {
+            String path = sourceStream == ObservationStream.TASKS ? "/history/task" :
+                    "/history/activity-instance";
+            String sortBy = sourceStream == ObservationStream.TASKS ? "taskId" :
+                    "activityInstanceId";
+            List<Map<String, Object>> page = getList(path + "?processInstanceId="
+                    + encoded(process.processInstanceId()) + "&firstResult=" + first + "&maxResults="
+                    + PAGE_SIZE + "&sortBy=" + sortBy + "&sortOrder=asc");
+            Map<ObservationStream, List<ObservationEnvelope>> envelopes = new LinkedHashMap<>();
+            CaseIdentity identity = new CaseIdentity(process.caseId(), process.tenantId(),
+                    process.engineId());
+            for (Map<String, Object> row : page) {
+                Map<String, Object> history = withProcessDefinition(row,
+                        process.processDefinitionId());
+                Converted converted = factory.convert(historyRow(history, receivedAt), receivedAt,
+                        identity);
+                if (converted != null) envelopes.computeIfAbsent(streamSelector.stream(converted),
+                        ignored -> new ArrayList<>()).add(converted.envelope());
+            }
+            for (var entry : envelopes.entrySet()) {
+                inserted += ingestion.persist(process.tenantId(), entry.getKey(), entry.getValue());
+            }
+            if (page.size() < PAGE_SIZE) return inserted;
+        }
     }
 
     public int pollOnce() {
@@ -129,7 +178,13 @@ public final class RemoteObservationPoller {
     private int persistPage(ObservationStream stream, List<HistoryRow> rows, OffsetDateTime receivedAt,
                             EnvelopeFactory factory, Map<String, ObservationCursor> windowCursors) {
         Map<String,List<Converted>> byTenant = new LinkedHashMap<>();
-        for (HistoryRow row : rows) { Converted converted = factory.convert(row, receivedAt); if (converted != null) byTenant.computeIfAbsent(converted.tenantId(), ignored -> new ArrayList<>()).add(converted); }
+        for (HistoryRow row : rows) {
+            String processId = firstString(row.row().get("processInstanceId"), row.row().get("id"));
+            Converted converted = factory.convert(row, receivedAt,
+                    identity(processId, string(row.row().get("businessKey"))));
+            if (converted != null) byTenant.computeIfAbsent(converted.tenantId(),
+                    ignored -> new ArrayList<>()).add(converted);
+        }
         int inserted = 0;
         for (var entry : byTenant.entrySet()) {
             List<Converted> values = entry.getValue();
@@ -141,25 +196,38 @@ public final class RemoteObservationPoller {
         return inserted;
     }
 
-    private Converted taskEnvelope(HistoryRow history, OffsetDateTime receivedAt) {
-        Map<String,Object> row = history.row(); String processId = string(row.get("processInstanceId")); CaseIdentity identity = identity(processId, string(row.get("businessKey"))); String taskId = string(row.get("id"));
+    private Converted taskEnvelope(HistoryRow history, OffsetDateTime receivedAt, CaseIdentity identity) {
+        Map<String,Object> row = history.row(); String processId = string(row.get("processInstanceId")); String taskId = string(row.get("id"));
         if (identity == null || taskId == null) return null;
         OffsetDateTime engineAt = timeOr(row.get("endTime"), timeOr(row.get("startTime"), receivedAt));
         UserTaskObservation.EventType event = taskEvent(row);
         var metadata = classifier.taskMetadata(string(row.get("processDefinitionId")), string(row.get("taskDefinitionKey")));
-        Map<String,Object> attributes = new LinkedHashMap<>(); attributes.put("taskDefinitionKey", string(row.get("taskDefinitionKey"))); attributes.put("activityInstanceId", taskId); attributes.put("name", string(row.get("name"))); attributes.put("assignee", string(row.get("assignee"))); attributes.put("candidateGroups", metadata.candidateGroups()); attributes.put("formKey", metadata.formKey()); attributes.put("priority", intValue(row.get("priority"))); OffsetDateTime due = time(row.get("due")); attributes.put("dueAt", due == null ? null : due.toString());
+        Map<String,Object> attributes = new LinkedHashMap<>(); attributes.put("taskDefinitionKey", string(row.get("taskDefinitionKey"))); attributes.put("activityInstanceId", taskId); attributes.put("name", string(row.get("name"))); attributes.put("assignee", string(row.get("assignee"))); attributes.put("candidateGroups", metadata.candidateGroups()); attributes.put("formKey", metadata.formKey()); attributes.put("slaTargetId", metadata.slaTargetId()); attributes.put("priority", intValue(row.get("priority"))); OffsetDateTime due = time(row.get("due")); attributes.put("dueAt", due == null ? null : due.toString());
         return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new UserTaskObservation("remote-task-" + taskId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, taskId, null, event, engineAt.toInstant(), receivedAt.toInstant(), attributes)));
     }
 
-    private Converted activityEnvelope(HistoryRow history, OffsetDateTime receivedAt) {
-        Map<String,Object> row = history.row(); String processId = string(row.get("processInstanceId")); CaseIdentity identity = identity(processId, string(row.get("businessKey"))); String activityId = string(row.get("activityId")); String instanceId = firstString(row.get("activityInstanceId"), row.get("id"));
-        if (identity == null || activityId == null || instanceId == null || classifier.classify(string(row.get("processDefinitionId")), activityId).isEmpty()) return null;
-        OffsetDateTime engineAt = timeOr(row.get("endTime"), timeOr(row.get("startTime"), receivedAt)); ActivityLifecycleObservation.EventType event = Boolean.TRUE.equals(row.get("canceled")) ? ActivityLifecycleObservation.EventType.CANCELLED : row.get("endTime") == null ? ActivityLifecycleObservation.EventType.STARTED : ActivityLifecycleObservation.EventType.COMPLETED;
-        return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new ActivityLifecycleObservation("remote-activity-" + instanceId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, instanceId, null, event, engineAt.toInstant(), receivedAt.toInstant(), Map.of("activityId", activityId, "name", string(row.get("activityName"))))));
+    private Converted activityEnvelope(HistoryRow history, OffsetDateTime receivedAt, CaseIdentity identity) {
+        Map<String,Object> row = history.row(); String processId = string(row.get("processInstanceId")); String activityId = string(row.get("activityId")); String instanceId = firstString(row.get("activityInstanceId"), row.get("id"));
+        var classification = classifier.classify(string(row.get("processDefinitionId")), activityId);
+        if (identity == null || activityId == null || instanceId == null || classification.isEmpty()) return null;
+        OffsetDateTime engineAt = timeOr(row.get("endTime"), timeOr(row.get("startTime"), receivedAt));
+        Map<String, Object> attributes = new LinkedHashMap<>(); attributes.put("activityId", activityId); attributes.put("name", string(row.get("activityName")));
+        var value = classification.orElseThrow();
+        attributes.put("slaTargetId", value.slaTargetId());
+        if (value.kind() == org.casemgmt.projection.ActivityObservation.Kind.MILESTONE) {
+            MilestoneObservation.EventType event = Boolean.TRUE.equals(row.get("canceled"))
+                    ? MilestoneObservation.EventType.CANCELLED : row.get("endTime") == null
+                    ? MilestoneObservation.EventType.REOPENED : MilestoneObservation.EventType.REACHED;
+            attributes.put("milestoneId", value.milestoneId());
+            return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new MilestoneObservation(
+                    "remote-milestone-" + instanceId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, instanceId, null, event, engineAt.toInstant(), receivedAt.toInstant(), attributes)));
+        }
+        ActivityLifecycleObservation.EventType event = Boolean.TRUE.equals(row.get("canceled")) ? ActivityLifecycleObservation.EventType.CANCELLED : row.get("endTime") == null ? ActivityLifecycleObservation.EventType.STARTED : ActivityLifecycleObservation.EventType.COMPLETED;
+        return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new ActivityLifecycleObservation("remote-activity-" + instanceId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, instanceId, null, event, engineAt.toInstant(), receivedAt.toInstant(), attributes)));
     }
 
-    private Converted processEnvelope(HistoryRow history, OffsetDateTime receivedAt) {
-        Map<String,Object> row = history.row(); String processId = string(row.get("id")); CaseIdentity identity = identity(processId, string(row.get("businessKey"))); if (identity == null || processId == null) return null;
+    private Converted processEnvelope(HistoryRow history, OffsetDateTime receivedAt, CaseIdentity identity) {
+        Map<String,Object> row = history.row(); String processId = string(row.get("id")); if (identity == null || processId == null) return null;
         OffsetDateTime engineAt = timeOr(row.get("endTime"), receivedAt); ProcessObservation.EventType event = row.get("deleteReason") == null ? ProcessObservation.EventType.COMPLETED : ProcessObservation.EventType.TERMINATED;
         return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new ProcessObservation("remote-process-" + processId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, processId, null, event, engineAt.toInstant(), receivedAt.toInstant(), Map.of("processDefinitionKey", string(row.get("processDefinitionKey"))))));
     }
@@ -170,10 +238,24 @@ public final class RemoteObservationPoller {
     @SuppressWarnings("unchecked") private List<Map<String,Object>> getList(String path) { try { List<Map<String,Object>> rows = client.get().uri(URI.create(path)).retrieve().body(List.class); return rows == null ? List.of() : rows; } catch (RestClientException e) { throw new EngineException("Remote history poll failed for " + path + ": " + e.getMessage(), e); } }
     private static OffsetDateTime timestamp(Map<String,Object> row, String field) { OffsetDateTime value = time(row.get(field)); if (value == null) throw new EngineException("Remote history row has no " + field); return value; }
     private static String requiredId(Map<String,Object> row) { String id = firstString(row.get("id"), row.get("activityInstanceId")); if (id == null) throw new EngineException("Remote history row has no stable id"); return id; }
+    private static HistoryRow historyRow(Map<String, Object> row, OffsetDateTime receivedAt) {
+        OffsetDateTime occurredAt = timeOr(row.get("endTime"), timeOr(row.get("startTime"), receivedAt));
+        return new HistoryRow(new ObservationCursor(occurredAt.toInstant(), requiredId(row)), row);
+    }
+    private static Map<String, Object> withProcessDefinition(Map<String, Object> row,
+                                                              String processDefinitionId) {
+        if (string(row.get("processDefinitionId")) != null || processDefinitionId == null) {
+            return row;
+        }
+        Map<String, Object> value = new LinkedHashMap<>(row);
+        value.put("processDefinitionId", processDefinitionId);
+        return value;
+    }
     /** Query values are encoded exactly once before being supplied as an already-built URI. */
     private static String encoded(OffsetDateTime value) {
         return URLEncoder.encode(QUERY_TIME.format(value), StandardCharsets.UTF_8);
     }
+    private static String encoded(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
     private static OffsetDateTime time(Object value) { return value == null ? null : RemoteEngineGateway.parseCreatedAt(value); }
     private static OffsetDateTime timeOr(Object first, OffsetDateTime fallback) { OffsetDateTime value = time(first); return value == null ? fallback : value; }
     private static String string(Object value) { return value == null || value.toString().isBlank() ? null : value.toString(); }
@@ -189,5 +271,8 @@ public final class RemoteObservationPoller {
     private record HistoryRow(ObservationCursor cursor, Map<String,Object> row) { }
     private record Converted(String tenantId, ObservationCursor cursor, ObservationEnvelope envelope) { }
     private record CaseIdentity(String caseId, String tenantId, String engineId) { }
-    @FunctionalInterface private interface EnvelopeFactory { Converted convert(HistoryRow row, OffsetDateTime receivedAt); }
+    @FunctionalInterface private interface EnvelopeFactory {
+        Converted convert(HistoryRow row, OffsetDateTime receivedAt, CaseIdentity identity);
+    }
+    @FunctionalInterface private interface StreamSelector { ObservationStream stream(Converted converted); }
 }

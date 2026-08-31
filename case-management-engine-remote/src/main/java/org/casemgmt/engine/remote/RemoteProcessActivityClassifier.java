@@ -23,8 +23,10 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Fetches stock engine BPMN XML and caches only the stage/milestone tag classification. */
 public final class RemoteProcessActivityClassifier {
 
-    public record Classification(ActivityObservation.Kind kind, String milestoneId) { }
-    public record TaskMetadata(List<String> candidateGroups, String formKey) { }
+    public record Classification(ActivityObservation.Kind kind, String milestoneId,
+                                 String slaTargetId) { }
+    public record TaskMetadata(List<String> candidateGroups, String formKey,
+                               String slaTargetId) { }
     private record ModelIndex(Map<String, Classification> activities,
                               Map<String, TaskMetadata> tasks) { }
     private static final String BPMN_NAMESPACE =
@@ -46,9 +48,11 @@ public final class RemoteProcessActivityClassifier {
     }
 
     public TaskMetadata taskMetadata(String processDefinitionId, String activityId) {
-        if (processDefinitionId == null || activityId == null) return new TaskMetadata(List.of(), null);
+        if (processDefinitionId == null || activityId == null) {
+            return new TaskMetadata(List.of(), null, null);
+        }
         return cache.computeIfAbsent(processDefinitionId, this::load).tasks()
-                .getOrDefault(activityId, new TaskMetadata(List.of(), null));
+                .getOrDefault(activityId, new TaskMetadata(List.of(), null, null));
     }
 
     @SuppressWarnings("unchecked")
@@ -101,12 +105,16 @@ public final class RemoteProcessActivityClassifier {
                 String id = element.getAttribute("id");
                 if (id.isBlank()) continue;
                 String milestone = element.getAttributeNS(CASE_MANAGEMENT_NAMESPACE, "milestoneId");
+                String slaTargetId = extensionAttribute(element, CASE_MANAGEMENT_NAMESPACE,
+                        "slaTargetId");
                 if (!milestone.isBlank()) {
-                    result.put(id, new Classification(ActivityObservation.Kind.MILESTONE, milestone));
+                    result.put(id, new Classification(ActivityObservation.Kind.MILESTONE, milestone,
+                            slaTargetId));
                 } else if ("subProcess".equals(element.getLocalName())
                         && "true".equalsIgnoreCase(element.getAttributeNS(
                                 CASE_MANAGEMENT_NAMESPACE, "stage"))) {
-                    result.put(id, new Classification(ActivityObservation.Kind.STAGE, null));
+                    result.put(id, new Classification(ActivityObservation.Kind.STAGE, null,
+                            slaTargetId));
                 }
                 if ("userTask".equals(element.getLocalName())) {
                     String rawGroups = extensionAttribute(element, OPERATON_NAMESPACE,
@@ -115,7 +123,8 @@ public final class RemoteProcessActivityClassifier {
                             : Arrays.stream(rawGroups.split(",")).map(String::trim)
                                     .filter(value -> !value.isBlank()).toList();
                     taskMetadata.put(id, new TaskMetadata(groups,
-                            extensionAttribute(element, OPERATON_NAMESPACE, "formKey")));
+                            extensionAttribute(element, OPERATON_NAMESPACE, "formKey"),
+                            slaTargetId));
                 }
             }
             return new ModelIndex(Map.copyOf(result), Map.copyOf(taskMetadata));

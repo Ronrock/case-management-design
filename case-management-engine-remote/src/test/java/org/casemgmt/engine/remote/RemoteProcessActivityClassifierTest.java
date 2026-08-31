@@ -33,22 +33,29 @@ class RemoteProcessActivityClassifierTest {
                              targetNamespace="urn:test">
                   <process id="case-process">
                     <userTask id="review" engine:candidateGroups="reviewers, managers"
-                              engine:formKey="review-form" />
-                    <subProcess id="assessment" case:stage="true" />
-                    <intermediateThrowEvent id="approved" case:milestoneId="approved" />
+                              engine:formKey="review-form" case:slaTargetId="review-sla" />
+                    <subProcess id="assessment" case:stage="true" case:slaTargetId="assessment-sla" />
+                    <intermediateThrowEvent id="approved" case:milestoneId="approved"
+                                            case:slaTargetId="approval-sla" />
                   </process>
                 </definitions>
                 """.formatted(BPMN_NAMESPACE, OPERATON_NAMESPACE, CASE_MANAGEMENT_NAMESPACE));
 
         assertThat(fixture.classifier().taskMetadata("definition", "review"))
                 .isEqualTo(new RemoteProcessActivityClassifier.TaskMetadata(
-                        List.of("reviewers", "managers"), "review-form"));
+                        List.of("reviewers", "managers"), "review-form", "review-sla"));
         assertThat(fixture.classifier().classify("definition", "assessment"))
                 .contains(new RemoteProcessActivityClassifier.Classification(
-                        ActivityObservation.Kind.STAGE, null));
+                        ActivityObservation.Kind.STAGE, null, "assessment-sla"));
         assertThat(fixture.classifier().classify("definition", "approved"))
                 .contains(new RemoteProcessActivityClassifier.Classification(
-                        ActivityObservation.Kind.MILESTONE, "approved"));
+                        ActivityObservation.Kind.MILESTONE, "approved", "approval-sla"));
+        assertThat(fixture.classifier().taskMetadata("definition", "review").slaTargetId())
+                .isEqualTo("review-sla");
+        assertThat(fixture.classifier().classify("definition", "assessment").orElseThrow()
+                .slaTargetId()).isEqualTo("assessment-sla");
+        assertThat(fixture.classifier().classify("definition", "approved").orElseThrow()
+                .slaTargetId()).isEqualTo("approval-sla");
         fixture.server().verify();
     }
 
@@ -72,7 +79,7 @@ class RemoteProcessActivityClassifierTest {
                 """.formatted(BPMN_NAMESPACE));
 
         assertThat(fixture.classifier().taskMetadata("definition", "review"))
-                .isEqualTo(new RemoteProcessActivityClassifier.TaskMetadata(List.of(), null));
+                .isEqualTo(new RemoteProcessActivityClassifier.TaskMetadata(List.of(), null, null));
         assertThat(fixture.classifier().classify("definition", "assessment")).isEmpty();
         assertThat(fixture.classifier().classify("definition", "approved")).isEmpty();
         fixture.server().verify();
@@ -117,7 +124,7 @@ class RemoteProcessActivityClassifierTest {
                 """.formatted(BPMN_NAMESPACE, OPERATON_NAMESPACE, CASE_MANAGEMENT_NAMESPACE));
 
         assertThat(fixture.classifier().taskMetadata("definition", "foreign-review"))
-                .isEqualTo(new RemoteProcessActivityClassifier.TaskMetadata(List.of(), null));
+                .isEqualTo(new RemoteProcessActivityClassifier.TaskMetadata(List.of(), null, null));
         assertThat(fixture.classifier().classify("definition", "foreign-review")).isEmpty();
         assertThat(fixture.classifier().classify("definition", "foreign-stage")).isEmpty();
         fixture.server().verify();
