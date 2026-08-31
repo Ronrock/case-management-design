@@ -1,6 +1,7 @@
 package org.casemgmt.sla;
 
 import org.casemgmt.OracleTestBase;
+import org.casemgmt.domain.CaseTask;
 import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
@@ -14,6 +15,7 @@ import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.JsonCodec;
+import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.SlaRepository;
 import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.release.BindingStatus;
@@ -28,6 +30,8 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -251,6 +255,88 @@ class SlaLifecycleServiceTest extends OracleTestBase {
     }
 
     @Test
+    void occurrenceTransitionsAffectOnlyTheMatchingEntityOccurrence() {
+        String contract = """
+                {"key":"sla-root","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{
+                   "review-occurrence":{"scope":"OCCURRENCE","occurrenceKey":"taskInstance",
+                     "calendarId":"cal-1","calendarRevision":1,"duration":"PT1H",
+                     "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED",
+                     "cancelAnchor":"USER_TASK_DELETED","pauseAnchors":["USER_TASK_CLAIMED"],
+                     "resumeAnchors":["USER_TASK_UNCLAIMED"]}
+                 }}""";
+        SlaLifecycleService contractLifecycle = contractLifecycle(contract);
+
+        contractLifecycle.observeAnchor(taskAnchor("CREATED", "task-a", "review-occurrence",
+                "2026-08-30T10:00:00Z"));
+        contractLifecycle.observeAnchor(taskAnchor("CREATED", "task-b", "review-occurrence",
+                "2026-08-30T10:01:00Z"));
+
+        assertThat(contractOccurrenceStatuses()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "taskInstance:task-a", "RUNNING",
+                "taskInstance:task-b", "RUNNING"));
+
+        contractLifecycle.observeAnchor(taskAnchor("CLAIMED", "task-a", "review-occurrence",
+                "2026-08-30T10:10:00Z"));
+
+        assertThat(contractOccurrenceStatuses()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "taskInstance:task-a", "PAUSED",
+                "taskInstance:task-b", "RUNNING"));
+
+        contractLifecycle.observeAnchor(taskAnchor("UNCLAIMED", "task-a", "review-occurrence",
+                "2026-08-30T10:20:00Z"));
+        contractLifecycle.observeAnchor(taskAnchor("COMPLETED", "task-a", "review-occurrence",
+                "2026-08-30T10:30:00Z"));
+
+        assertThat(contractOccurrenceStatuses()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "taskInstance:task-a", "MET",
+                "taskInstance:task-b", "RUNNING"));
+
+        contractLifecycle.observeAnchor(taskAnchor("DELETED", "task-b", "review-occurrence",
+                "2026-08-30T10:40:00Z"));
+
+        assertThat(contractOccurrenceStatuses()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "taskInstance:task-a", "MET",
+                "taskInstance:task-b", "CANCELLED"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"COMPLETED,MET", "TERMINATED,CANCELLED"})
+    void caseAnchorsUseOnlyTheRetainedRootProcess(String terminalEvent,
+                                                   String terminalStatus) {
+        String contract = """
+                {"key":"sla-root","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{
+                   "case-clock":{"scope":"CASE","calendarId":"cal-1","calendarRevision":1,
+                     "duration":"PT1H","startAnchor":"CASE_CREATED",
+                     "meetAnchor":"CASE_CLOSED","cancelAnchor":"CASE_CANCELLED"}
+                 }}""";
+        SlaLifecycleService contractLifecycle = contractLifecycle(contract);
+        var processes = new LinkedProcessRepository(jdbc());
+        processes.insertRoot("root-link", CASE_ID, "root-process", "proc:1", "sla-root",
+                CaseTask.EngineSync.SYNCED);
+        processes.insert("child-link", CASE_ID, null, "child-process", "child:1", "child",
+                CaseTask.EngineSync.SYNCED);
+
+        contractLifecycle.observeAnchor(processAnchor("STARTED", "child-process",
+                "2026-08-30T10:00:00Z"));
+
+        assertThat(contractOccurrenceStatuses()).isEmpty();
+
+        contractLifecycle.observeAnchor(processAnchor("STARTED", "root-process",
+                "2026-08-30T10:01:00Z"));
+        assertThat(contractOccurrenceStatuses()).containsOnly(Map.entry("CASE", "RUNNING"));
+
+        contractLifecycle.observeAnchor(processAnchor(terminalEvent, "child-process",
+                "2026-08-30T10:10:00Z"));
+        assertThat(contractOccurrenceStatuses()).containsOnly(Map.entry("CASE", "RUNNING"));
+
+        contractLifecycle.observeAnchor(processAnchor(terminalEvent, "root-process",
+                "2026-08-30T10:20:00Z"));
+        assertThat(contractOccurrenceStatuses()).containsOnly(Map.entry("CASE", terminalStatus));
+    }
+
+    @Test
     void oracleRootCompletionAndSweeperRaceUsesCaseThenSlaOrderAndCannotLeaveABreach() throws Exception {
         jdbc().sql("UPDATE CM_SLA_RECORD SET DUE_AT_ = SYSTIMESTAMP - INTERVAL '1' MINUTE "
                         + "WHERE ID_ = 'sla-running'").update();
@@ -292,6 +378,52 @@ class SlaLifecycleServiceTest extends OracleTestBase {
     private EventPublisher publisher() {
         return new EventPublisher(new EventRepository(jdbc()), new AuditRepository(jdbc()),
                 new WebhookRepository(jdbc()), "org.example.cm", "engine-a");
+    }
+
+    private SlaLifecycleService contractLifecycle(String contract) {
+        String sha = JsonCodec.sha256(contract);
+        var releases = new CaseDefinitionReleaseRepository(dataSource());
+        releases.insert(CaseDefinitionRelease.storedWithEngineIdentity("orch", "sla-root", "tenant-a",
+                ReleaseKind.ORCHESTRATION, "application/xml",
+                "<definitions/>".getBytes(StandardCharsets.UTF_8), "a".repeat(64),
+                ReleaseStatus.ACTIVE, new EngineDeploymentIdentity("dep", "proc:1", "sla-root", 1,
+                        "tenant-a"), null, "tester"));
+        releases.insert(CaseDefinitionRelease.stored("contract-sla-root", "sla-root", "tenant-a",
+                ReleaseKind.CONTRACT, "application/json", contract.getBytes(StandardCharsets.UTF_8),
+                sha, ReleaseStatus.ACTIVE, null, null, "tester"));
+        releases.insert(CaseDefinitionRelease.stored("presentation", "sla-root", "tenant-a",
+                ReleaseKind.PRESENTATION, "application/json",
+                "{}".getBytes(StandardCharsets.UTF_8), "b".repeat(64),
+                ReleaseStatus.ACTIVE, null, null, "tester"));
+        var bindings = new CaseDefinitionVersionBindingRepository(dataSource());
+        bindings.insert(new CaseDefinitionVersionBinding(
+                "sla-root:1", "sla-root", "tenant-a", "orch", "a".repeat(64),
+                "contract-sla-root", sha, "presentation", "b".repeat(64), ReleaseStatus.ACTIVE,
+                OrchestrationMode.BPMN, BindingStatus.ACTIVE,
+                new EngineDeploymentIdentity("dep", "proc:1", "sla-root", 1, "tenant-a"), null,
+                OffsetDateTime.now(), OffsetDateTime.now(), null, "tester"));
+        return new SlaLifecycleService(sla, new CaseRepository(jdbc()), publisher(), bindings,
+                releases, new JsonSchemaCaseContractValidator());
+    }
+
+    private static SlaLifecyclePort.Anchor taskAnchor(String eventType, String entityId,
+                                                       String targetId, String occurredAt) {
+        return new SlaLifecyclePort.Anchor(CASE_ID, "user-task", eventType, entityId, targetId,
+                Instant.parse(occurredAt));
+    }
+
+    private static SlaLifecyclePort.Anchor processAnchor(String eventType, String entityId,
+                                                          String occurredAt) {
+        return new SlaLifecyclePort.Anchor(CASE_ID, "process", eventType, entityId, null,
+                Instant.parse(occurredAt));
+    }
+
+    private Map<String, String> contractOccurrenceStatuses() {
+        return jdbc().sql("""
+                SELECT OCCURRENCE_KEY_, STATUS_ FROM CM_SLA_RECORD
+                WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'""")
+                .query((rs, n) -> Map.entry(rs.getString(1), rs.getString(2))).list().stream()
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
     }
 
     private static void await(CountDownLatch latch, String description) {

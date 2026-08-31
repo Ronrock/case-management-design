@@ -374,6 +374,25 @@ public class SlaRepository implements SlaCalendarCatalog {
                 .list();
     }
 
+    public List<ContractLifecycleRow> contractLifecycleRows(String caseId, String releaseId,
+                                                             String targetKey,
+                                                             String occurrenceKey) {
+        return jdbc.sql("SELECT " + RECORD_COLUMNS + ", MEET_ANCHOR_, CANCEL_ANCHOR_, "
+                        + "CALENDAR_DEFINITION_JSON_, PAUSE_ANCHORS_JSON_, "
+                        + "RESUME_ANCHORS_JSON_ FROM CM_SLA_RECORD "
+                        + "WHERE CASE_ID_ = :caseId AND CONTRACT_RELEASE_ID_ = :releaseId "
+                        + "AND TARGET_KEY_ = :targetKey AND OCCURRENCE_KEY_ = :occurrenceKey "
+                        + "ORDER BY ID_")
+                .param("caseId", caseId).param("releaseId", releaseId)
+                .param("targetKey", targetKey).param("occurrenceKey", occurrenceKey)
+                .query((rs, n) -> new ContractLifecycleRow(mapRecord(rs, n),
+                        rs.getString("MEET_ANCHOR_"), rs.getString("CANCEL_ANCHOR_"),
+                        rs.getString("CALENDAR_DEFINITION_JSON_"),
+                        JsonCodec.toList(rs.getString("PAUSE_ANCHORS_JSON_")),
+                        JsonCodec.toList(rs.getString("RESUME_ANCHORS_JSON_"))))
+                .list();
+    }
+
     public java.util.Optional<SlaRecord> terminalizeContractOccurrence(
             ContractLifecycleRow row, String anchor, OffsetDateTime occurredAt) {
         String status = anchor.equals(row.meetAnchor()) ? "MET"

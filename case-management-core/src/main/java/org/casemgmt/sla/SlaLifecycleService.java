@@ -66,13 +66,13 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
         ValidatedCaseContract.SlaAnchor observedAnchor = anchorName(anchor);
         if (observedAnchor == null) return; // Process suspend/resume are observations, not SLA anchors.
         for (ValidatedCaseContract.SlaBindingDefinition binding : bound.contract().slaBindings()) {
-            if (!matchesTarget(binding, anchor)) {
+            if (!matchesTarget(binding, anchor, instance)) {
                 continue;
             }
             if (observedAnchor.equals(binding.startAnchor())) {
                 createOccurrence(instance, bound, binding, anchor, observedAnchor);
             }
-            applyAnchorTransition(instance, bound, binding, observedAnchor, anchor.occurredAt());
+            applyAnchorTransition(instance, bound, binding, observedAnchor, anchor);
         }
     }
 
@@ -159,10 +159,14 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
                                        BoundSlaContractResolver.ResolvedContract bound,
                                        ValidatedCaseContract.SlaBindingDefinition binding,
                                        ValidatedCaseContract.SlaAnchor observedAnchor,
-                                       Instant occurredAt) {
-        OffsetDateTime at = OffsetDateTime.ofInstant(occurredAt, ZoneOffset.UTC);
-        for (SlaRepository.ContractLifecycleRow row : sla.contractLifecycleRows(instance.id(),
-                bound.releaseId(), binding.id())) {
+                                       Anchor anchor) {
+        OffsetDateTime at = OffsetDateTime.ofInstant(anchor.occurredAt(), ZoneOffset.UTC);
+        List<SlaRepository.ContractLifecycleRow> rows =
+                binding.scope() == ValidatedCaseContract.SlaScope.OCCURRENCE
+                        ? sla.contractLifecycleRows(instance.id(), bound.releaseId(), binding.id(),
+                                occurrenceKey(binding, anchor))
+                        : sla.contractLifecycleRows(instance.id(), bound.releaseId(), binding.id());
+        for (SlaRepository.ContractLifecycleRow row : rows) {
             if (row.pauseAnchors().contains(observedAnchor.name())) {
                 sla.pauseContractOccurrence(row, observedAnchor.name(), at)
                         .ifPresent(record -> emitTransition(instance, record, EventTypes.SLA_PAUSED,
@@ -209,9 +213,12 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
     }
 
     private static boolean matchesTarget(
-            ValidatedCaseContract.SlaBindingDefinition binding, Anchor anchor) {
+            ValidatedCaseContract.SlaBindingDefinition binding, Anchor anchor,
+            CaseInstance instance) {
         if (binding.scope() == ValidatedCaseContract.SlaScope.CASE) {
-            return "process".equals(anchor.observationKind()) && anchor.slaTargetId() == null;
+            return "process".equals(anchor.observationKind())
+                    && anchor.slaTargetId() == null
+                    && Objects.equals(instance.rootProcessInstanceId(), anchor.entityId());
         }
         return binding.id().equals(anchor.slaTargetId());
     }
