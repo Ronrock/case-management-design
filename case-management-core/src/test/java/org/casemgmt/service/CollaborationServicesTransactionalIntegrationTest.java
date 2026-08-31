@@ -6,6 +6,7 @@ import org.casemgmt.event.EventPublisher;
 import org.casemgmt.repo.AuditRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CommentRepository;
+import org.casemgmt.repo.DocumentRepository;
 import org.casemgmt.repo.EventRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.WebhookRepository;
@@ -29,6 +30,7 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
 
     private AnnotationConfigApplicationContext context;
     private CommentService comments;
+    private DocumentService documents;
     private LinkedProcessService processes;
     private FailingAuditEventPublisher publisher;
     private final Actor alice = new Actor("alice", List.of("reviewers"));
@@ -39,6 +41,7 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
         CaseDefinition definition = TestServices.deployBpmnDefinition(dataSource(), "widget-review", "t1");
         context = springContext(CollaborationServicesTestConfig.class);
         comments = context.getBean(CommentService.class);
+        documents = context.getBean(DocumentService.class);
         processes = context.getBean(LinkedProcessService.class);
         publisher = context.getBean(FailingAuditEventPublisher.class);
         caseId = TestServices.insertBpmnCase(dataSource(), definition, "T", alice.userId()).id();
@@ -79,6 +82,39 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
         assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditBefore);
     }
 
+    @Test
+    void addDocumentRollsBackEverythingWhenAuditingFails() {
+        int documentsBefore = countAll("CM_DOCUMENT");
+        int eventsBefore = countAll("CM_EVENT");
+        int auditBefore = countAll("CM_AUDIT_LOG");
+        publisher.failNextAudit();
+
+        assertThatThrownBy(() -> documents.add(caseId, "passport.pdf", "evidence", "application/pdf",
+                123L, "https://dms.example/documents/passport", alice))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(countAll("CM_DOCUMENT")).isEqualTo(documentsBefore);
+        assertThat(countAll("CM_EVENT")).isEqualTo(eventsBefore);
+        assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditBefore);
+    }
+
+    @Test
+    void removeDocumentRollsBackEverythingWhenAuditingFails() {
+        DocumentRepository repository = new DocumentRepository(jdbc());
+        repository.insert("document-1", caseId, "passport.pdf", "evidence", "application/pdf",
+                123L, "https://dms.example/documents/passport", alice.userId());
+        int eventsBefore = countAll("CM_EVENT");
+        int auditBefore = countAll("CM_AUDIT_LOG");
+        publisher.failNextAudit();
+
+        assertThatThrownBy(() -> documents.remove(caseId, "document-1", alice))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(repository.findById(caseId, "document-1")).isPresent();
+        assertThat(countAll("CM_EVENT")).isEqualTo(eventsBefore);
+        assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditBefore);
+    }
+
     private int countAll(String table) {
         return jdbc().sql("SELECT COUNT(*) FROM " + table).query(Integer.class).single();
     }
@@ -101,6 +137,12 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
         CommentService commentService(DataSource dataSource, FailingAuditEventPublisher publisher) {
             JdbcClient jdbc = JdbcClient.create(dataSource);
             return new CommentService(new CommentRepository(jdbc), new CaseRepository(jdbc), publisher);
+        }
+
+        @Bean
+        DocumentService documentService(DataSource dataSource, FailingAuditEventPublisher publisher) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            return new DocumentService(new DocumentRepository(jdbc), new CaseRepository(jdbc), publisher);
         }
 
         @Bean
