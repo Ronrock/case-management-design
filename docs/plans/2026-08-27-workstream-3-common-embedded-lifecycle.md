@@ -1,5 +1,8 @@
 # Workstream 3: Common Embedded Lifecycle Implementation Plan
 
+> **Superseded assumption:** The later BPMN-only decision removed `PLAN_MODEL`; compatibility
+> requirements below are historical. Operaton is the sole lifecycle authority.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Process every accepted engine fact through one idempotent lifecycle handler that atomically updates projections, canonical case data, audit, outbox events, and SLA state.

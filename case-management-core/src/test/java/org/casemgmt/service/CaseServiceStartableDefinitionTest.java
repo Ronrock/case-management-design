@@ -8,11 +8,9 @@ import org.casemgmt.orchestration.CaseOrchestrationRegistry;
 import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseRepository;
-import org.casemgmt.repo.MilestoneRepository;
 import org.casemgmt.repo.ParticipantRepository;
 import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.event.EventPublisher;
-import org.casemgmt.rules.StageCompletion;
 import org.junit.jupiter.api.Test;
 
 import java.time.OffsetDateTime;
@@ -56,14 +54,10 @@ class CaseServiceStartableDefinitionTest {
         when(planItems.findByCase(anyString())).thenReturn(List.of());
         CaseOrchestration orchestration = mock(CaseOrchestration.class);
         when(orchestration.mode()).thenReturn(OrchestrationMode.BPMN);
-        when(orchestration.initialItems(anyString(), any())).thenReturn(List.of());
-        when(orchestration.evaluate(any())).thenReturn(List.of());
-        when(orchestration.repeatable(any())).thenReturn(List.of());
-
         CaseService service = new CaseService(cases, definitions, planItems,
-                mock(MilestoneRepository.class), mock(ParticipantRepository.class),
-                new CaseOrchestrationRegistry(List.of(orchestration)), new StageCompletion(),
-                mock(TransitionApplier.class), mock(EventPublisher.class), "engine-a");
+                mock(ParticipantRepository.class),
+                new CaseOrchestrationRegistry(List.of(orchestration)),
+                mock(EventPublisher.class), "engine-a");
 
         CaseInstance created = service.create("invoice", "t1", "BK-1", "Invoice",
                 CasePriority.MEDIUM, Map.of(), new Actor("alice", List.of()));

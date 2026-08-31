@@ -1,5 +1,8 @@
 # Workstream 1: Authority, Vocabulary, and Contracts Implementation Plan
 
+> **Superseded assumption:** The later BPMN-only decision removed `PLAN_MODEL`; compatibility
+> requirements below are historical. Current publication accepts BPMN contracts only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make every published case-definition artifact unambiguous, machine-validatable, and consistent with the BPMN-first authority boundary.

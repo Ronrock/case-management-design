@@ -5,19 +5,26 @@ import org.casemgmt.repo.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class EngineCommandDispatcherTest extends OracleTestBase {
 
     private EngineCommandRepository commands;
+    private MutableClock clock;
 
     @BeforeEach
     void setUp() {
         jdbc().sql("DELETE FROM CM_ENGINE_COMMAND").update();
-        commands = new EngineCommandRepository(dataSource());
+        clock = new MutableClock(Instant.parse("2030-01-01T00:00:00Z"));
+        commands = new EngineCommandRepository(dataSource(), clock);
     }
 
     @Test
@@ -86,8 +93,9 @@ class EngineCommandDispatcherTest extends OracleTestBase {
         var dispatcher = new EngineCommandDispatcher(commands, failing, (t, s, e) -> {});
 
         for (int attempt = 1; attempt <= 6; attempt++) {
-            jdbc().sql("UPDATE CM_ENGINE_COMMAND SET NEXT_ATTEMPT_AT_ = SYSTIMESTAMP - INTERVAL '1' HOUR").update();
             dispatcher.drainOnce();
+            // The production policy jitters the final 10-hour delay up to 12 hours.
+            clock.advance(Duration.ofHours(13));
         }
 
         String status = jdbc().sql("SELECT STATUS_ FROM CM_ENGINE_COMMAND")
@@ -106,8 +114,9 @@ class EngineCommandDispatcherTest extends OracleTestBase {
                 (key, sync, engineId) -> reports.add(key + ":" + sync + ":" + engineId));
 
         for (int attempt = 1; attempt <= 6; attempt++) {
-            jdbc().sql("UPDATE CM_ENGINE_COMMAND SET NEXT_ATTEMPT_AT_ = SYSTIMESTAMP - INTERVAL '1' HOUR").update();
             dispatcher.drainOnce();
+            // The production policy jitters the final 10-hour delay up to 12 hours.
+            clock.advance(Duration.ofHours(13));
         }
 
         assertThat(reports).containsExactly("linked-process-1:FAILED:null");
@@ -135,5 +144,21 @@ class EngineCommandDispatcherTest extends OracleTestBase {
         @Override public EngineProcessRef startProcess(StartProcessRequest r) {
             throw new EngineException("engine is down");
         }
+    }
+
+    private static final class MutableClock extends Clock {
+        private final AtomicReference<Instant> instant;
+
+        private MutableClock(Instant initial) {
+            instant = new AtomicReference<>(initial);
+        }
+
+        void advance(Duration duration) {
+            instant.updateAndGet(current -> current.plus(duration));
+        }
+
+        @Override public ZoneId getZone() { return ZoneId.of("UTC"); }
+        @Override public Clock withZone(ZoneId zone) { return this; }
+        @Override public Instant instant() { return instant.get(); }
     }
 }

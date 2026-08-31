@@ -15,7 +15,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 import javax.sql.DataSource;
-import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -57,7 +57,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
 
     private AnnotationConfigApplicationContext ctx;
-    private CaseService cases;
     private CommentService comments;
     private LinkedProcessService processes;
     private MilestoneService milestones;
@@ -68,20 +67,20 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
 
     @BeforeEach
     void setUp() throws Exception {
-        String json = new String(getClass().getResourceAsStream("/definitions/test-definition.json")
-                .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
+        CaseDefinition definition = TestServices.deployBpmnDefinition(
+                dataSource(), "widget-review", "t1");
 
         ctx = springContext(CollaborationServicesTestConfig.class);
-        cases = ctx.getBean(CaseService.class);
         comments = ctx.getBean(CommentService.class);
         processes = ctx.getBean(LinkedProcessService.class);
         milestones = ctx.getBean(MilestoneService.class);
         publisher = ctx.getBean(FailingAuditEventPublisher.class);
 
-        caseId = cases.create("widget-review", "t1", null, "T", CasePriority.MEDIUM, Map.of(), alice).id();
-        reviewedPlanItemId = new PlanItemRepository(jdbc()).findByCase(caseId).stream()
-                .filter(i -> i.name().equals("reviewed")).findFirst().orElseThrow().id();
+        caseId = TestServices.insertBpmnCase(dataSource(), definition, "T", alice.userId()).id();
+        reviewedPlanItemId = CaseIds.newId();
+        new PlanItemRepository(jdbc()).insert(new PlanItem(reviewedPlanItemId, caseId, null,
+                PlanItemType.MILESTONE, "Reviewed", PlanItemState.ACTIVE, null, false, 1,
+                null, null, null, 0L, OffsetDateTime.now(), OffsetDateTime.now(), null));
     }
 
     @AfterEach
@@ -227,13 +226,10 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
 
     /**
      * Registers the REAL {@link CommentService}, {@link LinkedProcessService} and {@link
-     * MilestoneService} beans (plus the {@link CaseService} fixtures depend on) so {@code
+     * MilestoneService} beans so {@code
      * TransactionManagerConfig}'s auto-proxy creator wraps them. {@link CaseService} is wired via
-     * {@link TestServices#caseService} (its own, non-failing {@link EventPublisher}) so fixture
-     * setup in {@code @BeforeEach} never trips the shared {@link FailingAuditEventPublisher} the
-     * three services under test share — the same split {@code
-     * CaseTaskServiceTransactionalIntegrationTest} uses between its fixture {@link CaseService}
-     * and the {@link org.casemgmt.service.CaseTaskService} actually under test.
+     * Fixture setup inserts a BPMN case directly because case creation/orchestration is outside
+     * the scope of these collaboration-service transaction tests.
      */
     @Configuration
     static class CollaborationServicesTestConfig {
@@ -247,11 +243,6 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
             JdbcClient jdbc = JdbcClient.create(dataSource);
             return new FailingAuditEventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
                     new WebhookRepository(jdbc), "org.example.cm", "eng-test");
-        }
-
-        @Bean
-        CaseService caseService(DataSource dataSource, CaseServiceTransactionalIntegrationTest.FailingGateway gateway) {
-            return TestServices.caseService(dataSource, gateway);
         }
 
         @Bean

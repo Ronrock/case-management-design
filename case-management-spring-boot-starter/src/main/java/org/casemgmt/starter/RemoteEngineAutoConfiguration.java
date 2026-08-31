@@ -155,7 +155,7 @@ public class RemoteEngineAutoConfiguration {
      * <p>{@code @Primary} is a fix beyond the brief: {@code RemoteEngineGateway} itself
      * implements {@link EngineGateway} (deliberately, so {@code EngineCommandDispatcher} can
      * call it directly), so without a tie-breaker, every plain {@code EngineGateway} injection
-     * point in {@code CaseManagementAutoConfiguration} (e.g. {@code transitionApplier}) fails to
+     * point in {@code CaseManagementAutoConfiguration} fails to
      * start in remote mode with {@code NoUniqueBeanDefinitionException: expected single matching
      * bean but found 2: remoteEngineGateway,outboxEngineGateway} — confirmed by running
      * {@code AutoConfigurationTest.remoteModeRegistersTheOutboxGateway} without this annotation.

@@ -286,23 +286,22 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
     /**
      * Fix round 2, review finding Important 2. {@code CaseDefinitionService} read {@code tenantId}
      * out of the submitted document, so the deploy endpoint was the one place left where a caller
-     * chose the tenant they wrote into. dave is a legitimate administrator — the {@code admin}
-     * gate passes for him — of tenant t2, and the fixture document declares {@code "tenantId":
-     * "t1"}. Publishing it would put HIS plan model behind t1's case type: every future t1 case of
-     * that key instantiates it, because {@code CaseService.create} resolves through
-     * {@code findLatest(key, tenant)}.
+     * chose the tenant they wrote into. Dave is a legitimate administrator of tenant t2, while
+     * the fixture contract declares t1. Publication must bind the release and exact engine
+     * identity to Dave's authenticated tenant; contract content cannot redirect the write.
      */
     @Test
-    void anAdministratorCannotDeployACaseDefinitionIntoAnotherTenant() {
+    void anAdministratorDeploymentIsAlwaysBoundToTheAuthenticatedTenant() {
         deployDefinition();
 
-        ResponseEntity<Map> refused = client(OTHER_TENANT_USER).post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON).body(definitionJson())
+        ResponseEntity<Map> rebound = client(OTHER_TENANT_USER).post().uri("/case-definitions")
+                .contentType(MediaType.valueOf("application/zip")).body(definitionArchive())
                 .retrieve().toEntity(Map.class);
 
-        assertThat(refused.getStatusCode().value()).isEqualTo(403);
-        assertThat(refused.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
-        assertThat(refused.getBody()).containsEntry("code", "forbidden");
+        assertThat(rebound.getStatusCode().value()).isEqualTo(201);
+        assertThat(rebound.getBody())
+                .containsEntry("engineTenantId", "t2")
+                .containsEntry("caseDefinitionId", "t2:" + DEFINITION_KEY + ":1");
 
         // t1's definition is untouched: still version 1, still alice's.
         ResponseEntity<Map> t1Definition = alice().get()
@@ -310,9 +309,8 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
                 .retrieve().toEntity(Map.class);
         assertThat(t1Definition.getBody()).containsEntry("version", 1);
 
-        // dave IS an administrator, so the admin gate is not what refused him: the SAME key,
-        // deployed under his own tenant, succeeds — and lands at version 1, independently of
-        // t1's version 1 of that key.
+        // A second bundle that explicitly names dave's tenant continues dave's version series,
+        // independently of t1's version 1 of that key.
         //
         // Fix round 3 is what makes this expressible. CM_CASE_DEF.ID_ used to be
         // "{key}:{version}", which contradicted UQ_CM_CASE_DEF's tenant-scoped
@@ -321,17 +319,17 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
         // "{tenant}:{key}:{version}". Until that change this test had to dodge the collision by
         // using a different key, which meant it never exercised the case that actually matters.
         ResponseEntity<Map> ownTenant = client(OTHER_TENANT_USER).post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(definitionJson().replace("\"tenantId\": \"t1\"", "\"tenantId\": \"t2\""))
+                .contentType(MediaType.valueOf("application/zip"))
+                .body(archive(definitionJson().replace(
+                        "\"tenantId\": \"t1\"", "\"tenantId\": \"t2\"")))
                 .retrieve().toEntity(Map.class);
         assertThat(ownTenant.getStatusCode().value())
                 .as("the same key must be deployable in a second tenant")
                 .isEqualTo(201);
         assertThat(ownTenant.getBody())
-                .containsEntry("key", DEFINITION_KEY)
-                .containsEntry("tenantId", "t2")
-                .containsEntry("version", 1)
-                .containsEntry("id", "t2:" + DEFINITION_KEY + ":1");
+                .containsEntry("engineProcessDefinitionKey", DEFINITION_KEY)
+                .containsEntry("engineTenantId", "t2")
+                .containsEntry("caseDefinitionId", "t2:" + DEFINITION_KEY + ":2");
 
         // t1's own definition still exists, at its own version 1, under its own id.
         assertThat(alice().get().uri("/case-definitions/{k}?tenantId={t}", DEFINITION_KEY, TENANT)
@@ -343,12 +341,12 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
         // where no tenant-scoped listing would ever find it again — and versions continue within
         // t2, not across tenants.
         ResponseEntity<Map> untenanted = client(OTHER_TENANT_USER).post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(definitionJson().replace("\"tenantId\": \"t1\",", ""))
+                .contentType(MediaType.valueOf("application/zip"))
+                .body(archive(definitionJson().replace("\"tenantId\": \"t1\",", "")))
                 .retrieve().toEntity(Map.class);
         assertThat(untenanted.getStatusCode().value()).isEqualTo(201);
-        assertThat(untenanted.getBody()).containsEntry("tenantId", "t2")
-                .containsEntry("version", 2);
+        assertThat(untenanted.getBody()).containsEntry("engineTenantId", "t2")
+                .containsEntry("caseDefinitionId", "t2:" + DEFINITION_KEY + ":3");
 
         // Each administrator sees only their own tenant's definition of the shared key, at their
         // own version.
@@ -356,7 +354,7 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
                 .uri("/case-definitions").retrieve().toEntity(List.class).getBody())
                 .singleElement()
                 .satisfies(d -> assertThat(d).containsEntry("key", DEFINITION_KEY)
-                        .containsEntry("version", 2).containsEntry("tenantId", "t2"));
+                        .containsEntry("version", 3).containsEntry("tenantId", "t2"));
 
         assertThat((List<Map<String, Object>>) alice().get().uri("/case-definitions")
                 .retrieve().toEntity(List.class).getBody())
@@ -368,22 +366,18 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
     /**
      * The consumer that actually matters after the id change (fix round 3): {@code
      * CaseService.create} resolves a definition through {@code findLatest(key, tenant)}, so two
-     * tenants holding the same key must each instantiate THEIR OWN plan model, not each other's.
+     * tenants holding the same key must each bind to THEIR OWN version, not each other's.
      */
     @Test
     void twoTenantsSharingACaseDefinitionKeyEachInstantiateTheirOwnDefinition() {
         deployDefinition();
 
-        // t2 deploys the SAME key with a distinguishable plan item. The distinguisher is the
-        // defKey, not the display name, so
-        // renaming only the "name" field would produce identical plan items and the assertion
-        // below would be unfalsifiable. Renaming the milestone is safe — nothing declares it as
-        // a parentStageKey, and its entry criterion refers to "review", which is unchanged.
+        // t2 deploys the SAME BPMN/contract key. Tenant-scoped definition ids make the selected
+        // authority directly observable without introducing a second local state machine.
         client(OTHER_TENANT_USER).post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(definitionJson()
-                        .replace("\"tenantId\": \"t1\"", "\"tenantId\": \"t2\"")
-                        .replace("\"defKey\": \"reviewed\"", "\"defKey\": \"t2reviewed\""))
+                .contentType(MediaType.valueOf("application/zip"))
+                .body(archive(definitionJson()
+                        .replace("\"tenantId\": \"t1\"", "\"tenantId\": \"t2\"")))
                 .retrieve().toEntity(Map.class);
 
         ResponseEntity<Map> t1Case = createCase("t1 case");
@@ -400,11 +394,10 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
         assertThat(t2Case.getBody()).containsEntry("tenantId", "t2")
                 .containsEntry("caseDefinitionVersion", 1);
 
-        // ...and the plan model each one instantiated is its own, not the other tenant's.
-        assertThat(planItemNames(alice(), (String) t1Case.getBody().get("id")))
-                .contains("reviewed").doesNotContain("t2reviewed");
-        assertThat(planItemNames(client(OTHER_TENANT_USER), (String) t2Case.getBody().get("id")))
-                .contains("t2reviewed").doesNotContain("reviewed");
+        assertThat(t1Case.getBody()).containsEntry(
+                "caseDefinitionId", TENANT + ":" + DEFINITION_KEY + ":1");
+        assertThat(t2Case.getBody()).containsEntry(
+                "caseDefinitionId", "t2:" + DEFINITION_KEY + ":1");
     }
 
     @Test
@@ -425,11 +418,11 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
         assertThat(explicitForeign.getBody()).containsEntry("code", "forbidden");
 
         client(OTHER_TENANT_USER).post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(definitionJson()
+                .contentType(MediaType.valueOf("application/zip"))
+                .body(archive(definitionJson()
                         .replace("\"tenantId\": \"t1\"", "\"tenantId\": \"t2\"")
                         .replace("\"note\": { \"type\": \"string\" }",
-                                "\"t2Only\": { \"type\": \"string\" }"))
+                                "\"t2Only\": { \"type\": \"string\" }")))
                 .retrieve().toEntity(Map.class);
 
         ResponseEntity<Map> davesSchema = client(OTHER_TENANT_USER).get()
@@ -445,13 +438,6 @@ class CaseApiTenantIsolationTest extends CaseApiHttpTestBase {
         assertThat(alicesSchema.getStatusCode().value()).isEqualTo(200);
         assertThat((Map<String, Object>) alicesSchema.getBody().get("properties"))
                 .containsKey("note").doesNotContainKey("t2Only");
-    }
-
-    private List<String> planItemNames(org.springframework.web.client.RestClient client, String caseId) {
-        return ((List<Map<String, Object>>) client.get().uri("/cases/{id}/plan-items", caseId)
-                .retrieve().toEntity(List.class).getBody()).stream()
-                .map(i -> (String) i.get("name"))
-                .toList();
     }
 
     @Test

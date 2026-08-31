@@ -1,24 +1,19 @@
 package org.casemgmt.sla;
 
 import org.casemgmt.OracleTestBase;
-import org.casemgmt.domain.CasePriority;
-import org.casemgmt.engine.*;
+import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.error.CaseConflictException;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.repo.*;
 import org.casemgmt.service.Actor;
-import org.casemgmt.service.CaseDefinitionService;
-import org.casemgmt.service.CaseService;
 import org.casemgmt.service.TestServices;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -26,7 +21,7 @@ class SlaServiceTest extends OracleTestBase {
 
     private SlaService sla;
     private SlaRepository slaRepo;
-    private CaseService cases;
+    private CaseDefinition definition;
     private final Actor alice = new Actor("alice", List.of("handlers"));
     private String caseId;
 
@@ -34,10 +29,8 @@ class SlaServiceTest extends OracleTestBase {
     // CM_SLA_RECORD/CM_SLA_TARGET/CM_SLA_POLICY/CM_BUSINESS_CALENDAR) before each test method
     // via its own @BeforeEach — see CaseServiceTest for the same convention.
     @BeforeEach
-    void setUp() throws Exception {
-        String json = new String(getClass().getResourceAsStream("/definitions/test-definition.json")
-                .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
+    void setUp() {
+        definition = TestServices.deployBpmnDefinition(dataSource(), "widget-review", "t1");
 
         slaRepo = new SlaRepository(jdbc());
         slaRepo.insertCalendar("cal-nl", Map.of(
@@ -55,9 +48,8 @@ class SlaServiceTest extends OracleTestBase {
         slaRepo.insertTarget("tgt-first", "pol-1", "firstResponse", "First response",
                 "PT4H", "PT3H", List.of("WAITING_ON_CUSTOMER"), List.of("EMIT_EVENT"));
 
-        cases = TestServices.caseService(dataSource(), new NoopGateway());
         sla = TestServices.slaService(jdbc());
-        caseId = cases.create("widget-review", "t1", null, "T", CasePriority.MEDIUM, Map.of(), alice).id();
+        caseId = TestServices.insertBpmnCase(dataSource(), definition, "T", alice.userId()).id();
     }
 
     @Test
@@ -238,8 +230,8 @@ class SlaServiceTest extends OracleTestBase {
     void pauseAndResumeRejectAnSlaIdThatBelongsToADifferentCase() {
         sla.startClocks(caseId, "pol-1", alice);
         SlaRecord record = slaRepo.findByCase(caseId).get(0);
-        String otherCaseId = cases.create("widget-review", "t1", null, "Other",
-                CasePriority.MEDIUM, Map.of(), alice).id();
+        String otherCaseId = TestServices.insertBpmnCase(
+                dataSource(), definition, "Other", alice.userId()).id();
 
         assertThatThrownBy(() ->
                 sla.pause(otherCaseId, record.id(), record.version(), "WAITING_ON_CUSTOMER", alice))
@@ -558,26 +550,4 @@ class SlaServiceTest extends OracleTestBase {
                 "holidays", List.of());
     }
 
-    /**
-     * Minimal no-op {@link EngineGateway}: this test only needs case creation to succeed, not
-     * any recorded interaction with the engine. Deliberately local rather than reusing {@code
-     * CaseServiceTest.RecordingGateway} from {@code org.casemgmt.service} — that class and its
-     * nested gateway are package-private, so reusing them would mean widening another test
-     * class's visibility for a dependency this task does not otherwise need.
-     */
-    private static final class NoopGateway implements EngineGateway {
-        public EngineTaskRef createHumanTask(HumanTaskRequest r) {
-            return new EngineTaskRef("engine-" + UUID.randomUUID(), r.name(), r.assignee(), r.caseId(), null);
-        }
-        public void claimTask(String engineTaskId, String userId) {}
-        public void completeTask(String engineTaskId, Map<String, Object> variables) {}
-        public EngineProcessRef startProcess(StartProcessRequest r) {
-            return new EngineProcessRef("proc-" + UUID.randomUUID(), r.processDefinitionKey(), r.caseId());
-        }
-        public EngineProcessRef startProcessByKey(org.casemgmt.engine.StartProcessByKeyRequest r) {
-            return new EngineProcessRef("proc-" + UUID.randomUUID(), r.processDefinitionKey(), r.caseId());
-        }
-        public void cancelProcess(String processInstanceId, String reason) {}
-        public List<EngineTaskRef> findTasks(EngineTaskQuery query) { return List.of(); }
-    }
 }

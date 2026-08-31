@@ -12,12 +12,6 @@ import java.util.Set;
  * The single rule table behind both {@code availableActions[]} (projection) and
  * {@code assertAllowed} (enforcement). Two entry points, one set of rules — which is
  * what keeps the UI and the server from disagreeing (spec §4.5).
- *
- * <p>Case-level closure defers to {@link StageCompletion#caseCanClose}, not
- * {@link StageCompletion#blockingItems}: the two are deliberately separate rules
- * (see {@code StageCompletion}'s Javadoc) and mixing them here would silently
- * import the ACTIVE-child-blocks-completion rule — meant for stage autocomplete —
- * into case closure, which has never been part of the case-closing contract.
  */
 public class ActionPolicy {
 

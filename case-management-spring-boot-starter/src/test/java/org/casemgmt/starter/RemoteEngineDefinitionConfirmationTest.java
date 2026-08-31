@@ -5,6 +5,8 @@ import org.casemgmt.engine.EngineCommand;
 import org.casemgmt.engine.EngineCommandPolicy;
 import org.casemgmt.engine.ProductionEngineCommandStore;
 import org.casemgmt.engine.remote.RemoteEngineGateway;
+import org.casemgmt.event.EventPublisher;
+import org.casemgmt.observation.CommandConfirmationLifecycleReporter;
 import org.casemgmt.repo.EngineCommandRepository;
 import org.junit.jupiter.api.Test;
 
@@ -44,16 +46,23 @@ class RemoteEngineDefinitionConfirmationTest {
                 "http:200:command-1");
         CommandDispatchOutcome outcome = CommandDispatchOutcome.http(200,
                 CommandDispatchOutcome.Acceptance.ACCEPTED, null, evidence);
-        when(commands.claimDue(anyString(), eq(50), any(), eq(Duration.ofMinutes(5))))
-                .thenReturn(List.of(lease));
+        when(commands.claimDue(anyString(), eq(1), any(), eq(Duration.ofMinutes(5))))
+                .thenReturn(List.of(lease), List.of());
+        when(commands.commitLeaseOutcome(
+                "tenant-1", "operation-1", "lease-1", 1, outcome))
+                .thenReturn(command);
         when(gateway.dispatch(command)).thenReturn(outcome);
+        EventPublisher events = mock(EventPublisher.class);
+        CommandConfirmationLifecycleReporter lifecycle =
+                mock(CommandConfirmationLifecycleReporter.class);
         var dispatcher = new RemoteEngineAutoConfiguration().engineCommandDispatcher(
-                commands, gateway);
+                commands, gateway, events, lifecycle);
 
         dispatcher.drainOnce();
 
         verify(commands).commitLeaseOutcome(
                 "tenant-1", "operation-1", "lease-1", 1, outcome);
+        verify(lifecycle).confirmed(any());
         verify(gateway, never()).startProcess(any());
     }
 }

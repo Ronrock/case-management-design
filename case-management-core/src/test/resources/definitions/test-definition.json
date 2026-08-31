@@ -1,25 +1,22 @@
 {
   "key": "widget-review",
   "name": "Widget Review",
+  "orchestrationMode": "BPMN",
   "tenantId": "t1",
   "roles": ["owner", "handler", "reviewer"],
+  "candidateGroups": ["reviewers"],
+  "fields": {},
   "forms": {
     "reviewForm": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
-      "required": ["outcome"],
-      "properties": {
-        "outcome": { "type": "string", "enum": ["approve", "reject"] },
-        "note": { "type": "string" }
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["outcome"],
+        "properties": {
+          "outcome": { "type": "string", "enum": ["approve", "reject"] },
+          "note": { "type": "string" }
+        }
       }
     }
-  },
-  "planItems": [
-    { "defKey": "setupStage", "type": "STAGE", "name": "Setup", "manualActivation": false, "sortOrder": 10 },
-    { "defKey": "review", "type": "HUMAN_TASK", "name": "Review", "parentStageKey": "setupStage",
-      "manualActivation": false, "required": true, "formKey": "reviewForm",
-      "candidateGroups": ["reviewers"], "sortOrder": 20 },
-    { "defKey": "reviewed", "type": "MILESTONE", "name": "Reviewed",
-      "entryCriteria": ["${items.review.state == 'COMPLETED'}"], "sortOrder": 30 }
-  ]
+  }
 }

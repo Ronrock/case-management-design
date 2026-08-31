@@ -27,7 +27,6 @@ import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.rules.JuelCriterionEvaluator;
-import org.casemgmt.rules.StageCompletion;
 import org.casemgmt.search.CaseProjectionSearchProvider;
 import org.casemgmt.search.DocumentMetadataSearchProvider;
 import org.casemgmt.search.SearchOrchestrator;
@@ -55,7 +54,6 @@ import org.casemgmt.service.DocumentService;
 import org.casemgmt.service.FormValidator;
 import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.service.MilestoneService;
-import org.casemgmt.service.TransitionApplier;
 import org.casemgmt.service.WebhookService;
 import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
 import org.casemgmt.sla.SlaService;
@@ -200,7 +198,6 @@ public class CaseApiTestConfig {
         return new EngineOperationService(commands, publisher);
     }
     @Bean public FormValidator formValidator() { return new FormValidator(); }
-    @Bean public StageCompletion stageCompletion() { return new StageCompletion(); }
     @Bean
     public BpmnOrchestration bpmnOrchestration(
             EngineGateway engine, LinkedProcessRepository processes,
@@ -215,23 +212,12 @@ public class CaseApiTestConfig {
     }
 
     @Bean
-    public TransitionApplier transitionApplier(PlanItemRepository planItems, CaseTaskRepository tasks,
-                                               LinkedProcessRepository linkedProcesses,
-                                               MilestoneRepository milestones,
-                                               EngineGateway engine, EventPublisher publisher) {
-        return new TransitionApplier(planItems, tasks, linkedProcesses, milestones, engine,
-                publisher);
-    }
-
-    @Bean
     public CaseService caseService(CaseRepository cases, CaseDefinitionRepository definitions,
-                                   PlanItemRepository planItems, MilestoneRepository milestones,
-                                   ParticipantRepository participants,
+                                   PlanItemRepository planItems, ParticipantRepository participants,
                                    CaseOrchestrationRegistry orchestrations,
-                                   StageCompletion stageCompletion,
-                                   TransitionApplier applier, EventPublisher publisher) {
-        return new CaseService(cases, definitions, planItems, milestones, participants,
-                orchestrations, stageCompletion, applier, publisher, ENGINE_ID);
+                                   EventPublisher publisher) {
+        return new CaseService(cases, definitions, planItems, participants,
+                orchestrations, publisher, ENGINE_ID);
     }
 
     @Bean

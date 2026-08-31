@@ -22,9 +22,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Ad hoc BPMN processes linked to a case (spec §4.9) — a case can kick off a process that is not
- * itself part of the CMMN plan model (e.g. a "decision letter" process), and this class records
- * the correlation between the two.
+ * Ad hoc BPMN processes linked to a case (spec §4.9), such as a decision-letter subprocess.
  *
  * <p>Remote starts use the linked-process row id as a durable correlation key. That local key is
  * stored in {@code CORRELATION_ID_}; {@code PROC_INST_ID_} remains null until the engine confirms

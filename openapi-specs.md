@@ -52,19 +52,16 @@ paths:
                 items: {$ref: '#/components/schemas/CaseDefinition'}
     post:
       tags: [Case Definitions]
-      summary: Deploy a legacy plan model or publish a combined BPMN definition
+      summary: Publish a combined BPMN definition
       description: >
-        Requires the administrator identity group. `application/json` preserves the legacy
-        PLAN_MODEL deployment operation and returns its deployment summary. `application/zip`
-        publishes orchestration, contract, and presentation artifacts and returns the resulting
+        Requires the administrator identity group. `application/zip` publishes orchestration,
+        contract, and presentation artifacts and returns the resulting
         BPMN binding lifecycle. A combined 201 response does not mean the binding is runnable:
         embedded deployment is normally ACTIVE, while remote deployment can return
         deploymentStatus DEPLOYING with bindingStatus DRAFT until its verified report arrives.
       requestBody:
         required: true
         content:
-          application/json:
-            schema: {$ref: '#/components/schemas/CaseDefinition'}
           application/zip:
             schema:
               type: string
@@ -72,14 +69,11 @@ paths:
       responses:
         '201':
           description: >
-            Legacy PLAN_MODEL definition or combined BPMN binding created. Inspect the response
-            lifecycle fields before starting cases; only an ACTIVE binding is runnable.
+            Combined BPMN binding created. Inspect the response lifecycle fields before starting
+            cases; only an ACTIVE binding is runnable.
           content:
             application/json:
-              schema:
-                oneOf:
-                  - {$ref: '#/components/schemas/PlanModelDeploymentResponse'}
-                  - {$ref: '#/components/schemas/CaseDefinitionBindingResponse'}
+              schema: {$ref: '#/components/schemas/CaseDefinitionBindingResponse'}
         '400': {$ref: '#/components/responses/BadRequest'}
 
   /case-definitions/{key}:
@@ -1785,7 +1779,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Case'}
     PlanItemResponse:
-      description: Updated plan item (plan model re-evaluated)
+      description: Updated BPMN-derived plan-item projection
       content:
         application/json:
           schema: {$ref: '#/components/schemas/PlanItem'}
@@ -2015,10 +2009,12 @@ components:
         queueId: {type: string, nullable: true}
         initiator: {type: string, nullable: true}
         slaStatus: {type: string, enum: [ON_TRACK, WARNING, BREACHED, NONE]}
-        # Added in Task 27: both are emitted on every case response and were undeclared.
+        # These fields are emitted on every case response and must remain declared because the
+        # response schema is closed by the conformance validator.
         # `version` is not decoration — it is the value of the ETag, so a client written from this
         # document could not have found the number it needs for the next If-Match.
         outcome: {type: string, nullable: true}
+        cancelReason: {type: string, nullable: true}
         version: {type: integer, format: int64}
         variables: {$ref: '#/components/schemas/Variables'}
         createdAt: {type: string, format: date-time}
@@ -2110,7 +2106,7 @@ components:
         deployedAt: {type: string, format: date-time, readOnly: true}
         orchestrationMode:
           type: string
-          enum: [PLAN_MODEL, BPMN]
+          enum: [BPMN]
           readOnly: true
         orchestrationReleaseId: {type: string, readOnly: true}
         orchestrationSha256: {type: string, readOnly: true}
@@ -2139,29 +2135,6 @@ components:
           nullable: true
           readOnly: true
         engineTenantId: {type: string, nullable: true, readOnly: true}
-
-    PlanModelDeploymentResponse:
-      type: object
-      required: [id, key, version, orchestrationMode, tenantId, planItems, availableActions]
-      additionalProperties: false
-      properties:
-        id: {type: string, readOnly: true}
-        key: {type: string, readOnly: true}
-        version: {type: integer, readOnly: true}
-        orchestrationMode:
-          type: string
-          enum: [PLAN_MODEL]
-          readOnly: true
-        tenantId: {type: string, nullable: true, readOnly: true}
-        planItems:
-          type: integer
-          minimum: 0
-          readOnly: true
-          description: Number of plan items in the deployed definition.
-        availableActions:
-          type: array
-          readOnly: true
-          items: {$ref: '#/components/schemas/AvailableAction'}
 
     CaseDefinitionRelease:
       type: object

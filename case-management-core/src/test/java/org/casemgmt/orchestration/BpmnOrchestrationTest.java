@@ -24,7 +24,7 @@ import org.mockito.InOrder;
 class BpmnOrchestrationTest {
 
     @Test
-    void startsAndRecordsTheRootProcessAndDisablesExplicitClose() {
+    void startsAndRecordsTheRootProcessByExactDefinitionIdentity() {
         EngineGateway engine = mock(EngineGateway.class);
         LinkedProcessRepository processes = mock(LinkedProcessRepository.class);
         when(engine.startProcess(any())).thenReturn(new EngineProcessRef(
@@ -37,7 +37,6 @@ class BpmnOrchestrationTest {
         orchestration.onCaseCreated(caseInstance(Map.of("amount", 10)), definition());
 
         assertThat(orchestration.mode()).isEqualTo(OrchestrationMode.BPMN);
-        assertThat(orchestration.allowsExplicitClose()).isFalse();
         ArgumentCaptor<StartProcessRequest> request = ArgumentCaptor.forClass(StartProcessRequest.class);
         ArgumentCaptor<String> correlation = ArgumentCaptor.forClass(String.class);
         InOrder ordered = inOrder(processes, engine);

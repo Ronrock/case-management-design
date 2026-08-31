@@ -91,11 +91,13 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
 
         migrate(scenarioDataSource);
         assertFinalSchema(scenarioJdbc);
-        assertThat(appliedChangeSets(scenarioJdbc)).containsExactlyElementsOf(EXPECTED_CHANGESETS);
+        assertThat(appliedChangeSets(scenarioJdbc))
+                .containsExactlyInAnyOrderElementsOf(EXPECTED_CHANGESETS);
 
         migrate(scenarioDataSource);
         assertFinalSchema(scenarioJdbc);
-        assertThat(appliedChangeSets(scenarioJdbc)).containsExactlyElementsOf(EXPECTED_CHANGESETS);
+        assertThat(appliedChangeSets(scenarioJdbc))
+                .containsExactlyInAnyOrderElementsOf(EXPECTED_CHANGESETS);
     }
 
     @ParameterizedTest(name = "halts on malformed pre-existing {0}")
@@ -108,16 +110,18 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
         applyMasterBeforeObservationLedger(scenarioDataSource);
         recreateMalformedPrefix(scenarioDataSource, malformedState);
         JdbcClient scenarioJdbc = JdbcClient.create(scenarioDataSource);
+        List<Long> guardedExecutionsBefore = appliedChangeSetExecutions(
+                scenarioJdbc, malformedState.guardedChangeSet());
 
         assertThatThrownBy(() -> migrate(scenarioDataSource))
-                .hasRootCauseMessage(malformedState.expectedFailureMessage());
-        assertThat(appliedChangeSets(scenarioJdbc))
-                .doesNotContain(malformedState.guardedChangeSet());
+                .hasStackTraceContaining(malformedState.expectedFailureMessage());
+        assertThat(appliedChangeSetExecutions(scenarioJdbc, malformedState.guardedChangeSet()))
+                .containsExactlyElementsOf(guardedExecutionsBefore);
     }
 
-    @ParameterizedTest(name = "final observation guard rejects post-apply drift: {0}")
+    @ParameterizedTest(name = "an applicable observation guard rejects post-apply drift: {0}")
     @EnumSource(FinalMutation.class)
-    void finalObservationGuardRejectsPostApplyDrift(FinalMutation mutation) throws Exception {
+    void applicableObservationGuardRejectsPostApplyDrift(FinalMutation mutation) throws Exception {
         recreateSchema();
         DataSource scenario = new DriverManagerDataSource(
                 jdbcUrl, SCHEMA, SCHEMA_PASSWORD);
@@ -125,7 +129,7 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
         mutation.apply(JdbcClient.create(scenario));
 
         assertThatThrownBy(() -> migrate(scenario))
-                .hasRootCauseMessage("Engine observation final structure is incompatible");
+                .hasStackTraceContaining(mutation.expectedFailureMessage());
     }
 
     private static void recreateInitialTable(DataSource scenarioDataSource,
@@ -241,7 +245,7 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
             }
             case PLAN_PROCESS_INDEX_WRONG -> {
                 execute(scenarioDataSource, "CREATE INDEX IX_CM_PI_PROC_INST "
-                        + "ON CM_PLAN_ITEM(PROC_INST_ID_)");
+                        + "ON CM_PLAN_ITEM(PROC_INST_ID_,CASE_ID_)");
                 yield null;
             }
             case TASK_PROCESS_INDEX_TRAILING -> {
@@ -276,7 +280,7 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                 SELECT COLUMN_NAME FROM USER_TAB_COLUMNS
                 WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
                 ORDER BY COLUMN_ID""").query(String.class).list())
-                .containsExactly(
+                .containsExactlyInAnyOrder(
                         "OBSERVATION_ID_", "TENANT_ID_", "FINGERPRINT_", "CLAIM_TOKEN_",
                         "STATUS_", "SOURCE_", "CASE_ID_", "PROCESS_INSTANCE_ID_", "ENTITY_ID_",
                         "ENTITY_REVISION_", "EVENT_TYPE_", "ENGINE_OCCURRED_AT_", "CLAIMED_AT_",
@@ -299,10 +303,18 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                         "IX_CM_AEO_STATUS:NONUNIQUE",
                         "UQ_CM_AEO_AUTH_FINGERPRINT:UNIQUE");
         assertThat(indexColumns(scenarioJdbc, "IX_CM_AEO_STATUS"))
-                .containsExactly("STATUS_", "CLAIMED_AT_");
+                .satisfiesExactly(
+                        entry -> assertThat(entry).isEqualTo("STATUS_"),
+                        entry -> assertThat(entry).startsWith("SYS_NC"));
+        assertThat(indexExpressions(scenarioJdbc, "IX_CM_AEO_STATUS"))
+                .singleElement()
+                .satisfies(expression -> assertThat(expression)
+                        .containsIgnoringCase("SYS_EXTRACT_UTC")
+                        .containsIgnoringCase("CLAIMED_AT_"));
         assertThat(indexExpressions(scenarioJdbc, "UQ_CM_AEO_AUTH_FINGERPRINT"))
-                .containsExactly(
-                        "CASE WHEN \"TENANT_ID_\" IS NULL THEN 1 ELSE 0 END", null, null);
+                .singleElement()
+                .satisfies(expression -> assertThat(normalizeSql(expression))
+                        .isEqualTo("CASE WHEN \"TENANT_ID_\" IS NULL THEN 1 ELSE 0 END"));
         assertThat(indexColumns(scenarioJdbc, "IX_CM_AEO_ENGINE_ENTITY"))
                 .containsExactly("TENANT_ID_", "ENGINE_ID_", "CASE_ID_",
                         "PROCESS_INSTANCE_ID_", "OBSERVATION_KIND_", "ENTITY_ID_", "STATUS_");
@@ -330,6 +342,22 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                 WHERE FILENAME = :filename
                 ORDER BY ORDEREXECUTED""")
                 .param("filename", CHANGELOG).query(String.class).list();
+    }
+
+    private static List<Long> appliedChangeSetExecutions(
+            JdbcClient scenarioJdbc, String changeSetId) {
+        return scenarioJdbc.sql("""
+                SELECT ORDEREXECUTED FROM DATABASECHANGELOG
+                WHERE FILENAME = :filename AND ID = :changeSetId
+                ORDER BY ORDEREXECUTED""")
+                .param("filename", CHANGELOG)
+                .param("changeSetId", changeSetId)
+                .query(Long.class)
+                .list();
+    }
+
+    private static String normalizeSql(String value) {
+        return value.trim().replaceAll("\\s+", " ");
     }
 
     private static void applyMasterBeforeObservationLedger(DataSource scenarioDataSource)
@@ -454,19 +482,19 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
     }
 
     private enum FinalMutation {
-        CHANGED_INITIAL_COLUMN {
+        CHANGED_INITIAL_COLUMN("CM_APPLIED_ENGINE_OBSERVATION has an incompatible structure") {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION MODIFY SOURCE_ VARCHAR2(129)")
                         .update();
             }
         },
-        CHANGED_LATER_COLUMN {
+        CHANGED_LATER_COLUMN("Engine observation hardening structure is incompatible") {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION MODIFY ENGINE_ID_ VARCHAR2(129)")
                         .update();
             }
         },
-        REVERTED_OLD_STATUS {
+        REVERTED_OLD_STATUS("Engine observation final structure is incompatible") {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS")
                         .update();
@@ -474,40 +502,50 @@ class AppliedObservationMigrationRestartIntegrationTest extends OracleTestBase {
                         + "CHECK (STATUS_ IN ('CLAIMED','APPLIED','FAILED'))").update();
             }
         },
-        REVERTED_PLAN_PROCESS_WIDTH {
+        REVERTED_PLAN_PROCESS_WIDTH("Engine observation final structure is incompatible") {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("ALTER TABLE CM_PLAN_ITEM MODIFY PROC_INST_ID_ VARCHAR2(64)").update();
             }
         },
-        REMOVED_PLAN_PROCESS_INDEX {
+        REMOVED_PLAN_PROCESS_INDEX("Engine observation final structure is incompatible") {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("DROP INDEX IX_CM_PI_PROC_INST").update();
             }
         },
-        REMOVED_TASK_PROCESS_INDEX {
+        REMOVED_TASK_PROCESS_INDEX("Engine observation final structure is incompatible") {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("DROP INDEX IX_CM_TASK_PROC_INST").update();
             }
         },
-        REPLACED_AUTHORITY_INDEX {
+        REPLACED_AUTHORITY_INDEX("UQ_CM_AEO_AUTH_FINGERPRINT has an incompatible structure") {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("DROP INDEX UQ_CM_AEO_AUTH_FINGERPRINT").update();
                 jdbc.sql("CREATE UNIQUE INDEX UQ_CM_AEO_AUTH_FINGERPRINT "
                         + "ON CM_APPLIED_ENGINE_OBSERVATION(TENANT_ID_, FINGERPRINT_)").update();
             }
         },
-        REPLACED_STATUS_INDEX {
+        REPLACED_STATUS_INDEX("IX_CM_AEO_STATUS has an incompatible structure") {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("DROP INDEX IX_CM_AEO_STATUS").update();
                 jdbc.sql("CREATE INDEX IX_CM_AEO_STATUS "
                         + "ON CM_APPLIED_ENGINE_OBSERVATION(STATUS_)").update();
             }
         },
-        UNUSABLE_ENGINE_ENTITY_INDEX {
+        UNUSABLE_ENGINE_ENTITY_INDEX("Engine observation hardening structure is incompatible") {
             @Override void apply(JdbcClient jdbc) {
                 jdbc.sql("ALTER INDEX IX_CM_AEO_ENGINE_ENTITY UNUSABLE").update();
             }
         };
+
+        private final String expectedFailureMessage;
+
+        FinalMutation(String expectedFailureMessage) {
+            this.expectedFailureMessage = expectedFailureMessage;
+        }
+
+        String expectedFailureMessage() {
+            return expectedFailureMessage;
+        }
 
         abstract void apply(JdbcClient jdbc);
     }

@@ -27,9 +27,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *       review comment 6). Every closed object here proves an unknown property fails.</li>
  *   <li><b>Which side owns lifecycle.</b> In {@code BPMN} mode the contract may not declare
  *       lifecycle, gateways, task activation or process timers; BPMN running in Operaton owns
- *       them (design §7.1, review comment 4). {@code PLAN_MODEL} keeps those constructs and
- *       keeps its existing permissive shape — the two modes are separate schemas, not one
- *       schema with a union of properties.</li>
+ *       them (design §7.1, review comment 4). The removed {@code PLAN_MODEL} discriminator is
+ *       rejected explicitly rather than selecting a second behavioral schema.</li>
  *   <li><b>What a caller gets back.</b> A typed {@link ValidatedCaseContract}, so binding and
  *       runtime services stop re-parsing {@code Map<String,Object>} and re-deciding what an
  *       ad-hoc action means.</li>

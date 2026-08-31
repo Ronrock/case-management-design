@@ -102,7 +102,7 @@ class CaseDefinitionLifecycleResponseTest {
         when(bindings.find("definition-1")).thenReturn(Optional.of(binding()));
         when(policy.listForAdministration(Set.of("tenant:t1"))).thenReturn(List.of());
         CaseDefinitionController controller = new CaseDefinitionController(
-                mock(CaseDefinitionService.class), definitions, bindings, policy, callers);
+                definitions, bindings, policy, callers);
 
         List<Map<String, Object>> responses = List.of(
                 controller.list(null, authentication).getFirst(),

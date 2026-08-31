@@ -114,8 +114,8 @@ class CaseDefinitionVersionBindingActivationTest extends OracleTestBase {
         String contractId = definitionId + ":contract";
         String presentationId = definitionId + ":presentation";
         String orchestrationSha = Integer.toString(version).repeat(64);
-        String contractSha = "c".repeat(64);
-        String presentationSha = "p".repeat(64);
+        String contractSha = Integer.toHexString(version).repeat(64);
+        String presentationSha = Integer.toHexString(version + 8).repeat(64);
         EngineDeploymentIdentity identity = new EngineDeploymentIdentity(
                 "deployment-" + version, key + ":" + version + ":exact",
                 key, version, tenantId);

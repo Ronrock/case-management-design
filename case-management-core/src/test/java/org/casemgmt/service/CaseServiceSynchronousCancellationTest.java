@@ -11,10 +11,8 @@ import org.casemgmt.orchestration.CaseOrchestrationRegistry;
 import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseRepository;
-import org.casemgmt.repo.MilestoneRepository;
 import org.casemgmt.repo.ParticipantRepository;
 import org.casemgmt.repo.PlanItemRepository;
-import org.casemgmt.rules.StageCompletion;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
@@ -50,9 +48,8 @@ class CaseServiceSynchronousCancellationTest {
         when(definitions.require("definition:1")).thenReturn(definition);
         when(planItems.findByCase("case-1")).thenReturn(List.of());
         CaseService service = new CaseService(cases, definitions, planItems,
-                mock(MilestoneRepository.class), mock(ParticipantRepository.class),
-                new CaseOrchestrationRegistry(List.of(orchestration)),
-                mock(StageCompletion.class), mock(TransitionApplier.class), events, "engine-a");
+                mock(ParticipantRepository.class), new CaseOrchestrationRegistry(List.of(orchestration)),
+                events, "engine-a");
 
         service.cancel("case-1", 4, "requested", new Actor("alice", List.of()));
 
@@ -61,6 +58,7 @@ class CaseServiceSynchronousCancellationTest {
         order.verify(cases).require("case-1");
         order.verify(orchestration).onCaseCancelled(original, "requested");
         order.verify(cases).require("case-1");
+        verify(planItems, never()).findByCase("case-1");
     }
 
     @Test
@@ -82,9 +80,8 @@ class CaseServiceSynchronousCancellationTest {
         when(definitions.require("definition:1")).thenReturn(definition);
         when(planItems.findByCase("case-1")).thenReturn(List.of());
         CaseService service = new CaseService(cases, definitions, planItems,
-                mock(MilestoneRepository.class), mock(ParticipantRepository.class),
-                new CaseOrchestrationRegistry(List.of(orchestration)),
-                mock(StageCompletion.class), mock(TransitionApplier.class), events, "engine-a");
+                mock(ParticipantRepository.class), new CaseOrchestrationRegistry(List.of(orchestration)),
+                events, "engine-a");
 
         assertThatThrownBy(() -> service.cancel("case-1", 4, "duplicate",
                 new Actor("alice", List.of())))

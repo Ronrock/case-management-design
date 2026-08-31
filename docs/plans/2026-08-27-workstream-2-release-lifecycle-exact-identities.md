@@ -1,5 +1,8 @@
 # Workstream 2: Release Lifecycle and Exact Engine Identities Implementation Plan
 
+> **Superseded assumption:** The later BPMN-only decision removed `PLAN_MODEL`; compatibility
+> requirements below are historical. Exact release identity now applies to BPMN only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ensure a new case can start only from a fully validated active binding and always runs the exact Operaton process definition approved in that binding.

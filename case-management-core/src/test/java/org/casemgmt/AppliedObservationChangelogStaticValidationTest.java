@@ -179,6 +179,8 @@ class AppliedObservationChangelogStaticValidationTest {
         var production = parsedChanges().stream()
                 .dropWhile(change -> !"cm-production-engine-command-columns-guard"
                         .equals(change.getId()))
+                .takeWhile(change -> !"cm-bpmn-only-legacy-preflight"
+                        .equals(change.getId()))
                 .toList();
 
         assertThat(production).extracting(change -> change.getId())

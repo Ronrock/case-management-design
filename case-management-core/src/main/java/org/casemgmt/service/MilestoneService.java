@@ -16,9 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Manual milestone achievement (spec §4.10) — a milestone that is not reached automatically by
- * plan-item transitions (see {@code TransitionApplier#achieveMilestone} for that path) but
- * marked achieved directly by a user action.
+ * Manual achievement of an engine-projected milestone (spec §4.10).
  *
  * <p><b>Concurrent double-achieve is safe by construction.</b> {@link MilestoneRepository#achieve}
  * is the sole source of truth for "did THIS call just achieve it": its {@code UPDATE ... WHERE

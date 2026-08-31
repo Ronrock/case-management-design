@@ -291,7 +291,7 @@ public class CaseDefinitionRepository {
      * version-pinned and tenant-scoped: no {@code ORDER BY VERSION_NO_} to drift under a later
      * deploy, and no cross-tenant row to pick by accident. Callers already hold the id —
      * {@code CM_CASE.CASE_DEF_ID_} is stamped at case creation and is what
-     * {@code CaseService.snapshot} resolves the whole plan model through.
+     * {@code CaseService.snapshot} uses to resolve the pinned contract and projected work.
      *
      * <p>Deliberately a separate name rather than an overload of {@link #formSchema}: both take
      * two {@code String}s, so an overload would be indistinguishable at the call site — exactly

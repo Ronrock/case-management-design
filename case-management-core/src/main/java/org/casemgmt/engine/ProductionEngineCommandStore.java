@@ -94,13 +94,13 @@ public class ProductionEngineCommandStore {
         submit(new ProductionCommandRequest(
                 c.id(), c.caseId(), tenant, c.id(), "legacy-runtime:" + c.id(),
                 c.type(), c.payload(), legacyTarget(c),
-                null, null, null, OffsetDateTime.now()));
+                null, null, null, OffsetDateTime.now(clock)));
     }
 
     /** Transitional PoC dispatcher adapter; production callers retain the returned lease token. */
     @Deprecated(forRemoval = false)
     public List<EngineCommand> claimDue(int limit) {
-        OffsetDateTime now = OffsetDateTime.now();
+        OffsetDateTime now = OffsetDateTime.now(clock);
         recoverExpiredLeases(now);
         return claimDue("legacy-dispatcher:" + UUID.randomUUID(), limit, now, CLAIM_LEASE)
                 .stream().map(leased -> {

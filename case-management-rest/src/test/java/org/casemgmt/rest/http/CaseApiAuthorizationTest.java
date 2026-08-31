@@ -262,6 +262,10 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");
         Map<String, Object> body = Map.of("processDefinitionKey", "some-process");
+        List<Map<String, Object>> before = (List<Map<String, Object>>) alice().get()
+                .uri("/cases/{id}/processes", caseId).retrieve().toEntity(List.class).getBody();
+        assertThat(before).singleElement()
+                .satisfies(p -> assertThat(p).containsEntry("processDefinitionKey", DEFINITION_KEY));
 
         ResponseEntity<Map> refused = client("carol").post().uri("/cases/{id}/processes", caseId)
                 .header("If-Match", "\"0\"")
@@ -270,14 +274,18 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         assertThat(refused.getStatusCode().value()).isEqualTo(409);
         assertThat(refused.getBody()).containsEntry("code", "action-not-available");
 
-        assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseId)
-                .retrieve().toEntity(List.class).getBody()).isEmpty();
+        assertThat((List<Map<String, Object>>) alice().get().uri("/cases/{id}/processes", caseId)
+                .retrieve().toEntity(List.class).getBody())
+                .extracting(p -> p.get("id")).containsExactlyElementsOf(
+                        before.stream().map(p -> p.get("id")).toList());
 
         ResponseEntity<Map> allowed = alice().post().uri("/cases/{id}/processes", caseId)
                 .header("If-Match", "\"0\"")
                 .contentType(MediaType.APPLICATION_JSON).body(body)
                 .retrieve().toEntity(Map.class);
         assertThat(allowed.getStatusCode().value()).isEqualTo(201);
+        assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseId)
+                .retrieve().toEntity(List.class).getBody()).hasSize(2);
     }
 
     @Test
@@ -326,7 +334,7 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         deployDefinition();
 
         ResponseEntity<Map> deploy = client("carol").post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON).body(definitionJson())
+                .contentType(MediaType.valueOf("application/zip")).body(definitionArchive())
                 .retrieve().toEntity(Map.class);
         assertThat(deploy.getStatusCode().value()).isEqualTo(409);
         assertThat(deploy.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
@@ -352,7 +360,7 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
 
         // alice, who is admin, does both on the same URLs with the same bodies.
         assertThat(alice().post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON).body(definitionJson())
+                .contentType(MediaType.valueOf("application/zip")).body(definitionArchive())
                 .retrieve().toEntity(Map.class).getStatusCode().value()).isEqualTo(201);
         assertThat(alice().post().uri("/webhooks").contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("url", "https://alice.test/hook", "eventTypes", List.of("case.created")))
@@ -510,6 +518,12 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
 
         String foreignPlanItemId = (String) planItems(caseB).get(0).get("id");
         String ownPlanItemId = (String) planItems(caseA).get(0).get("id");
+        List<?> caseAProcessesBefore = alice().get().uri("/cases/{id}/processes", caseA)
+                .retrieve().toEntity(List.class).getBody();
+        List<?> caseBProcessesBefore = alice().get().uri("/cases/{id}/processes", caseB)
+                .retrieve().toEntity(List.class).getBody();
+        assertThat(caseAProcessesBefore).hasSize(1);
+        assertThat(caseBProcessesBefore).hasSize(1);
 
         ResponseEntity<Map> refused = alice().post().uri("/cases/{id}/processes", caseA)
                 .header("If-Match", "\"0\"")
@@ -522,11 +536,11 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         assertThat(refused.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
         assertThat(refused.getBody()).containsEntry("code", "wrong-case");
 
-        // No row was written to either case.
+        // No child row was written to either case; each still has only its BPMN root process.
         assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseA)
-                .retrieve().toEntity(List.class).getBody()).isEmpty();
+                .retrieve().toEntity(List.class).getBody()).hasSize(1);
         assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseB)
-                .retrieve().toEntity(List.class).getBody()).isEmpty();
+                .retrieve().toEntity(List.class).getBody()).hasSize(1);
 
         // An id that names no plan item at all gets the identical answer — no existence oracle.
         ResponseEntity<Map> unknown = alice().post().uri("/cases/{id}/processes", caseA)

@@ -1,5 +1,8 @@
 # Workstream 8: Production Verification and Release Readiness Implementation Plan
 
+> **Superseded assumption:** The later BPMN-only decision removed `PLAN_MODEL`; compatibility
+> gates below are historical. The current gate proves rejection/preflight behavior instead.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Produce objective evidence that the complete BPMN-first pull request is safe to migrate, operate, roll back, and merge for embedded and remote modes.

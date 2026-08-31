@@ -89,8 +89,8 @@ The final request binds exact release IDs:
 }
 ```
 
-Publication and binding require the `admin` group. Legacy plan-model JSON continues to use the
-same top-level POST with `Content-Type: application/json`.
+Publication and binding require the `admin` group. The top-level publication endpoint accepts a
+combined BPMN ZIP; legacy plan-model JSON is rejected.
 
 ## Create and read cases
 
@@ -139,8 +139,8 @@ Content-Type: application/json
 {"reason":"withdrawn"}
 ```
 
-Cancellation cancels a BPMN root process and terminalizes remaining projected/ad-hoc work. The
-explicit `/close` endpoint is for legacy plan-model cases when their required work is finished.
+Cancellation cancels the BPMN root process. The explicit `/close` endpoint is not supported;
+authoritative root-process completion closes the case.
 
 ## Work with tasks
 

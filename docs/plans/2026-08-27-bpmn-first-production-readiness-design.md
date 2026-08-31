@@ -2,6 +2,12 @@
 
 **Status:** Proposed decision document
 
+> **Decision update (29 August 2026):** The compatibility assumption in this document was
+> superseded after confirming the library has no plan-model consumers. The accepted delivery is
+> BPMN-only; see
+> [`2026-08-29-bpmn-only-production-delivery-design.md`](../superpowers/specs/2026-08-29-bpmn-only-production-delivery-design.md).
+> References below to preserving `PLAN_MODEL` describe the earlier option, not current behavior.
+
 **Date:** 27 August 2026
 
 **Scope:** Pull request [#89 — BPMN-first orchestration](https://github.com/Ronrock/case-management-design/pull/89)

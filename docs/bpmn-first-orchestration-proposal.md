@@ -1,9 +1,8 @@
 # BPMN-First Case Orchestration — Accepted Architecture
 
-Operaton is the orchestrator of record for BPMN-backed cases. Existing JSON plan-model case
-definitions remain supported and are not migrated automatically. Both modes continue to expose the
-same case API resources, actions, authorization rules, audit events, search, SLA, and presentation
-contracts.
+Operaton is the sole orchestrator of record. The later BPMN-only decision removed the unused JSON
+plan-model runtime because the library has no consumers. Existing installations are protected by
+an upgrade preflight that stops when active legacy rows exist; they are never silently converted.
 
 Status: accepted for incremental implementation. Companion documents:
 
@@ -25,8 +24,8 @@ does not redeploy BPMN or mutate the contract. A combined ZIP remains the conven
 format, but it publishes immutable releases and creates a version that binds their exact ids and
 content hashes; it is not an inseparable runtime bundle.
 
-Legacy `POST /case-api/v2/case-definitions` with `application/json` keeps its current plan-model
-semantics. The same endpoint accepts `application/zip` for the combined BPMN publication flow.
+`POST /case-api/v2/case-definitions` accepts `application/zip` for the combined BPMN publication
+flow. Direct `application/json` plan-model publication is rejected.
 Independent publication uses:
 
 ```text
@@ -62,15 +61,11 @@ Publication rejects unsafe or inconsistent artifacts, including:
 Running cases pin exact orchestration and contract releases. A presentation release may advance
 only after compatibility validation against the pinned contract.
 
-## Dual orchestration
+## BPMN-only orchestration
 
-`OrchestrationMode` has `PLAN_MODEL` and `BPMN`. A `CaseOrchestration` SPI is selected from the
-case's pinned definition version:
-
-- `PlanModelOrchestration` wraps today's evaluator, instantiator, and transition behavior. Its
-  characterization suite prevents migration work from changing existing case behavior.
-- `BpmnOrchestration` starts and cancels the root process, exposes engine-backed actions, and
-  accepts engine observations through vendor-neutral core ports.
+`OrchestrationMode` accepts only `BPMN`. `BpmnOrchestration` starts and cancels the root process,
+exposes engine-backed actions, and accepts engine observations through vendor-neutral core ports.
+The contract cannot define a parallel lifecycle, task activation rules, gateways, or timers.
 
 Engine integration is split into command and observation operations. Commands cover deploy,
 start/cancel, claim/complete, message correlation, and migration. Observations cover active

@@ -292,7 +292,8 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                         "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_CLAIM_TOKEN_='forged', "
                                 + "RAW_LEGACY_CLAIMED_AT_=SYSTIMESTAMP WHERE ID_='pending'"),
                 Arguments.of("retrying due time", "retrying",
-                        "UPDATE CM_ENGINE_COMMAND SET NEXT_ATTEMPT_AT_=NULL WHERE ID_='retrying'"),
+                        "UPDATE CM_ENGINE_COMMAND SET NEXT_ATTEMPT_AT_="
+                                + "NEXT_ATTEMPT_AT_ + INTERVAL '1' SECOND WHERE ID_='retrying'"),
                 Arguments.of("claimed claim tuple", "claimed",
                         "UPDATE CM_ENGINE_COMMAND SET RAW_LEGACY_CLAIM_TOKEN_=NULL, "
                                 + "RAW_LEGACY_CLAIMED_AT_=NULL WHERE ID_='claimed'"),
@@ -314,8 +315,9 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
                                 + "MIGRATION_BASELINE_DECIDED_AT_ + INTERVAL '1' SECOND "
                                 + "WHERE ID_='claimed'"),
                 Arguments.of("done confirmation time", "done",
-                        "UPDATE CM_ENGINE_COMMAND SET CONFIRMED_AT_=CONFIRMED_AT_ + INTERVAL '1' SECOND "
-                                + "WHERE ID_='done'"),
+                        "UPDATE CM_ENGINE_COMMAND SET CONFIRMED_AT_="
+                                + "CONFIRMED_AT_ + INTERVAL '1' SECOND, DECIDED_AT_="
+                                + "DECIDED_AT_ + INTERVAL '1' SECOND WHERE ID_='done'"),
                 Arguments.of("pending deterministic binding", "pending",
                         "UPDATE CM_ENGINE_COMMAND SET IDEMPOTENCY_KEY_='forged' WHERE ID_='pending'"),
                 Arguments.of("pending marker-only evolution", "pending",
@@ -354,11 +356,12 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         DataSource scenario = recreateBaseline();
         updateNext(scenario, malformed.prefix);
         JdbcClient jdbc = JdbcClient.create(scenario);
+        Integer guardExecutionBefore = changeSetExecution(jdbc, malformed.guard);
         installMalformed(jdbc, malformed);
 
         assertThatThrownBy(() -> migrate(scenario))
                 .hasStackTraceContaining("incompatible");
-        assertThat(appliedChangeSets(jdbc)).doesNotContain(malformed.guard);
+        assertThat(changeSetExecution(jdbc, malformed.guard)).isEqualTo(guardExecutionBefore);
     }
 
     @ParameterizedTest(name = "final production guard rejects post-apply drift: {0}")
@@ -629,7 +632,7 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         try (Connection connection = scenario.getConnection()) {
             var database = DatabaseFactory.getInstance()
                     .findCorrectDatabaseImplementation(new JdbcConnection(connection));
-            try (var liquibase = new Liquibase(MASTER,
+            try (var liquibase = new Liquibase(CHANGELOG,
                     new ClassLoaderResourceAccessor(), database)) {
                 liquibase.update(count, new Contexts(), new LabelExpression());
             }
@@ -660,6 +663,14 @@ class EngineCommandMigrationRestartIntegrationTest extends OracleTestBase {
         return jdbc.sql("""
                 SELECT ID FROM DATABASECHANGELOG WHERE FILENAME=:filename ORDER BY ORDEREXECUTED
                 """).param("filename", CHANGELOG).query(String.class).list();
+    }
+
+    private static Integer changeSetExecution(JdbcClient jdbc, String id) {
+        return jdbc.sql("""
+                SELECT ORDEREXECUTED FROM DATABASECHANGELOG
+                WHERE FILENAME=:filename AND ID=:id
+                """).param("filename", CHANGELOG).param("id", id)
+                .query(Integer.class).optional().orElse(null);
     }
 
     private static void dropSchema(Connection system) throws SQLException {

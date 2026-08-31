@@ -114,16 +114,16 @@ public class PocBootstrap {
      * Fix round 1, Minor (review): this method used to guard its ENTIRE body on one check
      * ({@code calendarIdOf("sla-complaint") != null}, i.e. "does the policy row already exist").
      * A crash between {@code insertCalendar} and {@code insertPolicy} — plausible on any real
-     * restart, not a contrived scenario — left {@code cal-nl} inserted but {@code sla-complaint}
+     * restart, not a contrived scenario — left {@code nl-business} inserted but {@code sla-complaint}
      * not, and on the NEXT startup that single guard read as "not seeded yet", so it tried {@code
-     * insertCalendar("cal-nl", ...)} again and hit {@code CM_BUSINESS_CALENDAR}'s primary key.
+     * insertCalendar("nl-business", ...)} again and hit {@code CM_BUSINESS_CALENDAR}'s primary key.
      * Each of the four rows is now guarded independently, so seeding can resume from wherever a
      * previous run actually stopped rather than only ever from "nothing" or "everything".
      */
     private void seedSla(SlaRepository sla) {
-        if (sla.calendarDefinition("cal-nl").isEmpty()) {
+        if (sla.calendarDefinition("nl-business").isEmpty()) {
             Map<String, Object> workday = Map.of("from", "09:00", "to", "17:00");
-            sla.insertCalendar("cal-nl", Map.of(
+            sla.insertCalendar("nl-business", Map.of(
                     "timezone", "Europe/Amsterdam",
                     "workingHours", Map.of(
                             "MONDAY", List.of(workday), "TUESDAY", List.of(workday),
@@ -133,7 +133,7 @@ public class PocBootstrap {
         }
 
         if (sla.calendarIdOf("sla-complaint") == null) {
-            sla.insertPolicy("sla-complaint", "Complaint SLA", null, "cal-nl");
+            sla.insertPolicy("sla-complaint", "Complaint SLA", null, "nl-business");
         }
 
         Set<String> existingTargets = sla.targetsFor("sla-complaint").stream()

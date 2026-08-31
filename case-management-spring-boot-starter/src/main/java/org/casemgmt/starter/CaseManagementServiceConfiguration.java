@@ -33,7 +33,6 @@ import org.casemgmt.repo.ParticipantRepository;
 import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.repo.SlaRepository;
 import org.casemgmt.repo.WebhookRepository;
-import org.casemgmt.rules.StageCompletion;
 import org.casemgmt.service.CaseDefinitionService;
 import org.casemgmt.service.CaseDefinitionReleaseService;
 import org.casemgmt.service.CaseDefinitionVersionService;
@@ -47,7 +46,6 @@ import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.service.CaseDataMappingService;
 import org.casemgmt.service.ContractCaseDataMappingService;
 import org.casemgmt.service.MilestoneService;
-import org.casemgmt.service.TransitionApplier;
 import org.casemgmt.service.AdHocActionService;
 import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
 import org.casemgmt.service.OrchestrationDeploymentReportService;
@@ -125,23 +123,13 @@ public class CaseManagementServiceConfiguration {
         return new EventPublisher(events, audit, webhooks, prefix, props.getEngineId());
     }
 
-    @Bean
-    public TransitionApplier transitionApplier(PlanItemRepository planItems, CaseTaskRepository tasks,
-                                               LinkedProcessRepository linkedProcesses,
-                                               MilestoneRepository milestones,
-                                               EngineGateway engine, EventPublisher publisher) {
-        return new TransitionApplier(planItems, tasks, linkedProcesses, milestones, engine, publisher);
-    }
-
     @Bean(name = "caseManagementCaseService")
     public CaseService caseService(CaseRepository cases, CaseDefinitionRepository definitions,
-                                   PlanItemRepository planItems, MilestoneRepository milestones,
-                                   ParticipantRepository participants,
-                                   CaseOrchestrationRegistry orchestrations, StageCompletion completion,
-                                   TransitionApplier applier, EventPublisher publisher,
+                                   PlanItemRepository planItems, ParticipantRepository participants,
+                                   CaseOrchestrationRegistry orchestrations, EventPublisher publisher,
                                    CaseManagementProperties props) {
-        return new CaseService(cases, definitions, planItems, milestones, participants,
-                orchestrations, completion, applier, publisher, props.getEngineId());
+        return new CaseService(cases, definitions, planItems, participants,
+                orchestrations, publisher, props.getEngineId());
     }
 
     @Bean

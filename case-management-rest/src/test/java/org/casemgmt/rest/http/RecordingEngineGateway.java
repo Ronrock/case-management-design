@@ -38,13 +38,14 @@ class RecordingEngineGateway implements EngineGateway {
     @Override
     public EngineProcessRef startProcess(StartProcessRequest request) {
         return new EngineProcessRef("engine-proc-" + ids.incrementAndGet(),
-                request.processDefinitionKey());
+                request.processDefinitionId(), request.processDefinitionKey(), request.caseId());
     }
 
     @Override
     public EngineProcessRef startProcessByKey(org.casemgmt.engine.StartProcessByKeyRequest request) {
         return new EngineProcessRef("engine-proc-" + ids.incrementAndGet(),
-                request.processDefinitionKey());
+                "definition:" + request.processDefinitionKey() + ":1",
+                request.processDefinitionKey(), request.caseId());
     }
 
     @Override

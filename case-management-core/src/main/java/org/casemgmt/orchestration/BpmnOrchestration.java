@@ -4,17 +4,11 @@ import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.domain.CaseIds;
 import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CaseTask;
-import org.casemgmt.domain.PlanItem;
-import org.casemgmt.domain.PlanItemDefinition;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.EngineProcessRef;
 import org.casemgmt.engine.StartProcessRequest;
 import org.casemgmt.repo.LinkedProcessRepository;
-import org.casemgmt.rules.CaseSnapshot;
-import org.casemgmt.rules.Transition;
-
 import java.time.OffsetDateTime;
-import java.util.List;
 
 /** Root-process lifecycle for BPMN-backed cases; work is supplied by engine observations. */
 public final class BpmnOrchestration implements CaseOrchestration {
@@ -33,11 +27,6 @@ public final class BpmnOrchestration implements CaseOrchestration {
     @Override
     public OrchestrationMode mode() {
         return OrchestrationMode.BPMN;
-    }
-
-    @Override
-    public List<PlanItem> initialItems(String caseId, CaseDefinition definition) {
-        return List.of();
     }
 
     @Override
@@ -82,18 +71,4 @@ public final class BpmnOrchestration implements CaseOrchestration {
                 });
     }
 
-    @Override
-    public List<Transition> evaluate(CaseSnapshot snapshot) {
-        return List.of();
-    }
-
-    @Override
-    public List<PlanItemDefinition> repeatable(CaseSnapshot snapshot) {
-        return List.of();
-    }
-
-    @Override
-    public PlanItem repeat(PlanItem previous, PlanItemDefinition definition) {
-        throw new UnsupportedOperationException("BPMN repetition is projected from engine activity instances");
-    }
 }
