@@ -90,7 +90,7 @@ This section assesses every row in the source summary table. Detailed FR referen
 | Case Creation | 0 | **Partially supported** | Authorized applications can create a case by API with type, business key, title, priority, and data. The delivered UI and inbound business-event initiation path are missing. See FR-02. |
 | Case Level Actions | 2 | **Partially supported** | Update and cancel are available for eligible active cases. Case pause/resume and case linking do not exist; normal completion is controlled by the BPMN root process. See FR-03 and FR-05. |
 | Linked Cases | 3 | **Not supported** | A target database table exists, but there is no production case-link repository, service, API, or UI. Linked processes are not linked cases. |
-| Manual intervention / ad-hoc Actions | — | **Partially supported** | Predeclared, role-controlled ad-hoc task/process/message actions can execute in both engine modes. They are not exposed as discoverable case actions in the delivered UI/API response. |
+| Manual intervention / ad-hoc Actions | — | **Partially supported** | Predeclared, role-controlled ad-hoc process/message actions can execute in both engine modes. Human-task activation remains BPMN-only. They are not exposed as discoverable case actions in the delivered UI/API response. |
 
 Supporting evidence for these cross-cutting conclusions includes automatic owner creation and root-process start in [`CaseService.java`](../case-management-core/src/main/java/org/casemgmt/service/CaseService.java#L57-L89), participant role storage in [`ParticipantRepository.java`](../case-management-core/src/main/java/org/casemgmt/repo/ParticipantRepository.java#L18-L42), typed SLA scopes in [`case-contract-v1.schema.json`](../case-management-core/src/main/resources/schemas/case-contract-v1.schema.json#L121-L142), and ad-hoc execution in [`AdHocActionService.java`](../case-management-core/src/main/java/org/casemgmt/service/AdHocActionService.java#L76-L174).
 
@@ -134,16 +134,16 @@ Supporting evidence for these cross-cutting conclusions includes automatic owner
 
 **Verdict: Partially supported.**
 
-**How it is supported today:** A user can open a known case, create another case, and execute a preconfigured ad-hoc action that creates a task for candidate groups. Valid actions are computed from case/task state and caller rights.
+**How it is supported today:** A user can open a known case, create another case, and execute a preconfigured ad-hoc process or message action. Valid actions are computed from case/task state and caller rights.
 
-**Technical implementation:** Case reads are available through the case controller. The policy currently advertises only update and cancel for an eligible active case ([`ActionPolicy.java`](../case-management-rest/src/main/java/org/casemgmt/rest/policy/ActionPolicy.java#L33-L45)). Declarative ad-hoc actions can create a task, start an exact process release, or correlate a message ([`AdHocActionService.java`](../case-management-core/src/main/java/org/casemgmt/service/AdHocActionService.java#L151-L174)).
+**Technical implementation:** Case reads are available through the case controller. The policy currently advertises only update and cancel for an eligible active case ([`ActionPolicy.java`](../case-management-rest/src/main/java/org/casemgmt/rest/policy/ActionPolicy.java#L33-L45)). Declarative ad-hoc actions can start an exact process release or correlate a message; contracts cannot activate human tasks ([`AdHocActionService.java`](../case-management-core/src/main/java/org/casemgmt/service/AdHocActionService.java#L151-L174)).
 
 **Honest limitations:**
 
 - No related-case discovery or decision screen exists.
 - No case-to-case link model, service, endpoint, or navigation exists.
 - Case pause/resume is absent. SLA pause/resume is a different capability.
-- “Create task for another user/team” is limited to a predeclared candidate-group action; free assignment is not supported.
+- Contract actions cannot create a human task; task activation must be modeled in BPMN. Free assignment is not supported.
 - Ad-hoc actions are executable by known ID but are not included in case `availableActions`, so discovery is incomplete.
 
 **Design decision and implication:** The system does not allow arbitrary runtime work creation; discretionary actions must be declared, authorized, form-validated, and optionally mapped to engine data. That improves control and auditability but is less flexible than the requirement implies.
@@ -152,14 +152,14 @@ Supporting evidence for these cross-cutting conclusions includes automatic owner
 
 **Verdict: Partially supported.**
 
-**How it is supported today:** A case coordinates a tree of stages, human tasks, process tasks, and milestones. Completing work can advance BPMN and update projected stage/case lifecycle state.
+**How it is supported today:** A case exposes flat observed task, activity/stage, milestone, and linked-process projections. Completing engine work can advance BPMN and update those projections.
 
 **Technical implementation:** BPMN is the sole authority for stage/task sequencing and lifecycle. The observation handler turns neutral engine task, activity, and milestone facts into projection inputs ([`DefaultEngineObservationHandler.java`](../case-management-core/src/main/java/org/casemgmt/observation/DefaultEngineObservationHandler.java#L186-L256)); the projection port upserts the corresponding task, stage, and milestone read-model rows ([`JdbcCaseProjectionPort.java`](../case-management-core/src/main/java/org/casemgmt/projection/JdbcCaseProjectionPort.java#L102-L163)).
 
 **Honest limitations:**
 
 - “Business module” is not a first-class entity or reusable aggregate.
-- A task links to a case and optional plan item, not a business module.
+- A task links to a case and optional observed plan-item projection, not a business module.
 - There is no aggregate progress percentage/score; clients see individual states.
 - Plan items are engine projections and cannot be manually transitioned through the API ([`PlanItemController.java`](../case-management-rest/src/main/java/org/casemgmt/rest/controller/PlanItemController.java#L16-L38)).
 

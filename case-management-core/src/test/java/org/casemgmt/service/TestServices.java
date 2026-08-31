@@ -152,7 +152,7 @@ public final class TestServices {
         JdbcClient jdbc = JdbcClient.create(dataSource);
         var publisher = new EventPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
                 new WebhookRepository(jdbc), "org.example.cm", "eng-test");
-        return new MilestoneService(new MilestoneRepository(jdbc), new CaseRepository(jdbc), publisher);
+        return new MilestoneService(new MilestoneRepository(jdbc));
     }
 
     public static LinkedProcessService processService(DataSource dataSource, EngineGateway gateway) {

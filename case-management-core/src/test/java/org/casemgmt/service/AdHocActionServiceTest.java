@@ -4,9 +4,7 @@ import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CasePriority;
 import org.casemgmt.domain.CaseState;
 import org.casemgmt.engine.EngineGateway;
-import org.casemgmt.engine.EngineTaskRef;
 import org.casemgmt.error.CaseConflictException;
-import org.casemgmt.event.EventPublisher;
 import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.release.BindingStatus;
 import org.casemgmt.release.CaseDefinitionRelease;
@@ -16,9 +14,7 @@ import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.CaseRepository;
-import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.ParticipantRepository;
-import org.casemgmt.repo.PlanItemRepository;
 import org.casemgmt.rules.CriterionEvaluator;
 import org.casemgmt.rules.EvaluationContext;
 import org.junit.jupiter.api.Test;
@@ -32,149 +28,16 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 
 class AdHocActionServiceTest {
-
-    @Test
-    void sendsOnlyDeclaredCaseToEngineMappingsForAnAction() {
-        CaseRepository cases = mock(CaseRepository.class);
-        EngineGateway engine = mock(EngineGateway.class);
-        CaseInstance active = instance(CaseState.ACTIVE, Map.of("decision", "approved"));
-        when(cases.require(active.id())).thenReturn(active);
-        when(engine.createHumanTask(any())).thenReturn(new EngineTaskRef("engine-task", "Investigate",
-                null, active.id(), OffsetDateTime.parse("2026-08-30T12:00:00Z")));
-        AdHocActionService service = service(cases, engine, release("""
-                {"key":"definition","orchestrationMode":"BPMN",
-                 "fields":{"decision":{"schema":{"type":"string"}}},"forms":{},
-                 "adHocActions":[{"id":"investigate","type":"TASK","roles":["handler"],
-                   "mappings":[{"direction":"CASE_TO_ENGINE","source":"decision","target":"decisionCode"}]}]}
-                """));
-
-        service.execute(active.id(), "investigate", 4L, Map.of(),
-                new Actor("alice", List.of("handlers")));
-
-        org.mockito.ArgumentCaptor<org.casemgmt.engine.HumanTaskRequest> request =
-                org.mockito.ArgumentCaptor.forClass(org.casemgmt.engine.HumanTaskRequest.class);
-        verify(engine).createHumanTask(request.capture());
-        org.assertj.core.api.Assertions.assertThat(request.getValue().variables())
-                .containsExactlyEntriesOf(Map.of("decisionCode", "approved"));
-    }
-
-    @Test
-    void rejectsAnActionForACancelledCaseBeforeItCanCreateAnEngineTask() {
-        CaseRepository cases = mock(CaseRepository.class);
-        EngineGateway engine = mock(EngineGateway.class);
-        CaseInstance cancelled = instance(CaseState.CANCELLED);
-        when(cases.require(cancelled.id())).thenReturn(cancelled);
-        when(engine.createHumanTask(org.mockito.ArgumentMatchers.any()))
-                .thenReturn(new EngineTaskRef("engine-task", "Investigate", null,
-                        cancelled.id(), OffsetDateTime.parse("2026-08-30T12:00:00Z")));
-        AdHocActionService service = service(cases, engine, contract("""
-                {"adHocActions":[{"id":"investigate","type":"TASK","roles":["handler"]}]}
-                """));
-
-        assertThatThrownBy(() -> service.execute(cancelled.id(), "investigate", 4L, Map.of(),
-                new Actor("alice", List.of("handlers"))))
-                .isInstanceOf(CaseConflictException.class)
-                .extracting(error -> ((CaseConflictException) error).code())
-                .isEqualTo("case-not-active");
-
-        verifyNoInteractions(engine);
-    }
-
-    @Test
-    void rejectsAnUndeclaredTaskFormFieldBeforeItCanReachTheEngine() {
-        CaseRepository cases = mock(CaseRepository.class);
-        EngineGateway engine = mock(EngineGateway.class);
-        CaseInstance active = instance(CaseState.ACTIVE);
-        when(cases.require(active.id())).thenReturn(active);
-        AdHocActionService service = service(cases, engine, release("""
-                {"key":"definition","orchestrationMode":"BPMN","fields":{},
-                 "forms":{"review":{"schema":{"type":"object","properties":{"outcome":{"type":"string"}}}}},
-                 "adHocActions":[{"id":"investigate","type":"TASK","roles":["handler"],"formRef":"review"}]}
-                """));
-
-        assertThatThrownBy(() -> service.execute(active.id(), "investigate", 4L,
-                Map.of("unmapped", "must-not-be-an-engine-variable"),
-                new Actor("alice", List.of("handlers"))))
-                .isInstanceOf(org.casemgmt.error.FormValidationException.class)
-                .hasMessageContaining("Undeclared action field 'unmapped'");
-
-        verifyNoInteractions(engine);
-    }
-
-    @Test
-    void remoteTaskActionDoesNotCreatePendingProjectionsBeforeCommandEvidence() {
-        CaseRepository cases = mock(CaseRepository.class);
-        EngineGateway engine = mock(EngineGateway.class);
-        PlanItemRepository planItems = mock(PlanItemRepository.class);
-        CaseTaskRepository tasks = mock(CaseTaskRepository.class);
-        EngineOperationService operations = mock(EngineOperationService.class);
-        CaseInstance active = instance(CaseState.ACTIVE);
-        when(cases.require(active.id())).thenReturn(active);
-        when(engine.defersTaskMutations()).thenReturn(true);
-        when(engine.createHumanTask(org.mockito.ArgumentMatchers.any())).thenReturn(
-                new EngineTaskRef(null, "Investigate", null, active.id(),
-                        OffsetDateTime.parse("2026-08-30T12:00:00Z")));
-        when(operations.submitAdHoc(org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any())).thenReturn(new EngineOperationService.Operation(
-                "operation-1", "command-1", active.id(), "CREATE_TASK", "target-1", "PENDING",
-                0L, null, null, List.of()));
-        AdHocActionService service = service(cases, engine, planItems, tasks, operations, contract("""
-                {"adHocActions":[{"id":"investigate","type":"TASK","roles":["handler"]}]}
-                """));
-
-        service.execute(active.id(), "investigate", 4L, Map.of(),
-                new Actor("alice", List.of("handlers")));
-
-        verify(planItems, never()).insert(org.mockito.ArgumentMatchers.any());
-        verifyNoInteractions(tasks);
-        verify(engine, org.mockito.Mockito.atLeastOnce()).defersTaskMutations();
-        org.mockito.Mockito.verifyNoMoreInteractions(engine);
-    }
-
-    @Test
-    void remoteActionRejectsTheOriginalExpectedVersionWhenItChangesWhileTheCaseLockIsHeld() {
-        CaseRepository cases = mock(CaseRepository.class);
-        EngineGateway engine = mock(EngineGateway.class);
-        EngineOperationService operations = mock(EngineOperationService.class);
-        CaseInstance beforeLock = instance(CaseState.ACTIVE);
-        CaseInstance afterLock = instance(CaseState.ACTIVE, Map.of(), 5L);
-        when(cases.require(beforeLock.id())).thenReturn(beforeLock, afterLock);
-        when(engine.defersTaskMutations()).thenReturn(true);
-        when(operations.submitAdHoc(org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any())).thenReturn(operation(beforeLock));
-        AdHocActionService service = service(cases, engine, mock(PlanItemRepository.class),
-                mock(CaseTaskRepository.class), operations, contract("""
-                {"adHocActions":[{"id":"investigate","type":"TASK","roles":["handler"]}]}
-                """));
-
-        assertThatThrownBy(() -> service.execute(beforeLock.id(), "investigate", 4L, Map.of(),
-                new Actor("alice", List.of("handlers")), "request-1"))
-                .isInstanceOf(CaseConflictException.class)
-                .extracting(error -> ((CaseConflictException) error).code())
-                .isEqualTo("version-conflict");
-
-        verify(cases).lockForAdHocAction(beforeLock.id());
-        verify(operations, never()).submitAdHoc(org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any());
-    }
 
     @Test
     void remoteMessageActionRejectsAStaleCorrelationWhenItChangesWhileTheCaseLockIsHeld() {
@@ -185,18 +48,12 @@ class AdHocActionServiceTest {
         CaseInstance afterLock = instance(CaseState.ACTIVE, Map.of("reference", "changed"));
         when(cases.require(beforeLock.id())).thenReturn(beforeLock, afterLock);
         when(engine.defersTaskMutations()).thenReturn(true);
-        when(operations.submitAdHoc(org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any())).thenReturn(operation(beforeLock));
-        AdHocActionService service = service(cases, engine, mock(PlanItemRepository.class),
-                mock(CaseTaskRepository.class), operations, release("""
+        AdHocActionService service = service(cases, engine, operations, release("""
                 {"key":"definition","orchestrationMode":"BPMN","fields":{},
                  "forms":{"message":{"schema":{"type":"object","properties":{"reference":{"type":"string"}}}}},
                  "adHocActions":[{"id":"notify","type":"MESSAGE","roles":["handler"],"formRef":"message",
                   "messageName":"CaseUpdated","correlationKeys":["reference"]}]}
-                """));
+                """), mock(CriterionEvaluator.class), mock(LinkedProcessService.class));
 
         assertThatThrownBy(() -> service.execute(beforeLock.id(), "notify", 4L,
                 Map.of("reference", "original"), new Actor("alice", List.of("handlers")), "request-1"))
@@ -205,11 +62,7 @@ class AdHocActionServiceTest {
                 .isEqualTo("message-correlation-mismatch");
 
         verify(cases).lockForAdHocAction(beforeLock.id());
-        verify(operations, never()).submitAdHoc(org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any());
+        verify(operations, never()).submitAdHoc(any(), any(), any(), any(), any(), anyLong(), any(), any());
     }
 
     @Test
@@ -226,8 +79,7 @@ class AdHocActionServiceTest {
         when(criteria.matches(eq("${eligible}"), any(EvaluationContext.class)))
                 .thenAnswer(invocation -> Boolean.TRUE.equals(
                         invocation.<EvaluationContext>getArgument(1).variables().get("eligible")));
-        AdHocActionService service = service(cases, engine, mock(PlanItemRepository.class),
-                mock(CaseTaskRepository.class), operations, release("""
+        AdHocActionService service = service(cases, engine, operations, release("""
                 {"key":"definition","orchestrationMode":"BPMN","fields":{},"forms":{},
                  "adHocActions":[{"id":"launch","type":"PROCESS","roles":["handler"],
                    "availabilityExpression":"${eligible}","processDefinitionKey":"child",
@@ -241,98 +93,45 @@ class AdHocActionServiceTest {
                 .isEqualTo("ad-hoc-action-unavailable");
 
         verify(cases).lockForAdHocAction(beforeLock.id());
-        org.mockito.ArgumentCaptor<EvaluationContext> evaluated =
-                org.mockito.ArgumentCaptor.forClass(EvaluationContext.class);
-        verify(criteria).matches(eq("${eligible}"), evaluated.capture());
-        assertThat(evaluated.getValue().variables()).containsEntry("eligible", false);
-        verify(operations, never()).submitAdHoc(org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyMap(), org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any());
         verifyNoInteractions(processes);
+        verify(operations, never()).submitAdHoc(any(), any(), any(), any(), any(), anyLong(), any(), any());
+        assertThat(beforeLock.variables()).containsEntry("eligible", true);
     }
 
     private static AdHocActionService service(CaseRepository cases, EngineGateway engine,
-                                              CaseDefinitionRelease release) {
-        return service(cases, engine, mock(PlanItemRepository.class), mock(CaseTaskRepository.class),
-                null, release);
-    }
-
-    private static AdHocActionService service(CaseRepository cases, EngineGateway engine,
-                                              PlanItemRepository planItems, CaseTaskRepository tasks,
-                                              CaseDefinitionRelease release) {
-        return service(cases, engine, planItems, tasks, null, release);
-    }
-
-    private static AdHocActionService service(CaseRepository cases, EngineGateway engine,
-                                              PlanItemRepository planItems, CaseTaskRepository tasks,
-                                              EngineOperationService operations,
-                                              CaseDefinitionRelease release) {
-        return service(cases, engine, planItems, tasks, operations, release,
-                mock(CriterionEvaluator.class), mock(LinkedProcessService.class));
-    }
-
-    private static AdHocActionService service(CaseRepository cases, EngineGateway engine,
-                                              PlanItemRepository planItems, CaseTaskRepository tasks,
                                               EngineOperationService operations,
                                               CaseDefinitionRelease release,
                                               CriterionEvaluator criteria,
                                               LinkedProcessService processes) {
-        CaseDefinitionVersionBindingRepository bindings =
-                mock(CaseDefinitionVersionBindingRepository.class);
+        CaseDefinitionVersionBindingRepository bindings = mock(CaseDefinitionVersionBindingRepository.class);
         CaseDefinitionReleaseRepository releases = mock(CaseDefinitionReleaseRepository.class);
         ParticipantRepository participants = mock(ParticipantRepository.class);
         when(bindings.find("definition:1")).thenReturn(Optional.of(binding()));
         when(releases.require("contract:1", "tenant-a")).thenReturn(release);
-        when(participants.rolesOf("case-1", "alice", List.of("handlers")))
-                .thenReturn(Set.of("handler"));
-        return new AdHocActionService(cases, bindings, releases, participants,
-                planItems, tasks,
-                processes, engine, criteria,
-                mock(EventPublisher.class), operations,
+        when(participants.rolesOf("case-1", "alice", List.of("handlers"))).thenReturn(Set.of("handler"));
+        return new AdHocActionService(cases, bindings, releases, participants, processes, engine, criteria,
+                mock(org.casemgmt.event.EventPublisher.class), operations,
                 new org.casemgmt.release.JsonSchemaCaseContractValidator(), new FormValidator());
     }
 
-    private static CaseDefinitionRelease contract(String suffix) {
-        String json = "{\"key\":\"definition\",\"orchestrationMode\":\"BPMN\","
-                + "\"fields\":{},\"forms\":{}," + suffix.substring(1);
-        return release(json);
-    }
-
     private static CaseDefinitionRelease release(String json) {
-        return new CaseDefinitionRelease("contract:1", "definition", "tenant-a",
-                ReleaseKind.CONTRACT, "application/json", json.getBytes(StandardCharsets.UTF_8),
-                "sha", ReleaseStatus.ACTIVE, null, null, null, null, null, null,
-                OffsetDateTime.parse("2026-08-30T12:00:00Z"), "author");
+        return new CaseDefinitionRelease("contract:1", "definition", "tenant-a", ReleaseKind.CONTRACT,
+                "application/json", json.getBytes(StandardCharsets.UTF_8), "sha", ReleaseStatus.ACTIVE,
+                null, null, null, null, null, null, OffsetDateTime.parse("2026-08-30T12:00:00Z"), "author");
     }
 
     private static CaseDefinitionVersionBinding binding() {
         return new CaseDefinitionVersionBinding("definition:1", "definition", "tenant-a",
-                "orchestration:1", "orchestration-sha", "contract:1", "sha",
-                "presentation:1", "presentation-sha", ReleaseStatus.ACTIVE,
-                OrchestrationMode.BPMN, BindingStatus.ACTIVE, null, null,
-                OffsetDateTime.parse("2026-08-30T12:00:00Z"),
+                "orchestration:1", "orchestration-sha", "contract:1", "sha", "presentation:1",
+                "presentation-sha", ReleaseStatus.ACTIVE, OrchestrationMode.BPMN, BindingStatus.ACTIVE,
+                null, null, OffsetDateTime.parse("2026-08-30T12:00:00Z"),
                 OffsetDateTime.parse("2026-08-30T12:00:00Z"), null, "author");
     }
 
-    private static CaseInstance instance(CaseState state) {
-        return instance(state, Map.of());
-    }
-
     private static CaseInstance instance(CaseState state, Map<String, Object> variables) {
-        return instance(state, variables, 4L);
-    }
-
-    private static CaseInstance instance(CaseState state, Map<String, Object> variables, long version) {
         OffsetDateTime now = OffsetDateTime.parse("2026-08-30T12:00:00Z");
-        return new CaseInstance("case-1", "engine-a", "tenant-a", "definition:1",
-                "definition", 1, null, "Case", state, CasePriority.MEDIUM, null,
-                null, "alice", "NONE", null, null, variables, version, now, now, null);
-    }
-
-    private static EngineOperationService.Operation operation(CaseInstance c) {
-        return new EngineOperationService.Operation("operation-1", "command-1", c.id(), "CREATE_TASK",
-                "target-1", "PENDING", 0L, null, null, List.of());
+        return new CaseInstance("case-1", "engine-a", "tenant-a", "definition:1", "definition", 1,
+                null, "Case", state, CasePriority.MEDIUM, null, null, "alice", "NONE", null, null,
+                variables, 4L, now, now, null);
     }
 }

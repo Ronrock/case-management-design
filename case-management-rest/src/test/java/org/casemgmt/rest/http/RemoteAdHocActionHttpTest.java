@@ -169,7 +169,7 @@ class RemoteAdHocActionHttpTest extends CaseApiHttpTestBase {
 
     @SuppressWarnings("unchecked")
     private ResponseEntity<Map> execute(String user, String version, String key) {
-        return execute(user, version, key, "investigate");
+        return execute(user, version, key, "launch");
     }
 
     @SuppressWarnings("unchecked")
@@ -215,7 +215,6 @@ class RemoteAdHocActionHttpTest extends CaseApiHttpTestBase {
         return """
                 {"key":"remote-ad-hoc","orchestrationMode":"BPMN","roles":["handler"],"fields":{},"forms":{},
                  "adHocActions":[
-                   {"id":"investigate","type":"TASK","roles":["handler"]},
                    {"id":"launch","type":"PROCESS","roles":["handler"],"processDefinitionKey":"remote-ad-hoc","orchestrationReleaseId":"%s"},
                    {"id":"notify","type":"MESSAGE","roles":["handler"],"messageName":"notify"}
                  ]}

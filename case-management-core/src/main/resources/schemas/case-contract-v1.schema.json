@@ -165,17 +165,13 @@
     },
 
     "adHocAction": {
-      "description": "Discretionary work outside the BPMN token flow. 'type' discriminates into a closed variant, so a property belonging to another variant is a publication failure rather than a silently dropped instruction.",
+      "description": "Explicit external BPMN capabilities. Contracts cannot activate human tasks outside the BPMN token flow. 'type' discriminates into a closed variant, so a property belonging to another variant is a publication failure rather than a silently dropped instruction.",
       "type": "object",
       "required": ["id", "type", "roles"],
       "properties": {
-        "type": { "enum": ["TASK", "PROCESS", "MESSAGE"] }
+        "type": { "enum": ["PROCESS", "MESSAGE"] }
       },
       "allOf": [
-        {
-          "if": { "properties": { "type": { "const": "TASK" } }, "required": ["type"] },
-          "then": { "$ref": "#/$defs/taskAction" }
-        },
         {
           "if": { "properties": { "type": { "const": "PROCESS" } }, "required": ["type"] },
           "then": { "$ref": "#/$defs/processAction" }
@@ -185,23 +181,6 @@
           "then": { "$ref": "#/$defs/messageAction" }
         }
       ]
-    },
-
-    "taskAction": {
-      "additionalProperties": false,
-      "properties": {
-        "id": { "$ref": "#/$defs/identifier" },
-        "type": { "const": "TASK" },
-        "name": { "type": "string", "maxLength": 200 },
-        "description": { "type": "string", "maxLength": 2000 },
-        "roles": { "$ref": "#/$defs/requiredNameList" },
-        "formRef": { "$ref": "#/$defs/identifier" },
-        "candidateGroups": { "$ref": "#/$defs/nameList" },
-        "availabilityExpression": { "$ref": "#/$defs/expression" },
-        "taskType": { "$ref": "#/$defs/identifier" },
-        "mappings": { "type": "array", "items": { "$ref": "#/$defs/mapping" } },
-        "extensions": { "type": "object" }
-      }
     },
 
     "processAction": {

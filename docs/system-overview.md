@@ -119,7 +119,6 @@ The rows are read-only BPMN engine projections; the API exposes no manual transi
 | `GET` / `POST` | `/cases/{caseId}/documents` | Document metadata references; binary content remains in DMS/S3 |
 | `DELETE` | `/cases/{caseId}/documents/{documentId}` | Removes the case document reference |
 | `GET` | `/cases/{caseId}/milestones` | |
-| `POST` | `/cases/{caseId}/milestones/{milestoneId}/achieve` | Requires `If-Match` |
 | `GET` / `POST` | `/cases/{caseId}/processes` | `POST` accepts `planItemId`; requires `If-Match` |
 
 ### 3.5 SLA — `SlaController`
@@ -263,9 +262,10 @@ separate case lifecycle. `case-management-core` has a real `DataSourceTransactio
 
 ## 6. Engine integration
 
-`EngineGateway` is the only seam. Two implementations pass one shared contract suite
-(`EngineGatewayContract`), which is what makes two-mode equivalence a tested property rather than
-an assertion.
+Engine commands cross the `EngineGateway` seam. Engine facts enter separately through the
+observation ingress/handler seam, which validates ownership and updates read-model projections.
+The two command implementations pass one shared gateway contract suite (`EngineGatewayContract`);
+observation handling has its own neutral contracts.
 
 | Mode | Gateway | Transaction semantics |
 |---|---|---|

@@ -14,7 +14,7 @@ import java.util.Set;
  * need.
  *
  * <p>Everything here is immutable and already resolved: an ad-hoc action is a
- * {@link TaskAction}, {@link ProcessAction} or {@link MessageAction} rather than a map whose
+ * {@link ProcessAction} or {@link MessageAction} rather than a map whose
  * {@code type} string every caller has to re-switch on, and an SLA binding carries the id it was
  * keyed under so a cross-reference check needs no second pass over the raw document.
  *
@@ -215,22 +215,6 @@ public record ValidatedCaseContract(
         String availabilityExpression();
         /** Explicitly declared data movement for this action; no submitted field is implicit. */
         default List<MappingDefinition> mappings() { return List.of(); }
-    }
-
-    /** Creates a discretionary task. */
-    public record TaskAction(String id, String name, List<String> roles, String formRef,
-                             List<String> candidateGroups, String availabilityExpression,
-                             List<MappingDefinition> mappings)
-            implements AdHocActionDefinition {
-        public TaskAction {
-            roles = List.copyOf(roles);
-            candidateGroups = List.copyOf(candidateGroups);
-            mappings = List.copyOf(mappings);
-        }
-        public TaskAction(String id, String name, List<String> roles, String formRef,
-                          List<String> candidateGroups, String availabilityExpression) {
-            this(id, name, roles, formRef, candidateGroups, availabilityExpression, List.of());
-        }
     }
 
     /** Starts an explicitly permitted related process. */

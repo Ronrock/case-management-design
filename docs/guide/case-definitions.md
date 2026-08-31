@@ -213,11 +213,11 @@ calendar must exist operationally before cases depend on it.
 
 ### Ad-hoc actions
 
-Ad-hoc work is deliberately outside the BPMN token flow. Supported types are:
+Ad-hoc process and message requests are explicit external capabilities. They cannot activate a
+human task: that remains exclusively in the BPMN token flow. Supported types are:
 
 | Type | Required reference | Effect |
 |---|---|---|
-| `TASK` | Optional `formRef` and candidate groups | Requests a task through the normal engine command and observation path |
 | `PROCESS` | Exact active `orchestrationReleaseId` and `processDefinitionKey` | Requests the pinned discretionary process through the normal command path |
 | `MESSAGE` | `messageName` | Requests message correlation through the normal command path |
 
@@ -231,12 +231,12 @@ Example:
 
 ```json
 {
-  "id": "request-more-information",
-  "type": "TASK",
-  "name": "Request more information",
+  "id": "request-information-process",
+  "type": "PROCESS",
+  "name": "Request information",
   "roles": ["handler"],
-  "formRef": "requestInformationForm",
-  "candidateGroups": ["reviewers"],
+  "orchestrationReleaseId": "orchestration:request-information:1",
+  "processDefinitionKey": "request-information",
   "availabilityExpression": "${case.state == 'ACTIVE'}"
 }
 ```

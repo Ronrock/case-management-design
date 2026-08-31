@@ -28,8 +28,6 @@ public class AdHocActionService {
     private final CaseDefinitionVersionBindingRepository bindings;
     private final CaseDefinitionReleaseRepository releases;
     private final ParticipantRepository participants;
-    private final PlanItemRepository planItems;
-    private final CaseTaskRepository tasks;
     private final LinkedProcessService processes;
     private final EngineGateway engine;
     private final CriterionEvaluator criteria;
@@ -40,33 +38,29 @@ public class AdHocActionService {
 
     public AdHocActionService(CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
                               CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
-                              PlanItemRepository planItems, CaseTaskRepository tasks,
                               LinkedProcessService processes, EngineGateway engine,
                               CriterionEvaluator criteria, EventPublisher publisher) {
-        this(cases, bindings, releases, participants, planItems, tasks, processes, engine, criteria,
+        this(cases, bindings, releases, participants, processes, engine, criteria,
                 publisher, null, new JsonSchemaCaseContractValidator(), new FormValidator());
     }
 
     public AdHocActionService(CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
                               CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
-                              PlanItemRepository planItems, CaseTaskRepository tasks,
                               LinkedProcessService processes, EngineGateway engine,
                               CriterionEvaluator criteria, EventPublisher publisher,
                               CaseContractValidator contracts, FormValidator forms) {
-        this(cases, bindings, releases, participants, planItems, tasks, processes, engine, criteria,
+        this(cases, bindings, releases, participants, processes, engine, criteria,
                 publisher, null, contracts, forms);
     }
 
     public AdHocActionService(CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
                               CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
-                              PlanItemRepository planItems, CaseTaskRepository tasks,
                               LinkedProcessService processes, EngineGateway engine,
                               CriterionEvaluator criteria, EventPublisher publisher,
                               EngineOperationService operations,
                               CaseContractValidator contracts, FormValidator forms) {
         this.cases = Objects.requireNonNull(cases); this.bindings = Objects.requireNonNull(bindings);
         this.releases = Objects.requireNonNull(releases); this.participants = Objects.requireNonNull(participants);
-        this.planItems = Objects.requireNonNull(planItems); this.tasks = Objects.requireNonNull(tasks);
         this.processes = Objects.requireNonNull(processes); this.engine = Objects.requireNonNull(engine);
         this.criteria = Objects.requireNonNull(criteria); this.publisher = Objects.requireNonNull(publisher);
         this.operations = operations;
@@ -151,13 +145,6 @@ public class AdHocActionService {
     private Result executeEmbedded(CaseInstance c, ValidatedCaseContract.AdHocActionDefinition action,
                                    Map<String, Object> variables) {
         return switch (action) {
-            case ValidatedCaseContract.TaskAction task -> {
-                String target = target(c, task, null);
-                EngineTaskRef engineTask = engine.createHumanTask(new HumanTaskRequest(c.id(), target,
-                        taskName(task), null, task.candidateGroups(), task.formRef(), variables));
-                yield new Result(task.id(), type(task), null, engineTask.engineTaskId(), null,
-                        CaseTask.EngineSync.SYNCED, null, "CONFIRMED");
-            }
             case ValidatedCaseContract.ProcessAction process -> {
                 CaseDefinitionRelease release = exactRelease(c, process);
                 EngineProcessRef ref = engine.startProcess(new StartProcessRequest(c.id(), null,
@@ -178,11 +165,6 @@ public class AdHocActionService {
                                  Map<String, Object> variables, Actor actor, String idempotencyKey) {
         String stableTarget = target(c, action, idempotencyKey);
         RemoteActionSubmission submission = switch (action) {
-            case ValidatedCaseContract.TaskAction task -> new RemoteActionSubmission(requiredOperations().submitAdHoc(c, task.id(),
-                    EngineCommand.Type.CREATE_TASK, Map.of("planItemId", stableTarget,
-                            "name", taskName(task), "assignee", "", "candidateGroups", task.candidateGroups(),
-                            "formKey", task.formRef() == null ? "" : task.formRef(), "variables", variables),
-                    stableTarget, c.version(), actor, idempotencyKey), null);
             case ValidatedCaseContract.ProcessAction process -> {
                 CaseDefinitionRelease release = exactRelease(c, process);
                 var link = processes.registerPendingExact(c.id(), stableTarget,
@@ -305,17 +287,12 @@ public class AdHocActionService {
                 ? "adhoc:" + c.id() + ":" + action.id() + ":" + c.version() : idempotencyKey;
     }
 
-    private static String taskName(ValidatedCaseContract.TaskAction task) {
-        return task.name() == null || task.name().isBlank() ? task.id() : task.name();
-    }
-
     private EvaluationContext context(CaseInstance c) { return new EvaluationContext(Map.of("id", c.id(),
             "state", c.state().name(), "priority", c.priority().name()), c.variables(), Map.of()); }
     private static Map<String, Object> immutableInput(Map<String, Object> input) { return input == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(input)); }
     private static InvalidCaseDefinitionException invalid(String key, String message) { return new InvalidCaseDefinitionException(key, message); }
     private static FormValidationException invalidInput(String message) { return new FormValidationException(List.of(new FormValidationException.Violation("", message))); }
     private static String type(ValidatedCaseContract.AdHocActionDefinition action) { return switch (action) {
-        case ValidatedCaseContract.TaskAction ignored -> "TASK";
         case ValidatedCaseContract.ProcessAction ignored -> "PROCESS";
         case ValidatedCaseContract.MessageAction ignored -> "MESSAGE";
     }; }

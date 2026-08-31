@@ -142,24 +142,25 @@ class JsonSchemaCaseContractValidatorTest {
     void discriminatesEachAdHocActionVariantIntoItsOwnType() {
         ValidatedCaseContract contract = validate(fullBpmnContract());
 
-        assertThat(contract.adHocActions()).hasSize(3);
+        assertThat(contract.adHocActions()).hasSize(2);
         assertThat(contract.adHocActions().get(0))
-                .isInstanceOfSatisfying(ValidatedCaseContract.TaskAction.class, action -> {
-                    assertThat(action.id()).isEqualTo("investigate");
-                    assertThat(action.roles()).containsExactly("handler");
-                    assertThat(action.formRef()).isEqualTo("reviewForm");
-                    assertThat(action.candidateGroups()).containsExactly("handlers");
-                    assertThat(action.availabilityExpression())
-                            .isEqualTo("${case.state == 'ACTIVE'}");
-                });
-        assertThat(contract.adHocActions().get(1))
                 .isInstanceOfSatisfying(ValidatedCaseContract.ProcessAction.class, action -> {
                     assertThat(action.processDefinitionKey()).isEqualTo("escalation");
                     assertThat(action.orchestrationReleaseId()).isEqualTo("release-1");
                 });
-        assertThat(contract.adHocActions().get(2))
+        assertThat(contract.adHocActions().get(1))
                 .isInstanceOfSatisfying(ValidatedCaseContract.MessageAction.class, action ->
                         assertThat(action.messageName()).isEqualTo("complaint-withdrawn"));
+    }
+
+    @Test
+    void rejectsLegacyTaskActionsBecauseContractsCannotActivateHumanTasksOutsideBpmn() {
+        assertThatThrownBy(() -> validate("""
+                {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "adHocActions":[{"id":"legacy-task","type":"TASK","roles":["handler"]}]}
+                """))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/adHocActions/0/type");
     }
 
     // ------------------------------------------------------- required properties
@@ -176,7 +177,6 @@ class JsonSchemaCaseContractValidatorTest {
             /fields/amount/schema               | {"key":"sample-case","orchestrationMode":"BPMN","fields":{"amount":{}},"forms":{}}
             /forms/reviewForm/schema            | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{"reviewForm":{}}}
             /slaBindings/resolution/calendarId  | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"slaBindings":{"resolution":{"scope":"CASE","duration":"P5D","startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED"}}}
-            /adHocActions/0/roles               | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"TASK"}]}
             /adHocActions/0/processDefinitionKey| {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"PROCESS","roles":["handler"],"orchestrationReleaseId":"release-1"}]}
             /adHocActions/0/orchestrationReleaseId| {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"PROCESS","roles":["handler"],"processDefinitionKey":"escalation"}]}
             /adHocActions/0/messageName         | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"MESSAGE","roles":["handler"]}]}
@@ -202,7 +202,7 @@ class JsonSchemaCaseContractValidatorTest {
             /mappings/0/directon | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"mappings":[{"direction":"ENGINE_TO_CASE","source":"outcome","target":"outcome","directon":"CASE_TO_ENGINE"}]}
             /fields/amount/wrteRoles | {"key":"sample-case","orchestrationMode":"BPMN","fields":{"amount":{"schema":{"type":"integer"},"wrteRoles":["handler"]}},"forms":{}}
             /forms/reviewForm/uiSchma | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{"reviewForm":{"schema":{"type":"object"},"uiSchma":{}}}}
-            /adHocActions/0/formRefs | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"TASK","roles":["handler"],"formRefs":"reviewForm"}]}
+            /adHocActions/0/formRefs | {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},"adHocActions":[{"id":"a","type":"MESSAGE","roles":["handler"],"messageName":"m","formRefs":"reviewForm"}]}
             """)
     void rejectsAnUnknownPropertyInEveryClosedObject(String path, String json) {
         assertThatThrownBy(() -> validate(json))
@@ -212,13 +212,11 @@ class JsonSchemaCaseContractValidatorTest {
 
     /**
      * The discriminator closes each variant against the <em>other</em> variants' properties too.
-     * A {@code TASK} carrying {@code messageName} is an authoring mistake that would otherwise
+     * A closed action variant carrying another variant's property is an authoring mistake that would otherwise
      * be dropped on the floor.
      */
     @ParameterizedTest(name = "[{index}] {0} may not carry {1}")
     @CsvSource({
-            "TASK,messageName,\"messageName\":\"m\"",
-            "TASK,processDefinitionKey,\"processDefinitionKey\":\"p\"",
             "PROCESS,messageName,\"messageName\":\"m\"",
             "MESSAGE,processDefinitionKey,\"processDefinitionKey\":\"p\""
     })
@@ -253,8 +251,8 @@ class JsonSchemaCaseContractValidatorTest {
     void rejectsDuplicateAdHocActionIds() {
         assertThatThrownBy(() -> validate("""
                 {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
-                 "adHocActions":[{"id":"a","type":"TASK","roles":["handler"]},
-                                 {"id":"a","type":"MESSAGE","roles":["handler"],"messageName":"m"}]}"""))
+                 "adHocActions":[{"id":"a","type":"MESSAGE","roles":["handler"],"messageName":"m"},
+                                 {"id":"a","type":"MESSAGE","roles":["handler"],"messageName":"n"}]}"""))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("Duplicate ad-hoc action id 'a'");
     }
@@ -492,8 +490,8 @@ class JsonSchemaCaseContractValidatorTest {
         StringBuilder actions = new StringBuilder();
         for (int i = 0; i < 200; i++) {
             actions.append(i == 0 ? "" : ",")
-                    .append("{\"id\":\"a").append(i).append("\",\"type\":\"TASK\",")
-                    .append("\"roles\":[\"handler\"],\"note\":\"").append(secret).append("\"}");
+                    .append("{\"id\":\"a").append(i).append("\",\"type\":\"MESSAGE\",")
+                    .append("\"roles\":[\"handler\"],\"messageName\":\"m\",\"note\":\"").append(secret).append("\"}");
         }
         String json = """
                 {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
@@ -602,10 +600,6 @@ class JsonSchemaCaseContractValidatorTest {
                      "extensions": {"owner": "case-platform"}}
                   ],
                   "adHocActions": [
-                    {"id": "investigate", "type": "TASK", "name": "Investigate aspect",
-                     "roles": ["handler"], "formRef": "reviewForm",
-                     "candidateGroups": ["handlers"],
-                     "availabilityExpression": "${case.state == 'ACTIVE'}"},
                     {"id": "escalate", "type": "PROCESS", "roles": ["handler"],
                      "processDefinitionKey": "escalation", "orchestrationReleaseId": "release-1"},
                     {"id": "withdraw", "type": "MESSAGE", "roles": ["handler"],

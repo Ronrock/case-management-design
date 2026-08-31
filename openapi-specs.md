@@ -995,25 +995,6 @@ paths:
                 type: array
                 items: {$ref: '#/components/schemas/Milestone'}
 
-  /cases/{caseId}/milestones/{milestoneId}/achieve:
-    post:
-      tags: [Milestones]
-      summary: Manually achieve a milestone (emits milestone.achieved event)
-      parameters:
-        - {$ref: '#/components/parameters/caseId'}
-        - name: milestoneId
-          in: path
-          required: true
-          schema: {type: string}
-        - {$ref: '#/components/parameters/ifMatch'}
-      responses:
-        '200':
-          description: Achieved
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Milestone'}
-        '409': {description: Already achieved}
-
   # ---------- SLA ----------
   /sla-policies:
     get:

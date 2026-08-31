@@ -22,7 +22,6 @@ public final class PermissionActions {
     public static final String COMMENT_ADD = "comment.add";
 
     public static final String MILESTONE_READ = "milestone.read";
-    public static final String MILESTONE_ACHIEVE = "milestone.achieve";
 
     public static final String PROCESS_READ = "process.read";
     public static final String PROCESS_START = "process.start";

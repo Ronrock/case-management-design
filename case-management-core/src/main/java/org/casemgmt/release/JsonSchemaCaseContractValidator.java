@@ -76,6 +76,7 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
     public ValidatedCaseContract validate(String definitionKey, byte[] utf8Json) {
         JsonNode root = parse(definitionKey, utf8Json);
         OrchestrationMode mode = declaredMode(definitionKey, root);
+        rejectLegacyTaskActions(definitionKey, root);
 
         List<ValidationMessage> violations = new ArrayList<>(SCHEMA.validate(root));
         if (!violations.isEmpty()) {
@@ -225,6 +226,17 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
         for (int index = 0; index < actions.size(); index++) {
             rejectTransformInMappings(definitionKey, actions.get(index).get("mappings"),
                     "/adHocActions/" + index + "/mappings");
+        }
+    }
+
+    private static void rejectLegacyTaskActions(String definitionKey, JsonNode root) {
+        JsonNode actions = root.get("adHocActions");
+        if (actions == null || !actions.isArray()) return;
+        for (int index = 0; index < actions.size(); index++) {
+            if ("TASK".equals(text(actions.get(index), "type"))) {
+                throw invalid(definitionKey, "Contract release is invalid: /adHocActions/" + index
+                        + "/type: TASK/CREATE_TASK is no longer supported; model human task activation in BPMN");
+            }
         }
     }
 
@@ -378,8 +390,7 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
                 case "MESSAGE" -> new ValidatedCaseContract.MessageAction(id, name, roles,
                         formRef, groups, availability, text(node, "messageName"),
                         strings(node.get("correlationKeys")), mappings(node));
-                default -> new ValidatedCaseContract.TaskAction(id, name, roles, formRef,
-                        groups, availability, mappings(node));
+                default -> throw invalid(text(root, "key"), "Unsupported ad-hoc action type");
             });
         }
         return result;

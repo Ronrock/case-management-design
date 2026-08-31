@@ -53,8 +53,8 @@ import java.util.Set;
  *
  * <p><b>Authorization (fix round 1, Critical 1).</b> The first cut of this class was
  * authenticated but had no rule at all: the caller the case-level policy refuses a title edit to
- * could still comment on the case, achieve its milestones and start a BPMN process against it.
- * Collaboration writes now assert against {@code ActionPolicy}'s own collaboration and milestone
+ * could still comment on the case and start a BPMN process against it. Collaboration writes now
+ * assert against {@code ActionPolicy}'s collaboration
  * rules, and every method — read or write — first resolves the case through {@link #visible},
  * so a case in another tenant is a 404 rather than a source of data (Critical 2).
  *
@@ -175,35 +175,6 @@ public class CollaborationController {
                 actor, c.tenantId());
     }
 
-    /**
-     * {@code If-Match} is accepted here per the spec (fix round 1, I6), and it is enforced
-     * against the <b>case's</b> ETag rather than the milestone's: {@code CM_MILESTONE} carries no
-     * version column, and the milestone is a sub-resource of the case whose event stream a client
-     * is tracking. Requiring it means a client that has not read the case since something else
-     * changed it cannot blind-fire an achievement at it.
-     */
-    @PostMapping("/milestones/{milestoneId}/achieve")
-    public Map<String, Object> achieve(@PathVariable String caseId, @PathVariable String milestoneId,
-                                       @RequestHeader(value = "If-Match", required = false) String ifMatch,
-                                       Authentication authentication) {
-        Actor actor = callers.actor(authentication);
-        CaseInstance c = visible(caseId, actor);
-        requireCaseVersion(c, ifMatch);
-
-        MilestoneRepository.MilestoneRow current = milestones.forCase(caseId).stream()
-                .filter(m -> m.id().equals(milestoneId)).findFirst()
-                .orElseThrow(() -> new NotFoundException("Milestone", milestoneId));
-        Set<String> roles = callers.roles(caseId, actor);
-        permissions.assertAllowed(actor, c.tenantId(), PermissionActions.MILESTONE_ACHIEVE,
-                ResourceTypes.MILESTONE, milestoneId, milestoneContext(caseId, current));
-        policy.assertAllowedOnMilestone(cases.snapshot(c), milestoneId, current.achieved(),
-                roles, "achieve");
-
-        MilestoneRepository.MilestoneRow achieved = milestones.achieve(caseId, milestoneId, actor);
-        return milestoneBody(achieved,
-                policy.listForMilestone(cases.snapshot(caseId), milestoneId, achieved.achieved(), roles));
-    }
-
     @GetMapping("/processes")
     public List<Map<String, Object>> listProcesses(@PathVariable String caseId,
                                                    Authentication authentication) {
@@ -218,7 +189,7 @@ public class CollaborationController {
      * {@code planItemId} is threaded through to {@code LinkedProcessService.start} (fix round 1,
      * I6). It was hardcoded {@code null}, which made the outbox correlation Task 18 built for
      * plan-item-backed processes unreachable from HTTP. {@code If-Match} is accepted and checked
-     * against the case, for the same reason as {@link #achieve}.
+     * against the case.
      *
      * <p>Exposing that field also made it caller-controlled, so it is validated against the URL's
      * case (fix round 2, review finding Important 1) — the same defect shape as M9, on the
@@ -524,10 +495,7 @@ public class CollaborationController {
                 .map(row -> Map.entry(row, decisions.getOrDefault(row.id(),
                         PermissionDecision.deny(row.id()))))
                 .filter(entry -> entry.getValue().allowed())
-                .map(entry -> milestoneBody(entry.getKey(),
-                        policy.listForMilestone(snapshot, entry.getKey().id(),
-                                entry.getKey().achieved(), roles),
-                        entry.getValue()))
+                .map(entry -> milestoneBody(entry.getKey(), List.of(), entry.getValue()))
                 .toList();
     }
 

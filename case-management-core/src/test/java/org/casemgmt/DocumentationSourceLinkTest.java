@@ -3,6 +3,8 @@ package org.casemgmt;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -10,6 +12,7 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class DocumentationSourceLinkTest {
 
@@ -37,6 +40,28 @@ class DocumentationSourceLinkTest {
         assertTrue(failures.isEmpty(), () -> "Broken local source links:\n" + String.join("\n", failures));
     }
 
+    @Test
+    void reports_missing_repository_files_and_invalid_local_anchors(@TempDir Path temporaryRoot)
+            throws IOException {
+        Path document = temporaryRoot.resolve("docs/links.md");
+        Files.createDirectories(document.getParent());
+        Files.writeString(temporaryRoot.resolve("README.md"), "only line\n");
+        Files.writeString(document, """
+                [missing](../missing.md)
+                [zero](../README.md#L0)
+                [reversed](../README.md#L2-L1)
+                [past-end](../README.md#L2)
+                """);
+        List<String> failures = new ArrayList<>();
+        Matcher links = MARKDOWN_LINK.matcher(Files.readString(document));
+        while (links.find()) {
+            validateSourceLink(temporaryRoot, document, links.group(1), failures);
+        }
+
+        assertTrue(failures.size() == 4,
+                () -> "Expected local-file and anchor failures but got: " + failures);
+    }
+
     private static void validateSourceLink(Path repositoryRoot, Path documentPath, String link,
             List<String> failures) throws IOException {
         if (link.startsWith("http://") || link.startsWith("https://") || link.startsWith("#")) {
@@ -53,14 +78,27 @@ class DocumentationSourceLinkTest {
             target = target.substring(0, anchor.start());
         }
 
-        if (!target.contains("/src/") || target.isBlank()) {
+        if (target.isBlank()) {
             return;
         }
 
-        Path source = documentPath.getParent().resolve(target).normalize();
+        Path source = documentPath.getParent()
+                .resolve(URLDecoder.decode(target, StandardCharsets.UTF_8)).normalize();
         String location = repositoryRoot.relativize(documentPath) + " -> " + link;
+        if (!source.startsWith(repositoryRoot)) {
+            failures.add(location + " (outside repository)");
+            return;
+        }
         if (!Files.isRegularFile(source)) {
             failures.add(location + " (missing source file)");
+            return;
+        }
+        if (firstLine != null && firstLine < 1) {
+            failures.add(location + " (line anchors start at 1)");
+            return;
+        }
+        if (lastLine != null && lastLine < firstLine) {
+            failures.add(location + " (reversed line range)");
             return;
         }
         if (lastLine != null && Files.readAllLines(source).size() < lastLine) {

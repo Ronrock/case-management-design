@@ -188,12 +188,11 @@ public class CaseManagementServiceConfiguration {
     public AdHocActionService adHocActionService(
             CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
             CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
-            PlanItemRepository planItems, CaseTaskRepository tasks,
             LinkedProcessService linkedProcesses, EngineGateway engine,
             CriterionEvaluator criteria, EventPublisher publisher,
             EngineOperationService operations) {
         return new AdHocActionService(cases, bindings, releases, participants,
-                planItems, tasks, linkedProcesses, engine, criteria, publisher, operations,
+                linkedProcesses, engine, criteria, publisher, operations,
                 new JsonSchemaCaseContractValidator(), new FormValidator());
     }
 
@@ -224,9 +223,8 @@ public class CaseManagementServiceConfiguration {
     }
 
     @Bean
-    public MilestoneService milestoneService(MilestoneRepository milestones, CaseRepository cases,
-                                             EventPublisher publisher) {
-        return new MilestoneService(milestones, cases, publisher);
+    public MilestoneService milestoneService(MilestoneRepository milestones) {
+        return new MilestoneService(milestones);
     }
 
     @Bean

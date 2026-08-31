@@ -404,11 +404,10 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
      *
      * <p>The row is inserted through {@code MilestoneRepository} — the production writer — rather
      * than driven through the plan model, because this fixture's milestone completes the instant
-     * it enters, so the model never leaves one
-     * unachieved for long enough to read.
+     * it enters, so the model never leaves one unachieved for long enough to read.
      */
     @Test
-    void anUnachievedMilestoneReportsNullRatherThanTheStringNullAndCanThenBeAchieved() {
+    void milestoneReadsRemainAvailableButManualAchievementIsNotARoute() {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");
         ResponseEntity<List> planItems = alice().get().uri("/cases/{id}/plan-items", caseId)
@@ -431,19 +430,21 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
                     assertThat(m.get("achievedAt")).isNull();
                 });
 
-        ResponseEntity<Map> achieved = alice().post()
+        ResponseEntity<Map> rejected = alice().post()
                 .uri("/cases/{c}/milestones/{m}/achieve", caseId, milestoneId)
                 .header("If-Match", "\"0\"")
                 .retrieve().toEntity(Map.class);
-        assertThat(achieved.getStatusCode().value()).isEqualTo(200);
-        assertThat(achieved.getBody()).containsEntry("achieved", true);
+        assertThat(rejected.getStatusCode().value()).isEqualTo(404);
 
         ResponseEntity<List> after = alice().get().uri("/cases/{id}/milestones", caseId)
                 .retrieve().toEntity(List.class);
         assertThat((List<Map<String, Object>>) after.getBody())
                 .filteredOn(m -> milestoneId.equals(m.get("id")))
                 .singleElement()
-                .satisfies(m -> assertThat((String) m.get("achievedAt")).contains("T"));
+                .satisfies(m -> {
+                    assertThat(m).containsEntry("achieved", false);
+                    assertThat(m.get("achievedAt")).isNull();
+                });
     }
 
     /**

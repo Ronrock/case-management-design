@@ -104,17 +104,18 @@ audit, and event publication. Ad-hoc actions are declared in the contract and in
 POST /case-api/v2/cases/{caseId}/ad-hoc-actions/{actionId}
 ```
 
-They may create a task, start a side process, or correlate a message. Their roles, form reference,
-candidate groups, and availability expression are contract data. Tasks and processes use the same
-projections as BPMN work but remain outside the root token flow; root completion terminalizes any
-still-open discretionary work.
+They may start a side process or correlate a message. Their roles, form reference, candidate groups,
+and availability expression are contract data. Contract actions cannot create human tasks: task
+activation belongs to BPMN. Side processes use the same projections as BPMN work but remain outside
+the root token flow; root completion terminalizes any still-open discretionary work.
 
 ## Embedded mode
 
 Embedded integration consumes Operaton's built-in Spring task, execution, and history events. It
 does not install a custom `ProcessEnginePlugin`. Event handlers translate engine objects at the
 adapter boundary and update projections, audit, and the event outbox in the engine transaction.
-Rollback therefore covers engine state, projections, audit, and emitted platform events together.
+The embedded-mode operating rule is that rollback covers engine state, projections, audit, and
+emitted platform events together.
 
 The projection covers user tasks, assignment changes, tagged subprocess stages, milestones,
 multi-instance and repeated activities, historic completion, and root-process completion.
@@ -164,9 +165,9 @@ engine migration succeeds.
 The BPMN-only library does not support legacy plan-model behavior in every release. Before an
 upgrade that activates the BPMN-only schema/runtime, migration preflight blocks when legacy
 `PLAN_MODEL` data remains. Operators must explicitly migrate, export, retire, or dispose of that
-data before activation. Rollback is application/schema compatible only inside this documented data
-boundary; it does not restore removed plan-model behavior or make retained legacy definitions
-executable.
+data before activation. The operational rollback policy is application/schema compatibility only
+inside this documented data boundary; it does not restore removed plan-model behavior or make
+retained legacy definitions executable.
 
 ## Delivery order
 

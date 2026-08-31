@@ -241,9 +241,8 @@ public class CaseApiTestConfig {
     }
 
     @Bean
-    public MilestoneService milestoneService(MilestoneRepository milestones, CaseRepository cases,
-                                              EventPublisher publisher) {
-        return new MilestoneService(milestones, cases, publisher);
+    public MilestoneService milestoneService(MilestoneRepository milestones) {
+        return new MilestoneService(milestones);
     }
 
     @Bean
@@ -309,10 +308,9 @@ public class CaseApiTestConfig {
     public AdHocActionService adHocActionService(
             CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
             CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
-            PlanItemRepository planItems, CaseTaskRepository tasks,
             LinkedProcessService linkedProcesses, EngineGateway engine,
             EventPublisher publisher, EngineOperationService operations) {
-        return new AdHocActionService(cases, bindings, releases, participants, planItems, tasks,
+        return new AdHocActionService(cases, bindings, releases, participants,
                 linkedProcesses, engine, new JuelCriterionEvaluator(), publisher, operations,
                 new org.casemgmt.release.JsonSchemaCaseContractValidator(), new org.casemgmt.service.FormValidator());
     }

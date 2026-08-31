@@ -234,27 +234,11 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
     }
 
     @Test
-    void aNonParticipantCannotAchieveAMilestone() {
-        Map<String, Object> created = deployAndCreateCase();
-        String caseId = (String) created.get("id");
-        String planItemId = (String) planItems(caseId).stream()
-                .filter(i -> "MILESTONE".equals(i.get("type"))).findFirst().orElseThrow().get("id");
-        String milestoneId = "ms-" + UUID.randomUUID();
-        milestoneRepo.insert(milestoneId, caseId, planItemId, "Checkpoint");
-
-        ResponseEntity<Map> refused = client("carol").post()
-                .uri("/cases/{c}/milestones/{m}/achieve", caseId, milestoneId)
-                .header("If-Match", "\"0\"").retrieve().toEntity(Map.class);
-        assertThat(refused.getStatusCode().value()).isEqualTo(409);
-        assertThat(refused.getBody()).containsEntry("code", "action-not-available");
-
-        assertThat(milestone(caseId, milestoneId)).containsEntry("achieved", false);
-
-        ResponseEntity<Map> allowed = alice().post()
-                .uri("/cases/{c}/milestones/{m}/achieve", caseId, milestoneId)
-                .header("If-Match", "\"0\"").retrieve().toEntity(Map.class);
-        assertThat(allowed.getStatusCode().value()).isEqualTo(200);
-        assertThat(allowed.getBody()).containsEntry("achieved", true);
+    void manualMilestoneAchievementRouteIsAbsentForEveryCaller() {
+        ResponseEntity<Map> response = client("carol").post()
+                .uri("/cases/{c}/milestones/{m}/achieve", "case", "milestone")
+                .retrieve().toEntity(Map.class);
+        assertThat(response.getStatusCode().value()).isEqualTo(404);
     }
 
     @Test

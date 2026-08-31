@@ -131,22 +131,6 @@ public class ActionPolicy {
     }
 
     /**
-     * A milestone can be achieved manually exactly once, on a live case, by a caller who may
-     * mutate it. Takes the milestone's identity and achieved flag rather than a repository row
-     * type so this class keeps depending only on the domain and the snapshot.
-     */
-    public List<AvailableAction> listForMilestone(CaseSnapshot snapshot, String milestoneId,
-                                                  boolean achieved, Set<String> callerRoles) {
-        List<AvailableAction> actions = new ArrayList<>();
-        if (!mayMutate(callerRoles) || snapshot.caseInstance().state() != CaseState.ACTIVE || achieved) {
-            return actions;
-        }
-        actions.add(AvailableAction.post("achieve",
-                "/cases/" + snapshot.caseInstance().id() + "/milestones/" + milestoneId + "/achieve"));
-        return actions;
-    }
-
-    /**
      * SLA clocks mirror their own state machine, the same way {@link #listForPlanItem} mirrors
      * the plan-item one: a RUNNING clock can be paused, a PAUSED clock resumed, and a clock in
      * any other state (BREACHED, STOPPED) offers neither — which keeps this rule table and
@@ -233,12 +217,6 @@ public class ActionPolicy {
         refuseUnlessListed(listForCollaboration(snapshot, callerRoles), action,
                 "case " + snapshot.caseInstance().id() + " in state "
                         + snapshot.caseInstance().state());
-    }
-
-    public void assertAllowedOnMilestone(CaseSnapshot snapshot, String milestoneId, boolean achieved,
-                                         Set<String> callerRoles, String action) {
-        refuseUnlessListed(listForMilestone(snapshot, milestoneId, achieved, callerRoles), action,
-                "milestone " + milestoneId + (achieved ? " (already achieved)" : ""));
     }
 
     public void assertAllowedOnSla(CaseSnapshot snapshot, String slaId, String status,
