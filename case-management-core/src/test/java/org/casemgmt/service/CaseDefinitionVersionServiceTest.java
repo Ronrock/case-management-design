@@ -361,6 +361,168 @@ class CaseDefinitionVersionServiceTest {
     }
 
     @Test
+    void rejectsAnAnchorFamilyThatDoesNotMatchTheReferencedCaseElement() {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true"
+                         casemgmt:slaTargetId="resolution"/>""",
+                """
+                "resolution":{"scope":"CASE","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED"}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("resolution")
+                .hasMessageContaining("CASE")
+                .hasMessageContaining("USER_TASK_CREATED");
+    }
+
+    @Test
+    void rejectsAnSlaScopeThatDoesNotMatchTheReferencedBpmnElementKind() {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <subProcess id="assessment" casemgmt:stage="true"
+                              casemgmt:slaTargetId="assessment-sla"/>
+                </process>""",
+                """
+                "assessment-sla":{"scope":"TASK","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"ACTIVITY_STARTED","meetAnchor":"ACTIVITY_COMPLETED"}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("assessment-sla")
+                .hasMessageContaining("scope TASK")
+                .hasMessageContaining("STAGE");
+    }
+
+    @Test
+    void rejectsAStageAnchorFamilyOnAReferencedTaskElement() {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <userTask id="review" casemgmt:slaTargetId="review-sla"/>
+                </process>""",
+                """
+                "review-sla":{"scope":"TASK","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"ACTIVITY_STARTED","meetAnchor":"ACTIVITY_COMPLETED"}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("review-sla")
+                .hasMessageContaining("TASK")
+                .hasMessageContaining("ACTIVITY_STARTED");
+    }
+
+    @Test
+    void rejectsAnOccurrenceSlaWithoutAnOccurrenceKey() {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <userTask id="review" casemgmt:slaTargetId="review-sla"/>
+                </process>""",
+                """
+                "review-sla":{"scope":"OCCURRENCE","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED"}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("review-sla")
+                .hasMessageContaining("OCCURRENCE")
+                .hasMessageContaining("occurrenceKey");
+    }
+
+    @Test
+    void rejectsAnOccurrenceSlaOnANonRepeatableBpmnElement() {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <userTask id="review" casemgmt:slaTargetId="review-sla"/>
+                </process>""",
+                """
+                "review-sla":{"scope":"OCCURRENCE","occurrenceKey":"review",
+                  "calendarId":"business","duration":"PT1H",
+                  "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED"}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("review-sla")
+                .hasMessageContaining("repeatable");
+    }
+
+    @Test
+    void rejectsANonCaseBindingWithoutABpmnTargetReference() {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <userTask id="review"/>
+                </process>""",
+                """
+                "review-sla":{"scope":"TASK","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED"}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("review-sla")
+                .hasMessageContaining("no BPMN element references");
+    }
+
+    @Test
+    void admitsEveryExecutableScopeElementAndAnchorFamilyCombination() {
+        CaseDefinitionVersionService service = validationService();
+
+        validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true"
+                         casemgmt:slaTargetId="case-sla"/>""",
+                """
+                "case-sla":{"scope":"CASE","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED",
+                  "cancelAnchor":"CASE_CANCELLED"}""");
+        validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <userTask id="review" casemgmt:slaTargetId="task-sla"/>
+                </process>""",
+                """
+                "task-sla":{"scope":"TASK","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED",
+                  "cancelAnchor":"USER_TASK_DELETED","pauseAnchors":["USER_TASK_CLAIMED"],
+                  "resumeAnchors":["USER_TASK_UNCLAIMED"]}""");
+        validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <subProcess id="assessment" casemgmt:stage="true"
+                              casemgmt:slaTargetId="stage-sla"/>
+                </process>""",
+                """
+                "stage-sla":{"scope":"STAGE","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"ACTIVITY_STARTED","meetAnchor":"ACTIVITY_COMPLETED",
+                  "cancelAnchor":"ACTIVITY_CANCELLED"}""");
+        validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <intermediateThrowEvent id="accepted" casemgmt:milestoneId="accepted"
+                                          casemgmt:slaTargetId="milestone-sla"/>
+                </process>""",
+                """
+                "milestone-sla":{"scope":"MILESTONE","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"MILESTONE_REOPENED","meetAnchor":"MILESTONE_REACHED",
+                  "cancelAnchor":"MILESTONE_CANCELLED"}""");
+        validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <userTask id="repeatable-review" casemgmt:slaTargetId="occurrence-sla">
+                    <multiInstanceLoopCharacteristics/>
+                  </userTask>
+                </process>""",
+                """
+                "occurrence-sla":{"scope":"OCCURRENCE","occurrenceKey":"review",
+                  "calendarId":"business","duration":"PT1H",
+                  "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED"}""");
+    }
+
+    @Test
     void boundsAndSummarizesLargeNumbersOfCrossArtifactReferenceErrors() {
         CaseDefinitionVersionService service = new CaseDefinitionVersionService(
                 mock(CaseDefinitionReleaseRepository.class),
@@ -391,6 +553,27 @@ class CaseDefinitionVersionServiceTest {
         return (tenantId, calendarId, revision) -> {
             throw new AssertionError("test contract unexpectedly referenced an SLA calendar");
         };
+    }
+
+    private static CaseDefinitionVersionService validationService() {
+        return new CaseDefinitionVersionService(
+                mock(CaseDefinitionReleaseRepository.class),
+                mock(CaseDefinitionVersionBindingRepository.class),
+                mock(CaseDefinitionService.class), mock(SlaCalendarCatalog.class));
+    }
+
+    private static void validateSlaArtifacts(CaseDefinitionVersionService service,
+                                             String processXml, String slaBindingJson) {
+        service.validateArtifacts("sample-case", "t1", ("""
+                <definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                             xmlns:casemgmt="https://casemgmt.org/bpmn">
+                  %s
+                </definitions>""".formatted(processXml)).getBytes(StandardCharsets.UTF_8),
+                "application/bpmn+xml",
+                ("""
+                {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{%s}}""".formatted(slaBindingJson)).getBytes(StandardCharsets.UTF_8),
+                "{\"version\":\"1.0\",\"sections\":[]}".getBytes(StandardCharsets.UTF_8));
     }
 
     private static void stubOrchestrationAndPresentation(CaseDefinitionReleaseRepository releases) {

@@ -9,6 +9,7 @@ import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.SlaRepository;
+import org.casemgmt.release.ValidatedCaseContract.SlaBreachAction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.transaction.annotation.Transactional;
@@ -135,11 +136,12 @@ public class SlaSweeper {
             // gates the breach event; ESCALATE emits its own escalation event and audit row. The
             // record/case status writes above and below are the SLA breach fact itself, not a
             // declared "action", so they always happen regardless.
-            if (target.breachActions().contains("EMIT_EVENT")) {
-                emit(c, EventTypes.SLA_BREACHED, record);
-            }
-            if (target.breachActions().contains("ESCALATE")) {
-                escalate(c, target, record);
+            for (String actionName : target.breachActions()) {
+                SlaBreachAction action = SlaBreachAction.valueOf(actionName);
+                switch (action) {
+                    case EMIT_EVENT -> emit(c, EventTypes.SLA_BREACHED, record);
+                    case ESCALATE -> escalate(c, target, record);
+                }
             }
         } else {
             cases.updateSlaStatusMonotonic(c.id(), "WARNING");

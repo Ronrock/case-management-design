@@ -133,11 +133,16 @@ class SlaLifecycleServiceTest extends OracleTestBase {
                 .query(Integer.class).single()).isZero();
         String contract = """
                 {"key":"sla-root","orchestrationMode":"BPMN","fields":{},"forms":{},
-                 "slaBindings":{"resolution":{"scope":"CASE","calendarId":"cal-1",
-                 "calendarRevision":1,"targetVersion":3,"duration":"PT1H",
-                 "startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED",
-                 "cancelAnchor":"CASE_CANCELLED","pauseAnchors":["USER_TASK_CREATED"],
-                 "resumeAnchors":["USER_TASK_COMPLETED"],"warnings":["PT30M"]}}}""";
+                 "slaBindings":{
+                   "resolution":{"scope":"TASK","calendarId":"cal-1",
+                     "calendarRevision":1,"targetVersion":3,"duration":"PT1H",
+                     "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED",
+                     "cancelAnchor":"USER_TASK_DELETED","pauseAnchors":["USER_TASK_CLAIMED"],
+                     "resumeAnchors":["USER_TASK_UNCLAIMED"],"warnings":["PT30M"]},
+                   "other-task":{"scope":"TASK","calendarId":"cal-1",
+                     "calendarRevision":1,"targetVersion":1,"duration":"PT2H",
+                     "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED"}
+                 }}""";
         String sha = org.casemgmt.repo.JsonCodec.sha256(contract);
         var releases = new CaseDefinitionReleaseRepository(dataSource());
         releases.insert(CaseDefinitionRelease.storedWithEngineIdentity("orch", "sla-root", "tenant-a",
@@ -164,10 +169,10 @@ class SlaLifecycleServiceTest extends OracleTestBase {
                 new JsonSchemaCaseContractValidator());
         Instant started = Instant.parse("2026-08-30T10:00:00Z");
 
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "process", "STARTED",
-                "root", started));
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "process", "STARTED",
-                "root", started));
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "CREATED",
+                "task-1", "resolution", started));
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "CREATED",
+                "task-1", "resolution", started));
 
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'")
                 .query(Integer.class).single()).isEqualTo(1);
@@ -184,10 +189,11 @@ class SlaLifecycleServiceTest extends OracleTestBase {
                 .query((rs, n) -> List.of(rs.getString(1), rs.getInt(2), rs.getString(3),
                         rs.getString(4), rs.getInt(5), rs.getString(6), rs.getString(7),
                         rs.getString(8))).single();
-        assertThat(snapshot.subList(0, 5)).containsExactly("resolution", 3, "CASE", "CASE", 1);
+        assertThat(snapshot.subList(0, 5)).containsExactly(
+                "resolution", 3, "TASK", "task-1", 1);
         assertThat(snapshot.get(5)).isEqualTo(JsonCodec.canonicalSha256(alwaysOpenCalendar()));
         assertThat(snapshot.get(6)).isEqualTo(JsonCodec.canonicalJson(alwaysOpenCalendar()));
-        assertThat(String.valueOf(snapshot.get(7))).contains("\"anchor\":\"CASE_CREATED\"")
+        assertThat(String.valueOf(snapshot.get(7))).contains("\"anchor\":\"USER_TASK_CREATED\"")
                 .contains("\"occurredAt\":\"2026-08-30T10:00:00Z\"")
                 .contains("\"transition\":\"STARTED\"");
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.started'")
@@ -195,10 +201,10 @@ class SlaLifecycleServiceTest extends OracleTestBase {
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_AUDIT_LOG WHERE ACTION_ = 'sla.start'")
                 .query(Integer.class).single()).isEqualTo(1);
 
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "CREATED",
-                "task-1", Instant.parse("2026-08-30T10:10:00Z")));
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "CREATED",
-                "task-1", Instant.parse("2026-08-30T10:10:00Z")));
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "CLAIMED",
+                "task-1", "resolution", Instant.parse("2026-08-30T10:10:00Z")));
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "CLAIMED",
+                "task-1", "resolution", Instant.parse("2026-08-30T10:10:00Z")));
         assertThat(jdbc().sql("SELECT STATUS_ FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'")
                 .query(String.class).single()).isEqualTo("PAUSED");
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.paused'")
@@ -207,10 +213,10 @@ class SlaLifecycleServiceTest extends OracleTestBase {
         // A later edit to the calendar must not rewrite a clock that is already governed by
         // the published revision captured at start. An empty calendar would make a mutable
         // lookup fail to calculate the remaining business time at resume.
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "COMPLETED",
-                "task-1", Instant.parse("2026-08-30T10:20:00Z")));
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "COMPLETED",
-                "task-1", Instant.parse("2026-08-30T10:20:00Z")));
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "UNCLAIMED",
+                "task-1", "resolution", Instant.parse("2026-08-30T10:20:00Z")));
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "UNCLAIMED",
+                "task-1", "resolution", Instant.parse("2026-08-30T10:20:00Z")));
         assertThat(jdbc().sql("""
                 SELECT STATUS_, DUE_AT_, WARN_AT_, PAUSED_TOTAL_SECS_, TRANSITION_EVIDENCE_JSON_
                 FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'""")
@@ -222,15 +228,25 @@ class SlaLifecycleServiceTest extends OracleTestBase {
                     assertThat(row.get(2)).isEqualTo(OffsetDateTime.parse("2026-08-30T10:40:00Z"));
                     assertThat(row.get(3)).isEqualTo(600L);
                     assertThat(String.valueOf(row.get(4))).contains("\"transition\":\"RESUMED\"")
-                            .contains("\"anchor\":\"USER_TASK_COMPLETED\"");
+                            .contains("\"anchor\":\"USER_TASK_UNCLAIMED\"");
                 });
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.resumed'")
                 .query(Integer.class).single()).isEqualTo(1);
 
-        contractLifecycle.terminalizeRoot(CASE_ID, SlaLifecyclePort.TerminalState.CANCELLED,
-                Instant.parse("2026-08-30T10:20:00Z"));
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "COMPLETED",
+                "task-1", "resolution", Instant.parse("2026-08-30T10:30:00Z")));
 
         assertThat(jdbc().sql("SELECT STATUS_ FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'")
+                .query(String.class).single()).isEqualTo("MET");
+
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "CREATED",
+                "task-2", "resolution", Instant.parse("2026-08-30T11:00:00Z")));
+        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "DELETED",
+                "task-2", "resolution", Instant.parse("2026-08-30T11:05:00Z")));
+
+        assertThat(jdbc().sql("""
+                SELECT STATUS_ FROM CM_SLA_RECORD
+                WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root' AND OCCURRENCE_KEY_ = 'task-2'""")
                 .query(String.class).single()).isEqualTo("CANCELLED");
     }
 

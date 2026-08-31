@@ -286,7 +286,8 @@ class DefaultEngineObservationHandlerTest {
         ActivityLifecycleObservation observation = new ActivityLifecycleObservation("obs-stage", 1,
                 "operaton:embedded", "tenant-a", "case-1", "process-1", "stage-instance", null,
                 ActivityLifecycleObservation.EventType.COMPLETED, OCCURRED, RECEIVED,
-                authorityAttributes("activityId", "assessment", "name", "Assessment"));
+                authorityAttributes("activityId", "assessment", "name", "Assessment",
+                        "slaTargetId", "assessment-sla"));
         owningClaim(observation, activeCase("tenant-a", "process-1", 7));
 
         ApplyResult result = handler.apply(observation);
@@ -297,7 +298,8 @@ class DefaultEngineObservationHandlerTest {
                 "assessment", "Assessment", ActivityObservation.Kind.STAGE, null, "end",
                 at(OCCURRED), at(RECEIVED)));
         order.verify(sla).observeAnchor(new SlaLifecyclePort.Anchor(
-                "case-1", "activity", "COMPLETED", "stage-instance", OCCURRED));
+                "case-1", "activity", "COMPLETED", "stage-instance",
+                "assessment-sla", OCCURRED));
         CaseEvent event = verifyAuditEventMarker(
                 order, "engine.activity.completed", "Activity", "stage-instance");
         assertThat(result).isEqualTo(new ApplyResult("obs-stage", ApplyStatus.APPLIED, 7,

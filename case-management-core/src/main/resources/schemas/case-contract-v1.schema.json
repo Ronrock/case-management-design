@@ -137,8 +137,11 @@
         "pauseAnchors": { "type": "array", "items": { "$ref": "#/$defs/anchor" } },
         "resumeAnchors": { "type": "array", "items": { "$ref": "#/$defs/anchor" } },
         "warnings": { "type": "array", "maxItems": 1, "items": { "$ref": "#/$defs/duration" } },
-        "breachActions": { "$ref": "#/$defs/nameList" },
-        "messageName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "breachActions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["EMIT_EVENT", "ESCALATE"] }
+        },
         "extensions": { "type": "object" }
       }
     },
@@ -263,10 +266,13 @@
     "expression": { "type": "string", "minLength": 1, "maxLength": 500 },
 
     "anchor": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$"
+      "enum": [
+        "CASE_CREATED", "CASE_CLOSED", "CASE_CANCELLED",
+        "USER_TASK_CREATED", "USER_TASK_CLAIMED", "USER_TASK_UNCLAIMED",
+        "USER_TASK_ASSIGNED", "USER_TASK_COMPLETED", "USER_TASK_DELETED",
+        "ACTIVITY_STARTED", "ACTIVITY_COMPLETED", "ACTIVITY_CANCELLED",
+        "MILESTONE_REACHED", "MILESTONE_REOPENED", "MILESTONE_CANCELLED"
+      ]
     },
 
     "duration": {

@@ -116,8 +116,13 @@ class JsonSchemaCaseContractValidatorTest {
             assertThat(binding.scope()).isEqualTo(ValidatedCaseContract.SlaScope.CASE);
             assertThat(binding.calendarId()).isEqualTo("nl-business");
             assertThat(binding.duration()).isEqualTo("P5D");
-            assertThat(binding.startAnchor()).isEqualTo("CASE_CREATED");
-            assertThat(binding.meetAnchor()).isEqualTo("CASE_CLOSED");
+            assertThat(binding.startAnchor())
+                    .isEqualTo(ValidatedCaseContract.SlaAnchor.CASE_CREATED);
+            assertThat(binding.meetAnchor())
+                    .isEqualTo(ValidatedCaseContract.SlaAnchor.CASE_CLOSED);
+            assertThat(binding.breachActions()).containsExactly(
+                    ValidatedCaseContract.SlaBreachAction.EMIT_EVENT,
+                    ValidatedCaseContract.SlaBreachAction.ESCALATE);
             assertThat(binding.warnings()).containsExactly("P4D");
         });
     }
@@ -262,6 +267,38 @@ class JsonSchemaCaseContractValidatorTest {
                    "duration":"P5D","startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED"}}}"""))
                 .isInstanceOf(InvalidCaseDefinitionException.class)
                 .hasMessageContaining("/slaBindings/resolution/scope");
+    }
+
+    @Test
+    void rejectsAnUnsupportedSlaAnchor() {
+        assertThatThrownBy(() -> validate("""
+                {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{"resolution":{"scope":"CASE","calendarId":"nl-business",
+                   "duration":"P5D","startAnchor":"CASE_OPENED","meetAnchor":"CASE_CLOSED"}}}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/slaBindings/resolution/startAnchor");
+    }
+
+    @Test
+    void rejectsAnUnsupportedSlaBreachAction() {
+        assertThatThrownBy(() -> validate("""
+                {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{"resolution":{"scope":"CASE","calendarId":"nl-business",
+                   "duration":"P5D","startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED",
+                   "breachActions":["SEND_MESSAGE"]}}}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/slaBindings/resolution/breachActions/0");
+    }
+
+    @Test
+    void rejectsMessageCorrelationOnAnSlaBinding() {
+        assertThatThrownBy(() -> validate("""
+                {"key":"sample-case","orchestrationMode":"BPMN","fields":{},"forms":{},
+                 "slaBindings":{"resolution":{"scope":"CASE","calendarId":"nl-business",
+                   "duration":"P5D","startAnchor":"CASE_CREATED","meetAnchor":"CASE_CLOSED",
+                   "messageName":"sla-breached"}}}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/slaBindings/resolution/messageName");
     }
 
     // ------------------------------------------------------------- mode rules
@@ -554,7 +591,8 @@ class JsonSchemaCaseContractValidatorTest {
                       "duration": "P5D",
                       "startAnchor": "CASE_CREATED",
                       "meetAnchor": "CASE_CLOSED",
-                      "warnings": ["P4D"]
+                      "warnings": ["P4D"],
+                      "breachActions": ["EMIT_EVENT", "ESCALATE"]
                     }
                   },
                   "mappings": [

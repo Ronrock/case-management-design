@@ -75,7 +75,8 @@ class BpmnVocabularyTest {
                 <bpmn:userTask id="review" cm:slaTargetId="review-sla"/>""");
 
         assertThat(index.milestoneIds()).containsExactly("acknowledged");
-        assertThat(index.slaRefs()).containsExactly("review-sla");
+        assertThat(index.slaRefs()).containsExactly(new BpmnReleaseValidator.SlaReference(
+                "review-sla", "review", BpmnReleaseValidator.ElementKind.TASK));
     }
 
     @Test
@@ -95,12 +96,44 @@ class BpmnVocabularyTest {
      */
     @Test
     void indexesSlaTargetIdIntoSlaRefs() {
-        var index = validate("""
-                xmlns:casemgmt="%s\"""".formatted(CASEMGMT_NS), """
+        var index = validate("xmlns:casemgmt=\"" + CASEMGMT_NS + "\"", """
                 <bpmn:userTask id="first" casemgmt:slaTargetId="first-sla"/>
                 <bpmn:userTask id="second" casemgmt:slaTargetId="second-sla"/>""");
 
-        assertThat(index.slaRefs()).containsExactlyInAnyOrder("first-sla", "second-sla");
+        assertThat(index.slaRefs()).containsExactlyInAnyOrder(
+                new BpmnReleaseValidator.SlaReference(
+                        "first-sla", "first", BpmnReleaseValidator.ElementKind.TASK),
+                new BpmnReleaseValidator.SlaReference(
+                        "second-sla", "second", BpmnReleaseValidator.ElementKind.TASK));
+    }
+
+    @Test
+    void indexesEveryRuntimeObservableSlaElementKind() {
+        var index = validate("""
+                xmlns:casemgmt="%s\"""".formatted(CASEMGMT_NS), """
+                <bpmn:userTask id="review" casemgmt:slaTargetId="task-sla"/>
+                <bpmn:subProcess id="assessment" casemgmt:stage="true"
+                                 casemgmt:slaTargetId="stage-sla"/>
+                <bpmn:intermediateThrowEvent id="accepted" casemgmt:milestoneId="accepted"
+                                             casemgmt:slaTargetId="milestone-sla"/>""");
+
+        assertThat(index.slaRefs()).containsExactlyInAnyOrder(
+                new BpmnReleaseValidator.SlaReference(
+                        "task-sla", "review", BpmnReleaseValidator.ElementKind.TASK),
+                new BpmnReleaseValidator.SlaReference(
+                        "stage-sla", "assessment", BpmnReleaseValidator.ElementKind.STAGE),
+                new BpmnReleaseValidator.SlaReference(
+                        "milestone-sla", "accepted", BpmnReleaseValidator.ElementKind.MILESTONE));
+    }
+
+    @Test
+    void rejectsSlaTargetIdOnAnElementWithoutRuntimeLifecycleObservations() {
+        assertThatThrownBy(() -> validate("xmlns:casemgmt=\"" + CASEMGMT_NS + "\"", """
+                <bpmn:serviceTask id="automate" casemgmt:slaTargetId="automation-sla"/>"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("automate")
+                .hasMessageContaining("slaTargetId")
+                .hasMessageContaining("runtime lifecycle observation");
     }
 
     /** Plain BPMN attributes carry no namespace and must stay unaffected by the new rule. */

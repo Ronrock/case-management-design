@@ -449,6 +449,7 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
     private static SlaLifecyclePort.Anchor anchor(EngineObservation observation) {
         return new SlaLifecyclePort.Anchor(observation.caseId(), kind(observation),
                 observation.eventType().name(), observation.entityId(),
+                optionalString(observation, "slaTargetId"),
                 observation.engineOccurredAt());
     }
 

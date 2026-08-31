@@ -55,7 +55,7 @@ class EmbeddedEngineEventBridgeTest {
         when(repository.getProcessDefinition("definition-1")).thenReturn(definition);
         when(classifier.taskMetadata(any(), any()))
                 .thenReturn(new ProcessActivityClassifier.TaskMetadata(
-                        List.of("handlers"), "reviewForm"));
+                        List.of("handlers"), "reviewForm", "review-sla"));
         bridge = new EmbeddedEngineEventBridge(handler, processInstanceId -> "case-1",
                 classifier, repository, tasks, "engine-a",
                 Clock.fixed(RECEIVED_AT, ZoneOffset.UTC));
@@ -88,7 +88,8 @@ class EmbeddedEngineEventBridgeTest {
                     .containsEntry("processDefinitionId", "definition-1")
                     .containsEntry("processDefinitionKey", "complaint-process")
                     .containsEntry("taskDefinitionKey", "review")
-                    .containsEntry("activityInstanceId", "task-1");
+                    .containsEntry("activityInstanceId", "task-1")
+                    .containsEntry("slaTargetId", "review-sla");
         });
         assertThat(observations.getAllValues())
                 .extracting(value -> ((UserTaskObservation) value).eventType())
@@ -136,12 +137,12 @@ class EmbeddedEngineEventBridgeTest {
 
         when(classifier.classify("definition-1", "assessment-stage"))
                 .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
-                        ProcessActivityClassifier.Kind.STAGE, null)));
+                        ProcessActivityClassifier.Kind.STAGE, null, "assessment-sla")));
         bridge.onHistory(cancelledActivity("assessment-stage", "Assessment", "stage-instance"));
 
         when(classifier.classify("definition-1", "approval-milestone"))
                 .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
-                        ProcessActivityClassifier.Kind.MILESTONE, "approved")));
+                        ProcessActivityClassifier.Kind.MILESTONE, "approved", "approval-sla")));
         bridge.onHistory(cancelledActivity(
                 "approval-milestone", "Approval", "milestone-instance"));
 
@@ -157,26 +158,32 @@ class EmbeddedEngineEventBridgeTest {
                         assertThat(observation.eventType())
                                 .isEqualTo(ProcessObservation.EventType.STARTED));
         assertThat(observations.getAllValues().get(2))
-                .isInstanceOfSatisfying(ActivityLifecycleObservation.class, observation ->
+                .isInstanceOfSatisfying(ActivityLifecycleObservation.class, observation -> {
                         assertThat(observation.eventType())
-                                .isEqualTo(ActivityLifecycleObservation.EventType.CANCELLED));
+                                .isEqualTo(ActivityLifecycleObservation.EventType.CANCELLED);
+                        assertThat(observation.attributes())
+                                .containsEntry("slaTargetId", "assessment-sla");
+                });
         assertThat(observations.getAllValues().get(3))
-                .isInstanceOfSatisfying(MilestoneObservation.class, observation ->
+                .isInstanceOfSatisfying(MilestoneObservation.class, observation -> {
                         assertThat(observation.eventType())
-                                .isEqualTo(MilestoneObservation.EventType.CANCELLED));
+                                .isEqualTo(MilestoneObservation.EventType.CANCELLED);
+                        assertThat(observation.attributes())
+                                .containsEntry("slaTargetId", "approval-sla");
+                });
     }
 
     @Test
     void capturesCanonicalStageAndMilestoneFixtures() {
         when(classifier.classify("definition-1", "assessment-stage"))
                 .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
-                        ProcessActivityClassifier.Kind.STAGE, null)));
+                        ProcessActivityClassifier.Kind.STAGE, null, "assessment-sla")));
         bridge.onExecution(execution("assessment-stage", "Assessment", "stage-instance", "start"));
         bridge.onExecution(execution("assessment-stage", "Assessment", "stage-instance", "end"));
 
         when(classifier.classify("definition-1", "approved-milestone"))
                 .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
-                        ProcessActivityClassifier.Kind.MILESTONE, "approved")));
+                        ProcessActivityClassifier.Kind.MILESTONE, "approved", "approved-sla")));
         bridge.onExecution(execution("approved-milestone", "Approved", "milestone-instance", "end"));
 
         ArgumentCaptor<EngineObservation> observations =
@@ -186,6 +193,8 @@ class EmbeddedEngineEventBridgeTest {
                 .isInstanceOfSatisfying(ActivityLifecycleObservation.class, observation -> {
                     assertThat(observation.eventType())
                             .isEqualTo(ActivityLifecycleObservation.EventType.STARTED);
+                    assertThat(observation.attributes())
+                            .containsEntry("slaTargetId", "assessment-sla");
                     assertCanonicalActivity(observation, "stage-instance", "assessment-stage");
                 });
         assertThat(observations.getAllValues().get(1))
@@ -196,7 +205,9 @@ class EmbeddedEngineEventBridgeTest {
                 .isInstanceOfSatisfying(MilestoneObservation.class, observation -> {
                     assertThat(observation.eventType())
                             .isEqualTo(MilestoneObservation.EventType.REACHED);
-                    assertThat(observation.attributes()).containsEntry("milestoneId", "approved");
+                    assertThat(observation.attributes())
+                            .containsEntry("milestoneId", "approved")
+                            .containsEntry("slaTargetId", "approved-sla");
                     assertCanonicalActivity(observation, "milestone-instance", "approved-milestone");
                 });
     }

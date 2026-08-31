@@ -253,14 +253,14 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
         TransactionTemplate transaction = new TransactionTemplate(
                 context.getBean(PlatformTransactionManager.class));
 
-        transaction.executeWithoutResult(status -> contractHandler.apply(processObservation(
-                "sla-start", 1L, ProcessObservation.EventType.STARTED,
+        transaction.executeWithoutResult(status -> contractHandler.apply(slaTaskObservation(
+                "sla-start", 1L, UserTaskObservation.EventType.CREATED,
                 Instant.parse("2026-08-30T10:00:00Z"))));
-        transaction.executeWithoutResult(status -> contractHandler.apply(processObservation(
-                "sla-pause", 2L, ProcessObservation.EventType.SUSPENDED,
+        transaction.executeWithoutResult(status -> contractHandler.apply(slaTaskObservation(
+                "sla-pause", 2L, UserTaskObservation.EventType.CLAIMED,
                 Instant.parse("2026-08-30T10:10:00Z"))));
-        transaction.executeWithoutResult(status -> contractHandler.apply(processObservation(
-                "sla-resume", 3L, ProcessObservation.EventType.RESUMED,
+        transaction.executeWithoutResult(status -> contractHandler.apply(slaTaskObservation(
+                "sla-resume", 3L, UserTaskObservation.EventType.UNCLAIMED,
                 Instant.parse("2026-08-30T10:20:00Z"))));
 
         assertThat(jdbc().sql("""
@@ -273,7 +273,7 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                     assertThat(row.get(1)).isEqualTo(OffsetDateTime.parse("2026-08-30T11:10:00Z"));
                     assertThat(row.get(2)).isEqualTo(OffsetDateTime.parse("2026-08-30T10:40:00Z"));
                     assertThat(row.get(3)).isEqualTo(600L);
-                    assertThat(String.valueOf(row.get(4))).contains("PROCESS_RESUMED");
+                    assertThat(String.valueOf(row.get(4))).contains("USER_TASK_UNCLAIMED");
                 });
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.started'")
                 .query(Integer.class).single()).isEqualTo(1);
@@ -401,14 +401,18 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                 "processDefinitionKey", PROCESS_DEFINITION_KEY));
     }
 
-    private ProcessObservation processObservation(String observationId, long revision,
-                                                   ProcessObservation.EventType type,
+    private UserTaskObservation slaTaskObservation(String observationId, long revision,
+                                                   UserTaskObservation.EventType type,
                                                    Instant occurredAt) {
-        return new ProcessObservation(observationId, 1, "operaton:embedded", ENGINE_ID,
-                TENANT_ID, CASE_ID, PROCESS_INSTANCE_ID, PROCESS_INSTANCE_ID, revision, type,
+        return new UserTaskObservation(observationId, 1, "operaton:embedded", ENGINE_ID,
+                TENANT_ID, CASE_ID, PROCESS_INSTANCE_ID, "sla-task-1", revision, type,
                 occurredAt, occurredAt.plusSeconds(5), Map.of(
                 "processDefinitionId", PROCESS_DEFINITION_ID,
-                "processDefinitionKey", PROCESS_DEFINITION_KEY));
+                "processDefinitionKey", PROCESS_DEFINITION_KEY,
+                "taskDefinitionKey", "slaReviewTask",
+                "activityInstanceId", "sla-activity-1",
+                "name", "SLA Review",
+                "slaTargetId", "resolution"));
     }
 
     private DatabaseState state() {
@@ -576,11 +580,11 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                      "target":"decision","type":"string","required":true}
                   ],
                   "slaBindings":{
-                    "resolution":{"scope":"CASE","calendarId":"calendar-1",
-                    "calendarRevision":1,"duration":"PT1H","startAnchor":"CASE_CREATED",
-                    "meetAnchor":"CASE_CLOSED","cancelAnchor":"CASE_CANCELLED",
-                    "pauseAnchors":["PROCESS_SUSPENDED"],
-                    "resumeAnchors":["PROCESS_RESUMED"],"warnings":["PT30M"]}
+                    "resolution":{"scope":"TASK","calendarId":"calendar-1",
+                    "calendarRevision":1,"duration":"PT1H","startAnchor":"USER_TASK_CREATED",
+                    "meetAnchor":"USER_TASK_COMPLETED","cancelAnchor":"USER_TASK_DELETED",
+                    "pauseAnchors":["USER_TASK_CLAIMED"],
+                    "resumeAnchors":["USER_TASK_UNCLAIMED"],"warnings":["PT30M"]}
                   }
                 }
                 """;

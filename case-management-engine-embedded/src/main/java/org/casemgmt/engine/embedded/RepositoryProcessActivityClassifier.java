@@ -25,12 +25,13 @@ public final class RepositoryProcessActivityClassifier implements ProcessActivit
                 .getModelElementById(activityId);
         if (element == null) return Optional.empty();
         String milestoneId = element.getAttributeValueNs(CASE_MANAGEMENT_NAMESPACE, "milestoneId");
+        String slaTargetId = element.getAttributeValueNs(CASE_MANAGEMENT_NAMESPACE, "slaTargetId");
         if (milestoneId != null && !milestoneId.isBlank()) {
-            return Optional.of(new Classification(Kind.MILESTONE, milestoneId));
+            return Optional.of(new Classification(Kind.MILESTONE, milestoneId, slaTargetId));
         }
         String stage = element.getAttributeValueNs(CASE_MANAGEMENT_NAMESPACE, "stage");
         if (element instanceof SubProcess && "true".equalsIgnoreCase(stage)) {
-            return Optional.of(new Classification(Kind.STAGE, null));
+            return Optional.of(new Classification(Kind.STAGE, null, slaTargetId));
         }
         return Optional.empty();
     }
@@ -49,6 +50,7 @@ public final class RepositoryProcessActivityClassifier implements ProcessActivit
         List<String> candidateGroups = groups == null ? List.of() : Arrays.stream(groups.split(","))
                 .map(String::trim).filter(value -> !value.isBlank()).toList();
         return new TaskMetadata(candidateGroups,
-                element.getAttributeValueNs(OPERATON_NAMESPACE, "formKey"));
+                element.getAttributeValueNs(OPERATON_NAMESPACE, "formKey"),
+                element.getAttributeValueNs(CASE_MANAGEMENT_NAMESPACE, "slaTargetId"));
     }
 }

@@ -39,7 +39,8 @@ public class SlaRepository implements SlaCalendarCatalog {
                                      String transitionEvidence) { }
 
     /** Contract snapshot plus mutable runtime clock state, read only inside the case lock. */
-    public record ContractLifecycleRow(SlaRecord record, String calendarDefinition,
+    public record ContractLifecycleRow(SlaRecord record, String meetAnchor, String cancelAnchor,
+                                       String calendarDefinition,
                                        List<String> pauseAnchors, List<String> resumeAnchors) { }
 
     private static final String RECORD_COLUMNS = """
@@ -359,16 +360,38 @@ public class SlaRepository implements SlaCalendarCatalog {
 
     public List<ContractLifecycleRow> contractLifecycleRows(String caseId, String releaseId,
                                                              String targetKey) {
-        return jdbc.sql("SELECT " + RECORD_COLUMNS + ", CALENDAR_DEFINITION_JSON_, "
-                        + "PAUSE_ANCHORS_JSON_, RESUME_ANCHORS_JSON_ FROM CM_SLA_RECORD "
+        return jdbc.sql("SELECT " + RECORD_COLUMNS + ", MEET_ANCHOR_, CANCEL_ANCHOR_, "
+                        + "CALENDAR_DEFINITION_JSON_, PAUSE_ANCHORS_JSON_, "
+                        + "RESUME_ANCHORS_JSON_ FROM CM_SLA_RECORD "
                         + "WHERE CASE_ID_ = :caseId AND CONTRACT_RELEASE_ID_ = :releaseId "
                         + "AND TARGET_KEY_ = :targetKey ORDER BY ID_")
                 .param("caseId", caseId).param("releaseId", releaseId).param("targetKey", targetKey)
                 .query((rs, n) -> new ContractLifecycleRow(mapRecord(rs, n),
+                        rs.getString("MEET_ANCHOR_"), rs.getString("CANCEL_ANCHOR_"),
                         rs.getString("CALENDAR_DEFINITION_JSON_"),
                         JsonCodec.toList(rs.getString("PAUSE_ANCHORS_JSON_")),
                         JsonCodec.toList(rs.getString("RESUME_ANCHORS_JSON_"))))
                 .list();
+    }
+
+    public java.util.Optional<SlaRecord> terminalizeContractOccurrence(
+            ContractLifecycleRow row, String anchor, OffsetDateTime occurredAt) {
+        String status = anchor.equals(row.meetAnchor()) ? "MET"
+                : anchor.equals(row.cancelAnchor()) ? "CANCELLED" : null;
+        if (status == null) return java.util.Optional.empty();
+        int changed = jdbc.sql("""
+                UPDATE CM_SLA_RECORD
+                SET STATUS_ = :status, WARN_AT_ = NULL, PAUSED_AT_ = NULL,
+                    PAUSED_REASON_ = NULL, CLAIM_TOKEN_ = NULL, CLAIMED_AT_ = NULL,
+                    MET_AT_ = CASE WHEN :status = 'MET' THEN :occurredAt ELSE MET_AT_ END,
+                    CANCELLED_AT_ = CASE WHEN :status = 'CANCELLED' THEN :occurredAt ELSE CANCELLED_AT_ END,
+                    TRANSITION_EVIDENCE_JSON_ = :evidence, VERSION_ = VERSION_ + 1
+                WHERE ID_ = :id AND STATUS_ IN ('RUNNING', 'PAUSED')""")
+                .param("id", row.record().id()).param("status", status)
+                .param("occurredAt", occurredAt)
+                .param("evidence", evidence(status, anchor, occurredAt)).update();
+        return changed == 0 ? java.util.Optional.empty()
+                : java.util.Optional.of(require(row.record().id()));
     }
 
     public java.util.Optional<SlaRecord> pauseContractOccurrence(ContractLifecycleRow row,

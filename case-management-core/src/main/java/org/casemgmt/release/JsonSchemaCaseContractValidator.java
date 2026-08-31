@@ -335,17 +335,27 @@ public final class JsonSchemaCaseContractValidator implements CaseContractValida
                         text(node, "calendarId"),
                         text(node, "duration"),
                         text(node, "dueDateExpression"),
-                        text(node, "startAnchor"),
-                        text(node, "meetAnchor"),
-                        text(node, "cancelAnchor"),
+                        anchor(node, "startAnchor"),
+                        anchor(node, "meetAnchor"),
+                        anchor(node, "cancelAnchor"),
                         strings(node.get("warnings")),
                         integer(node, "targetVersion", 1),
                         text(node, "occurrenceKey"),
                         integer(node, "calendarRevision", 1),
-                        strings(node.get("pauseAnchors")),
-                        strings(node.get("resumeAnchors")),
-                        strings(node.get("breachActions")))));
+                        anchors(node.get("pauseAnchors")),
+                        anchors(node.get("resumeAnchors")),
+                        strings(node.get("breachActions")).stream()
+                                .map(ValidatedCaseContract.SlaBreachAction::valueOf).toList())));
         return result;
+    }
+
+    private static ValidatedCaseContract.SlaAnchor anchor(JsonNode node, String property) {
+        String value = text(node, property);
+        return value == null ? null : ValidatedCaseContract.SlaAnchor.valueOf(value);
+    }
+
+    private static List<ValidatedCaseContract.SlaAnchor> anchors(JsonNode node) {
+        return strings(node).stream().map(ValidatedCaseContract.SlaAnchor::valueOf).toList();
     }
 
     private List<ValidatedCaseContract.AdHocActionDefinition> adHocActions(JsonNode root) {

@@ -75,6 +75,41 @@ public record ValidatedCaseContract(
     /** What a business deadline is measured against. */
     public enum SlaScope { CASE, STAGE, TASK, MILESTONE, OCCURRENCE }
 
+    /** The lifecycle event families the engine observation boundary can emit. */
+    public enum SlaAnchorFamily { CASE, TASK, STAGE, MILESTONE }
+
+    /** One supported lifecycle event that may drive an SLA transition. */
+    public enum SlaAnchor {
+        CASE_CREATED(SlaAnchorFamily.CASE),
+        CASE_CLOSED(SlaAnchorFamily.CASE),
+        CASE_CANCELLED(SlaAnchorFamily.CASE),
+        USER_TASK_CREATED(SlaAnchorFamily.TASK),
+        USER_TASK_CLAIMED(SlaAnchorFamily.TASK),
+        USER_TASK_UNCLAIMED(SlaAnchorFamily.TASK),
+        USER_TASK_ASSIGNED(SlaAnchorFamily.TASK),
+        USER_TASK_COMPLETED(SlaAnchorFamily.TASK),
+        USER_TASK_DELETED(SlaAnchorFamily.TASK),
+        ACTIVITY_STARTED(SlaAnchorFamily.STAGE),
+        ACTIVITY_COMPLETED(SlaAnchorFamily.STAGE),
+        ACTIVITY_CANCELLED(SlaAnchorFamily.STAGE),
+        MILESTONE_REACHED(SlaAnchorFamily.MILESTONE),
+        MILESTONE_REOPENED(SlaAnchorFamily.MILESTONE),
+        MILESTONE_CANCELLED(SlaAnchorFamily.MILESTONE);
+
+        private final SlaAnchorFamily family;
+
+        SlaAnchor(SlaAnchorFamily family) {
+            this.family = family;
+        }
+
+        public SlaAnchorFamily family() {
+            return family;
+        }
+    }
+
+    /** The complete set of breach side effects implemented by the SLA sweeper. */
+    public enum SlaBreachAction { EMIT_EVENT, ESCALATE }
+
     /** Which side supplies and receives a declared canonical mapping. */
     public enum MappingDirection { CASE_TO_ENGINE, ENGINE_TO_CASE }
 
@@ -136,11 +171,12 @@ public record ValidatedCaseContract(
      */
     public record SlaBindingDefinition(String id, SlaScope scope, String calendarId,
                                        String duration, String dueDateExpression,
-                                       String startAnchor, String meetAnchor, String cancelAnchor,
+                                       SlaAnchor startAnchor, SlaAnchor meetAnchor,
+                                       SlaAnchor cancelAnchor,
                                        List<String> warnings, Integer targetVersion,
                                        String occurrenceKey, Integer calendarRevision,
-                                       List<String> pauseAnchors, List<String> resumeAnchors,
-                                       List<String> breachActions) {
+                                       List<SlaAnchor> pauseAnchors, List<SlaAnchor> resumeAnchors,
+                                       List<SlaBreachAction> breachActions) {
         public SlaBindingDefinition {
             warnings = List.copyOf(warnings);
             pauseAnchors = List.copyOf(pauseAnchors);
@@ -153,8 +189,13 @@ public record ValidatedCaseContract(
                                     String duration, String dueDateExpression,
                                     String startAnchor, String meetAnchor, String cancelAnchor,
                                     List<String> warnings) {
-            this(id, scope, calendarId, duration, dueDateExpression, startAnchor, meetAnchor,
-                    cancelAnchor, warnings, 1, null, 1, List.of(), List.of(), List.of());
+            this(id, scope, calendarId, duration, dueDateExpression, anchor(startAnchor),
+                    anchor(meetAnchor), anchor(cancelAnchor), warnings, 1, null, 1,
+                    List.of(), List.of(), List.of());
+        }
+
+        private static SlaAnchor anchor(String value) {
+            return value == null ? null : SlaAnchor.valueOf(value);
         }
     }
 

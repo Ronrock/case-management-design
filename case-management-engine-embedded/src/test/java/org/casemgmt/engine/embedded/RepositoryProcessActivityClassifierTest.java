@@ -31,22 +31,24 @@ class RepositoryProcessActivityClassifierTest {
                              targetNamespace="urn:test">
                   <process id="case-process">
                     <userTask id="review" engine:candidateGroups="reviewers, managers"
-                              engine:formKey="review-form" />
-                    <subProcess id="assessment" case:stage="true" />
-                    <intermediateThrowEvent id="approved" case:milestoneId="approved" />
+                              engine:formKey="review-form" case:slaTargetId="review-sla" />
+                    <subProcess id="assessment" case:stage="true"
+                                case:slaTargetId="assessment-sla" />
+                    <intermediateThrowEvent id="approved" case:milestoneId="approved"
+                                            case:slaTargetId="approved-sla" />
                   </process>
                 </definitions>
                 """.formatted(BPMN_NAMESPACE, OPERATON_NAMESPACE, CASE_MANAGEMENT_NAMESPACE));
 
         assertThat(classifier.taskMetadata("definition", "review"))
                 .isEqualTo(new ProcessActivityClassifier.TaskMetadata(
-                        List.of("reviewers", "managers"), "review-form"));
+                        List.of("reviewers", "managers"), "review-form", "review-sla"));
         assertThat(classifier.classify("definition", "assessment"))
                 .contains(new ProcessActivityClassifier.Classification(
-                        ProcessActivityClassifier.Kind.STAGE, null));
+                        ProcessActivityClassifier.Kind.STAGE, null, "assessment-sla"));
         assertThat(classifier.classify("definition", "approved"))
                 .contains(new ProcessActivityClassifier.Classification(
-                        ProcessActivityClassifier.Kind.MILESTONE, "approved"));
+                        ProcessActivityClassifier.Kind.MILESTONE, "approved", "approved-sla"));
     }
 
     @Test

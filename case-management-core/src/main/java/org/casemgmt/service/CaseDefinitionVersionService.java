@@ -171,11 +171,13 @@ public class CaseDefinitionVersionService {
             }
         }
         Set<String> slaTargets = contract.slaTargetIds();
-        for (String slaRef : orchestrationIndex.slaRefs()) {
-            if (!dynamic(slaRef) && !slaTargets.contains(slaRef)) {
-                referenceErrors.add("BPMN element references unknown SLA binding '" + slaRef + "'");
+        for (BpmnReleaseValidator.SlaReference slaRef : orchestrationIndex.slaRefs()) {
+            if (!slaTargets.contains(slaRef.targetId())) {
+                referenceErrors.add("BPMN element '" + slaRef.elementId()
+                        + "' references unknown SLA binding '" + slaRef.targetId() + "'");
             }
         }
+        validateSlaReferences(contract, orchestrationIndex, referenceErrors);
         validateAdHocActions(contract, referenceErrors);
         Set<String> fields = contract.fields().keySet();
         Set<String> actions = new LinkedHashSet<>(Set.of("update", "cancel", "close", "claim",
@@ -210,6 +212,72 @@ public class CaseDefinitionVersionService {
             }
         }
         rejectReferenceErrors(key, referenceErrors);
+    }
+
+    private static void validateSlaReferences(
+            ValidatedCaseContract contract, BpmnReleaseValidator.Index orchestration,
+            ReferenceErrors errors) {
+        Map<String, ValidatedCaseContract.SlaBindingDefinition> bindings = new LinkedHashMap<>();
+        contract.slaBindings().forEach(binding -> bindings.put(binding.id(), binding));
+        Set<String> referencedBindings = orchestration.slaRefs().stream()
+                .map(BpmnReleaseValidator.SlaReference::targetId)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        for (ValidatedCaseContract.SlaBindingDefinition binding : contract.slaBindings()) {
+            if (!referencedBindings.contains(binding.id())) {
+                errors.add("SLA binding '" + binding.id()
+                        + "' is not executable because no BPMN element references it");
+            }
+        }
+        for (BpmnReleaseValidator.SlaReference reference : orchestration.slaRefs()) {
+            ValidatedCaseContract.SlaBindingDefinition binding = bindings.get(reference.targetId());
+            if (binding == null) continue;
+            if (binding.scope() != ValidatedCaseContract.SlaScope.OCCURRENCE
+                    && !binding.scope().name().equals(reference.kind().name())) {
+                errors.add("SLA binding '" + binding.id() + "' has scope " + binding.scope()
+                        + " but BPMN element '" + reference.elementId() + "' is "
+                        + reference.kind());
+            }
+            if (binding.scope() == ValidatedCaseContract.SlaScope.OCCURRENCE) {
+                if (binding.occurrenceKey() == null) {
+                    errors.add("SLA binding '" + binding.id()
+                            + "' with scope OCCURRENCE requires occurrenceKey");
+                }
+                if (reference.kind() == BpmnReleaseValidator.ElementKind.CASE) {
+                    errors.add("SLA binding '" + binding.id()
+                            + "' with scope OCCURRENCE requires a repeatable non-root "
+                            + "TASK, STAGE, or MILESTONE element");
+                } else if (!reference.repeatable()) {
+                    errors.add("SLA binding '" + binding.id() + "' with scope OCCURRENCE "
+                            + "references non-repeatable BPMN element '"
+                            + reference.elementId() + "'");
+                }
+            }
+            ValidatedCaseContract.SlaAnchorFamily expected = switch (reference.kind()) {
+                case CASE -> ValidatedCaseContract.SlaAnchorFamily.CASE;
+                case TASK -> ValidatedCaseContract.SlaAnchorFamily.TASK;
+                case STAGE -> ValidatedCaseContract.SlaAnchorFamily.STAGE;
+                case MILESTONE -> ValidatedCaseContract.SlaAnchorFamily.MILESTONE;
+            };
+            for (ValidatedCaseContract.SlaAnchor anchor : slaAnchors(binding)) {
+                if (anchor.family() != expected) {
+                    errors.add("SLA binding '" + binding.id() + "' on "
+                            + reference.kind() + " element '" + reference.elementId()
+                            + "' cannot use " + anchor + " from the " + anchor.family()
+                            + " anchor family");
+                }
+            }
+        }
+    }
+
+    private static List<ValidatedCaseContract.SlaAnchor> slaAnchors(
+            ValidatedCaseContract.SlaBindingDefinition binding) {
+        List<ValidatedCaseContract.SlaAnchor> anchors = new ArrayList<>();
+        anchors.add(binding.startAnchor());
+        anchors.add(binding.meetAnchor());
+        if (binding.cancelAnchor() != null) anchors.add(binding.cancelAnchor());
+        anchors.addAll(binding.pauseAnchors());
+        anchors.addAll(binding.resumeAnchors());
+        return anchors;
     }
 
     /**

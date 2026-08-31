@@ -63,8 +63,12 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
         if (contracts == null) return; // Compatibility for callers that have not enabled releases.
         CaseInstance instance = cases.require(anchor.caseId());
         BoundSlaContractResolver.ResolvedContract bound = contracts.resolve(instance);
-        String observedAnchor = anchorName(anchor);
+        ValidatedCaseContract.SlaAnchor observedAnchor = anchorName(anchor);
+        if (observedAnchor == null) return; // Process suspend/resume are observations, not SLA anchors.
         for (ValidatedCaseContract.SlaBindingDefinition binding : bound.contract().slaBindings()) {
+            if (!matchesTarget(binding, anchor)) {
+                continue;
+            }
             if (observedAnchor.equals(binding.startAnchor())) {
                 createOccurrence(instance, bound, binding, anchor, observedAnchor);
             }
@@ -105,7 +109,7 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
 
     private void createOccurrence(CaseInstance instance, BoundSlaContractResolver.ResolvedContract bound,
                                   ValidatedCaseContract.SlaBindingDefinition binding, Anchor anchor,
-                                  String observedAnchor) {
+                                  ValidatedCaseContract.SlaAnchor observedAnchor) {
         if (binding.duration() == null) {
             throw new IllegalStateException("SLA binding '" + binding.id()
                     + "' uses dueDateExpression, which has no registered deterministic evaluator");
@@ -126,7 +130,7 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
         String targetId = "ct-" + hash.substring(0, 40);
         sla.ensureContractTarget(policyId, targetId, binding.id(),
                 binding.duration(), binding.warnings().isEmpty() ? null : binding.warnings().getFirst(),
-                binding.breachActions());
+                names(binding.breachActions()));
         String occurrenceHash = JsonCodec.sha256(instance.id() + "|" + bound.releaseId() + "|"
                 + binding.id() + "|" + occurrenceKey);
         String occurrenceId = "so-" + occurrenceHash.substring(0, 40);
@@ -134,10 +138,11 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
                 occurrenceId, instance.id(), targetId, binding.id(),
                 binding.targetVersion(), binding.scope().name(), occurrenceKey, bound.releaseId(),
                 bound.sha256(), binding.calendarId(), binding.calendarRevision(),
-                calendarRevision.sha256(), binding.meetAnchor(),
-                binding.cancelAnchor(), startedAt, dueAt, warnAt,
-                JsonCodec.canonicalJson(calendarDefinition), binding.pauseAnchors(), binding.resumeAnchors(),
-                JsonCodec.toJson(Map.of("anchor", observedAnchor, "occurredAt",
+                calendarRevision.sha256(), name(binding.meetAnchor()),
+                name(binding.cancelAnchor()), startedAt, dueAt, warnAt,
+                JsonCodec.canonicalJson(calendarDefinition), names(binding.pauseAnchors()),
+                names(binding.resumeAnchors()),
+                JsonCodec.toJson(Map.of("anchor", observedAnchor.name(), "occurredAt",
                         anchor.occurredAt().toString(), "transition", "STARTED"))));
         if (inserted) {
             Map<String, Object> data = Map.of("slaId", occurrenceId, "targetId", targetId,
@@ -153,16 +158,18 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
     private void applyAnchorTransition(CaseInstance instance,
                                        BoundSlaContractResolver.ResolvedContract bound,
                                        ValidatedCaseContract.SlaBindingDefinition binding,
-                                       String observedAnchor, Instant occurredAt) {
+                                       ValidatedCaseContract.SlaAnchor observedAnchor,
+                                       Instant occurredAt) {
         OffsetDateTime at = OffsetDateTime.ofInstant(occurredAt, ZoneOffset.UTC);
         for (SlaRepository.ContractLifecycleRow row : sla.contractLifecycleRows(instance.id(),
                 bound.releaseId(), binding.id())) {
-            if (row.pauseAnchors().contains(observedAnchor)) {
-                sla.pauseContractOccurrence(row, observedAnchor, at)
+            if (row.pauseAnchors().contains(observedAnchor.name())) {
+                sla.pauseContractOccurrence(row, observedAnchor.name(), at)
                         .ifPresent(record -> emitTransition(instance, record, EventTypes.SLA_PAUSED,
-                                "sla.pause", observedAnchor, at));
+                                "sla.pause", observedAnchor.name(), at));
             }
-            if (row.resumeAnchors().contains(observedAnchor) && "PAUSED".equals(row.record().status())) {
+            if (row.resumeAnchors().contains(observedAnchor.name())
+                    && "PAUSED".equals(row.record().status())) {
                 BusinessCalendar calendar = BusinessCalendar.fromJson("SLA occurrence "
                         + row.record().id() + " calendar snapshot", JsonCodec.toMap(row.calendarDefinition()));
                 OffsetDateTime pausedAt = row.record().pausedAt();
@@ -171,11 +178,17 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
                 OffsetDateTime warnAt = row.record().warnAt() == null ? null : calendar.addDuration(at,
                         calendar.workingDurationBetween(pausedAt, row.record().warnAt()));
                 long pausedSeconds = Math.max(0, Duration.between(pausedAt, at).toSeconds());
-                sla.resumeContractOccurrence(row, observedAnchor, at, dueAt, warnAt,
+                sla.resumeContractOccurrence(row, observedAnchor.name(), at, dueAt, warnAt,
                         row.record().pausedTotalSeconds() + pausedSeconds)
                         .ifPresent(record -> emitTransition(instance, record, EventTypes.SLA_RESUMED,
-                                "sla.resume", observedAnchor, at));
+                                "sla.resume", observedAnchor.name(), at));
             }
+            sla.terminalizeContractOccurrence(row, observedAnchor.name(), at)
+                    .ifPresent(record -> emitTransition(instance, record,
+                            "MET".equals(record.status()) ? EventTypes.SLA_MET
+                                    : EventTypes.SLA_CANCELLED,
+                            "MET".equals(record.status()) ? "sla.meet" : "sla.cancel",
+                            observedAnchor.name(), at));
         }
     }
 
@@ -195,16 +208,33 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
         return binding.scope() == ValidatedCaseContract.SlaScope.CASE ? "CASE" : anchor.entityId();
     }
 
-    private static String anchorName(Anchor anchor) {
+    private static boolean matchesTarget(
+            ValidatedCaseContract.SlaBindingDefinition binding, Anchor anchor) {
+        if (binding.scope() == ValidatedCaseContract.SlaScope.CASE) {
+            return "process".equals(anchor.observationKind()) && anchor.slaTargetId() == null;
+        }
+        return binding.id().equals(anchor.slaTargetId());
+    }
+
+    private static ValidatedCaseContract.SlaAnchor anchorName(Anchor anchor) {
         if ("process".equals(anchor.observationKind())) {
             return switch (anchor.eventType()) {
-                case "STARTED" -> "CASE_CREATED";
-                case "COMPLETED" -> "CASE_CLOSED";
-                case "TERMINATED" -> "CASE_CANCELLED";
-                default -> "PROCESS_" + anchor.eventType();
+                case "STARTED" -> ValidatedCaseContract.SlaAnchor.CASE_CREATED;
+                case "COMPLETED" -> ValidatedCaseContract.SlaAnchor.CASE_CLOSED;
+                case "TERMINATED" -> ValidatedCaseContract.SlaAnchor.CASE_CANCELLED;
+                default -> null;
             };
         }
-        return anchor.observationKind().replace('-', '_').toUpperCase(java.util.Locale.ROOT)
-                + "_" + anchor.eventType();
+        return ValidatedCaseContract.SlaAnchor.valueOf(
+                anchor.observationKind().replace('-', '_').toUpperCase(java.util.Locale.ROOT)
+                        + "_" + anchor.eventType());
+    }
+
+    private static String name(Enum<?> value) {
+        return value == null ? null : value.name();
+    }
+
+    private static List<String> names(List<? extends Enum<?>> values) {
+        return values.stream().map(Enum::name).toList();
     }
 }

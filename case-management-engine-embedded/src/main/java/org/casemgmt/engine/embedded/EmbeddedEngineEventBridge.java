@@ -103,6 +103,7 @@ public final class EmbeddedEngineEventBridge {
         put(attributes, "assignee", event.getAssignee());
         attributes.put("candidateGroups", metadata.candidateGroups());
         put(attributes, "formKey", metadata.formKey());
+        put(attributes, "slaTargetId", metadata.slaTargetId());
         attributes.put("priority", event.getPriority());
         if (event.getDueDate() != null) {
             attributes.put("dueAt", at(event.getDueDate()).toString());
@@ -144,6 +145,7 @@ public final class EmbeddedEngineEventBridge {
         put(attributes, "name", event.getCurrentActivityName());
 
         ProcessActivityClassifier.Classification value = classification.orElseThrow();
+        put(attributes, "slaTargetId", value.slaTargetId());
         if (value.kind() == ProcessActivityClassifier.Kind.MILESTONE) {
             MilestoneObservation.EventType type = milestoneEvent(event.getEventName());
             if (type == null) {
@@ -258,6 +260,7 @@ public final class EmbeddedEngineEventBridge {
         put(attributes, "activityId", activity.getActivityId());
         put(attributes, "name", activity.getActivityName());
         var value = classification.orElseThrow();
+        put(attributes, "slaTargetId", value.slaTargetId());
         if (value.kind() == ProcessActivityClassifier.Kind.MILESTONE) {
             put(attributes, "milestoneId", value.milestoneId());
             apply(new MilestoneObservation(observationId(), 1, SOURCE, engineId,

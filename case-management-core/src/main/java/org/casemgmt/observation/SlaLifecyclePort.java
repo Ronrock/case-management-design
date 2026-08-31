@@ -11,7 +11,12 @@ import java.time.Instant;
 public interface SlaLifecyclePort {
 
     record Anchor(String caseId, String observationKind, String eventType,
-                  String entityId, Instant occurredAt) { }
+                  String entityId, String slaTargetId, Instant occurredAt) {
+        public Anchor(String caseId, String observationKind, String eventType,
+                      String entityId, Instant occurredAt) {
+            this(caseId, observationKind, eventType, entityId, null, occurredAt);
+        }
+    }
 
     enum TerminalState { COMPLETED, CANCELLED }
 

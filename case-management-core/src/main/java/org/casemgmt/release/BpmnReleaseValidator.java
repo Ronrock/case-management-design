@@ -59,9 +59,18 @@ public final class BpmnReleaseValidator {
     /** Retired spellings, mapped to the name that replaced them. */
     private static final Map<String, String> RETIRED = Map.of("slaRef", "slaTargetId");
 
+    public enum ElementKind { CASE, TASK, STAGE, MILESTONE }
+
+    public record SlaReference(String targetId, String elementId, ElementKind kind,
+                               boolean repeatable) {
+        public SlaReference(String targetId, String elementId, ElementKind kind) {
+            this(targetId, elementId, kind, false);
+        }
+    }
+
     public record Index(Set<String> processIds, Set<String> formRefs,
                         Set<String> milestoneIds, Set<String> decisionIds,
-                        Set<String> candidateGroups, Set<String> slaRefs) { }
+                        Set<String> candidateGroups, Set<SlaReference> slaRefs) { }
 
     public static Index validate(String definitionKey, byte[] content, String mediaType) {
         List<Resource> resources = "application/zip".equals(mediaType)
@@ -74,7 +83,7 @@ public final class BpmnReleaseValidator {
         Set<String> calledElements = new LinkedHashSet<>();
         Set<String> decisionRefs = new LinkedHashSet<>();
         Set<String> candidateGroups = new LinkedHashSet<>();
-        Set<String> slaRefs = new LinkedHashSet<>();
+        Set<SlaReference> slaRefs = new LinkedHashSet<>();
         int bpmnFiles = 0;
         for (Resource resource : resources) {
             Document document = parse(definitionKey, resource);
@@ -186,7 +195,7 @@ public final class BpmnReleaseValidator {
     private static void indexBpmn(String key, Document document, Set<String> processIds,
                                   Set<String> formRefs, Set<String> milestones,
                                   Set<String> calledElements, Set<String> decisionRefs,
-                                  Set<String> candidateGroups, Set<String> slaRefs) {
+                                  Set<String> candidateGroups, Set<SlaReference> slaRefs) {
         requireDocumentRoot(key, document, "BPMN", Set.of(BPMN_NS));
         var nodes = document.getElementsByTagNameNS(BPMN_NS, "*");
         for (int i = 0; i < nodes.getLength(); i++) {
@@ -209,8 +218,49 @@ public final class BpmnReleaseValidator {
             if (milestone != null && !milestones.add(milestone)) {
                 throw invalid(key, "Duplicate milestone id '" + milestone + "'");
             }
-            addIfText(slaRefs, extension(element, "slaTargetId"));
+            String slaTargetId = extension(element, "slaTargetId");
+            if (slaTargetId != null && !slaTargetId.isBlank()) {
+                slaRefs.add(new SlaReference(slaTargetId, elementId(element),
+                        observableElementKind(key, element, milestone), repeatable(element)));
+            }
         }
+    }
+
+    private static boolean repeatable(Element element) {
+        Node node = element;
+        while (node instanceof Element current && !"process".equals(current.getLocalName())) {
+            for (Node child = current.getFirstChild(); child != null;
+                 child = child.getNextSibling()) {
+                if (child instanceof Element loop
+                        && BPMN_NS.equals(loop.getNamespaceURI())
+                        && ("multiInstanceLoopCharacteristics".equals(loop.getLocalName())
+                        || "standardLoopCharacteristics".equals(loop.getLocalName()))) {
+                    return true;
+                }
+            }
+            node = current.getParentNode();
+        }
+        return false;
+    }
+
+    private static ElementKind observableElementKind(String key, Element element,
+                                                     String milestoneId) {
+        String local = element.getLocalName();
+        if ("process".equals(local) && key.equals(attribute(element, "id"))) {
+            return ElementKind.CASE;
+        }
+        if (milestoneId != null) {
+            return ElementKind.MILESTONE;
+        }
+        if ("subProcess".equals(local)
+                && "true".equalsIgnoreCase(extension(element, "stage"))) {
+            return ElementKind.STAGE;
+        }
+        if ("userTask".equals(local)) {
+            return ElementKind.TASK;
+        }
+        throw invalid(key, "BPMN element '" + elementId(element)
+                + "' declares 'slaTargetId' but has no runtime lifecycle observation");
     }
 
     private static void indexDmn(String key, Document document, Set<String> decisions) {

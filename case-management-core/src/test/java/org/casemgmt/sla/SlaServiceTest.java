@@ -383,6 +383,22 @@ class SlaServiceTest extends OracleTestBase {
     }
 
     @Test
+    void unsupportedPersistedBreachActionIsRejectedInsteadOfSilentlyIgnored() {
+        slaRepo.insertTarget("tgt-unsupported", "pol-1", "unsupported", "Unsupported target",
+                "PT1H", null, List.of(), List.of("SEND_MESSAGE"));
+        sla.startClocks(caseId, "pol-1", alice);
+        SlaRecord unsupportedRecord = slaRepo.findByCase(caseId).stream()
+                .filter(r -> slaRepo.target(r.targetId()).targetKey().equals("unsupported"))
+                .findFirst().orElseThrow();
+
+        forceDueAtPast(unsupportedRecord.id());
+
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> TestServices.slaSweeper(jdbc()).sweep())
+                .withMessageContaining("SEND_MESSAGE");
+    }
+
+    @Test
     void pausedClocksAreNeverSweptIntoBreach() {
         sla.startClocks(caseId, "pol-1", alice);
         SlaRecord record = slaRepo.findByCase(caseId).get(0);
