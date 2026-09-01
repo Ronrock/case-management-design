@@ -1,4 +1,4 @@
-import type { ApiCredentials, AvailableAction, CaseEvent, CaseSummary, CaseWorkspaceSnapshot, CreateComplaintInput, MilestoneSummary, Page, PlanItemSummary, SlaSummary, TaskFormDefinition, TaskSummary } from './api-types'
+import type { ApiCredentials, AvailableAction, CaseComment, CaseEvent, CaseSummary, CaseWorkspaceSnapshot, CreateComplaintInput, MilestoneSummary, Page, PlanItemSummary, SlaSummary, TaskFormDefinition, TaskSummary } from './api-types'
 
 interface ProblemDetails {
   title?: string
@@ -49,6 +49,10 @@ export class CaseApiClient {
     return this.request('/cases')
   }
 
+  listTasks(): Promise<TaskSummary[]> {
+    return this.request('/tasks')
+  }
+
   createComplaint(input: CreateComplaintInput): Promise<CaseSummary> {
     const variables: Record<string, unknown> = {
       channel: input.channel,
@@ -81,7 +85,7 @@ export class CaseApiClient {
       this.request<PlanItemSummary[]>(`${path}/plan-items`),
       this.request<MilestoneSummary[]>(`${path}/milestones`),
       this.request<SlaSummary[]>(`${path}/slas`),
-      this.request<CaseEvent[]>(`${path}/events?after=0&limit=25`),
+      this.request<CaseEvent[]>(`${path}/events?after=0&limit=100`),
     ])
     return { case: caseItem, tasks, planItems, milestones, slas, events }
   }
@@ -116,14 +120,62 @@ export class CaseApiClient {
     return this.request(href, { method: action.method, headers, body })
   }
 
+  executeCaseAction(
+    action: AvailableAction,
+    version: number,
+    payload?: Record<string, unknown>,
+  ): Promise<CaseSummary> {
+    return this.executeVersionedAction(
+      action,
+      version,
+      payload,
+      action.action === 'update' ? 'application/merge-patch+json' : 'application/json',
+    )
+  }
+
+  executeSlaAction(action: AvailableAction, version: number, reason?: string): Promise<SlaSummary> {
+    return this.executeVersionedAction(
+      action,
+      version,
+      action.action === 'pause' ? { reason } : undefined,
+    )
+  }
+
+  listComments(caseId: string): Promise<CaseComment[]> {
+    return this.request(`/cases/${encodeURIComponent(caseId)}/comments`)
+  }
+
+  addComment(action: AvailableAction, text: string): Promise<CaseComment> {
+    return this.request(this.actionPath(action.href), {
+      method: action.method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, visibility: 'internal' }),
+    })
+  }
+
+  private executeVersionedAction<T>(
+    action: AvailableAction,
+    version: number,
+    payload?: Record<string, unknown>,
+    contentType = 'application/json',
+  ): Promise<T> {
+    const headers: Record<string, string> = { 'If-Match': `"${version}"` }
+    let body: string | undefined
+    if (payload !== undefined) {
+      headers['Content-Type'] = contentType
+      body = JSON.stringify(payload)
+    }
+    return this.request(this.actionPath(action.href), { method: action.method, headers, body })
+  }
+
   private actionPath(href: string) {
     if (/^https?:\/\//i.test(href)) {
       const url = new URL(href)
       if (typeof window === 'undefined' || url.origin !== window.location.origin) throw new Error('Refusing a cross-origin task action.')
       href = `${url.pathname}${url.search}`
     }
-    if (!href.startsWith('/case-api/v2/')) throw new Error('Refusing a task action outside the case API.')
-    return href
+    if (!href.startsWith('/') || href.startsWith('//')) throw new Error('Refusing a task action outside the case API.')
+    return href.startsWith(`${this.baseUrl}/`) ? href : `${this.baseUrl}${href}`
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -138,7 +190,8 @@ export class CaseApiClient {
     const url = path.startsWith(this.baseUrl) ? path : `${this.baseUrl}${path}`
     let response: Response
     try {
-      response = await this.fetchImpl(url, { ...init, headers })
+      const fetchImpl = this.fetchImpl
+      response = await fetchImpl(url, { ...init, headers })
     } catch (reason) {
       if (reason instanceof TypeError) {
         throw new Error(`Backend unavailable at ${this.baseUrl}. Start the PoC backend and try again.`)

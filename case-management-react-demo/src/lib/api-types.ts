@@ -35,6 +35,7 @@ export interface CaseSummary {
   version: number
   projectionStatus?: string | null
   availableActions: AvailableAction[]
+  collaborationActions?: AvailableAction[]
 }
 
 export interface CreateComplaintInput {
@@ -83,7 +84,20 @@ export interface SlaSummary {
   startedAt?: string | null
   dueAt?: string | null
   warnAt?: string | null
+  pausedAt?: string | null
+  pausedReason?: string | null
+  pausedTotalSeconds?: number
   version: number
+  availableActions: AvailableAction[]
+}
+
+export interface CaseComment {
+  id: string
+  caseId: string
+  author?: string | null
+  text?: string | null
+  visibility?: string | null
+  createdAt?: string | null
 }
 
 export interface CaseEvent {

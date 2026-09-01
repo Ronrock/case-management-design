@@ -24,7 +24,7 @@ describe('case workspace', () => {
       if (call.url.endsWith('/tasks')) return { body: [{ id: 'task-1', caseId: 'case-1', name: 'Assess complaint', state: 'ACTIVE', candidateGroups: [], version: 1, availableActions: [] }] }
       if (call.url.endsWith('/plan-items')) return { body: [{ id: 'item-1', type: 'HUMAN_TASK', name: 'Intake', state: 'COMPLETED', repetitionNo: 0, lastEngineUpdateAt: '2026-09-01T08:00:00Z' }] }
       if (call.url.endsWith('/milestones')) return { body: [] }
-      if (call.url.endsWith('/slas')) return { body: [{ id: 'sla-1', targetId: 'resolution', status: 'ACTIVE', dueAt: '2026-09-02T08:00:00Z', version: 1 }] }
+      if (call.url.endsWith('/slas')) return { body: [{ id: 'sla-1', targetId: 'resolution', status: 'ACTIVE', dueAt: '2026-09-02T08:00:00Z', version: 1, availableActions: [] }] }
       if (call.url.includes('/events?')) return { body: [{ id: 'event-1', type: 'CaseCreated', time: '2026-09-01T07:00:00Z' }] }
       throw new Error(`Unexpected ${call.url}`)
     })
