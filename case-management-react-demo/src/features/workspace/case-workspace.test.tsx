@@ -33,7 +33,8 @@ describe('case workspace', () => {
 
     expect(await screen.findByRole('heading', { name: 'Card complaint' })).toBeInTheDocument()
     expect(screen.getByText('Assess complaint')).toBeInTheDocument()
-    expect(screen.getByText('Resolution SLA')).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Service levels' })).toBeInTheDocument()
+    expect(screen.getByText('Resolution')).toBeInTheDocument()
     expect(screen.getByText('Charge disputed')).toBeInTheDocument()
     const urls = calls.map((call) => call.url)
     expect(urls.some((url) => url.endsWith('/cases/case-1'))).toBe(true)

@@ -132,6 +132,9 @@
 .facts-list dt { color: var(--muted-foreground); font-size: .78rem; font-weight: 650; text-transform: uppercase; }
 .facts-list dd { margin: 0; overflow-wrap: anywhere; }
 .task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: .9rem; }
+.sla-cockpit > h3 { margin: 0 0 1rem; color: var(--registry-blue); font-size: 1rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.sla-grid { display: grid; gap: .75rem; }
+.sla-card { min-width: 0; }
 
 .case-spine { position: relative; display: grid; gap: 0; margin: 0; padding: 0 0 0 1.7rem; list-style: none; }
 .case-spine::before { position: absolute; top: .45rem; bottom: .45rem; left: .48rem; width: 2px; background: #bac8cf; content: ""; }

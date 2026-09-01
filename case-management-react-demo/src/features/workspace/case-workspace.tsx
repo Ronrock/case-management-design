@@ -7,9 +7,10 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Separator } from '@/components/ui/separator'
 import { Skeleton } from '@/components/ui/skeleton'
-import type { CaseWorkspaceSnapshot, SlaSummary } from '@/lib/api-types'
+import type { CaseWorkspaceSnapshot } from '@/lib/api-types'
 import type { CaseApiClient } from '@/lib/case-api-client'
 import { CaseActionBar } from '@/features/cases/case-action-bar'
+import { SlaCockpit } from '@/features/slas/sla-cockpit'
 import { humanize } from '@/lib/format'
 import { TaskActions } from '@/features/tasks/task-actions'
 import { CaseSpine } from './case-spine'
@@ -41,7 +42,6 @@ export function CaseWorkspace({ client, caseId, refreshKey, onDataChanged }: Cas
   if (!load.snapshot) return null
 
   const snapshot = load.snapshot
-  const nearestSla = chooseSla(snapshot.slas)
   const changed = () => { if (onDataChanged) onDataChanged(); else setRetry((value) => value + 1) }
   return (
     <section className="workspace-panel">
@@ -52,7 +52,7 @@ export function CaseWorkspace({ client, caseId, refreshKey, onDataChanged }: Cas
 
       <div className="workspace-grid">
         <Card><CardHeader><CardTitle>Case facts</CardTitle></CardHeader><CardContent><dl className="facts-list">{Object.entries(snapshot.case.variables ?? {}).map(([key, value]) => <div key={key}><dt>{humanize(key)}</dt><dd>{formatValue(value)}</dd></div>)}</dl></CardContent></Card>
-        <Card><CardHeader><CardTitle>{nearestSla ? `${humanize(nearestSla.targetId)} SLA` : 'Service level'}</CardTitle></CardHeader><CardContent>{nearestSla ? <><Badge variant="outline">{nearestSla.status}</Badge><p className="mt-3 text-sm text-muted-foreground">Due <span className="mono">{nearestSla.dueAt ? new Date(nearestSla.dueAt).toLocaleString() : 'not set'}</span></p></> : <p className="text-sm text-muted-foreground">No active SLA.</p>}</CardContent></Card>
+        <SlaCockpit client={client} slas={snapshot.slas} onChanged={changed} />
       </div>
 
       <section className="workspace-section"><h3>Current tasks</h3><div className="task-grid">{snapshot.tasks.length ? snapshot.tasks.map((task) => <Card key={task.id}><CardHeader><CardTitle className="text-base">{task.name}</CardTitle></CardHeader><CardContent><div className="flex items-center justify-between"><Badge variant="secondary">{task.state}</Badge><span className="text-sm text-muted-foreground">{task.assignee || 'Unassigned'}</span></div><TaskActions client={client} caseItem={snapshot.case} task={task} onChanged={changed} /></CardContent></Card>) : <p className="empty-copy">No current tasks.</p>}</div></section>
@@ -62,10 +62,6 @@ export function CaseWorkspace({ client, caseId, refreshKey, onDataChanged }: Cas
       <section className="workspace-section"><h3>Recent events</h3><ul className="event-list">{snapshot.events.slice(-25).reverse().map((event) => <li key={event.id}><span>{humanize(event.type)}</span><span className="mono text-xs text-muted-foreground">{event.time ? new Date(event.time).toLocaleString() : 'Time unavailable'}</span></li>)}</ul></section>
     </section>
   )
-}
-
-function chooseSla(slas: SlaSummary[]) {
-  return slas.filter((sla) => !['COMPLETED', 'CANCELLED'].includes(sla.status)).sort((a, b) => (a.dueAt || '9999').localeCompare(b.dueAt || '9999'))[0]
 }
 
 function formatValue(value: unknown) {
