@@ -17,6 +17,8 @@ interface CaseWorkspaceProps {
   client: CaseApiClient
   caseId: string
   refreshKey: number
+  highlightedTaskId?: string
+  onDataChanged?(): void
 }
 
 export function CaseWorkspace({ client, caseId, refreshKey }: CaseWorkspaceProps) {

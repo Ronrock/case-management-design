@@ -95,4 +95,23 @@ describe('case demo', () => {
       variables: { channel: 'web', summary: 'Charge disputed', amount: 125 },
     })
   })
+
+  it('opens a work item in the shared case workspace', async () => {
+    installFetchScript((call) => {
+      if (call.url === '/case-api/v2/tasks') return { body: [{
+        id: 'task-2', caseId: 'case-2', name: 'Register complaint', state: 'OPEN',
+        candidateGroups: ['complaints-handlers'], version: 1,
+        availableActions: [{ action: 'claim', name: 'Claim', href: '/tasks/task-2/claim', method: 'POST' }],
+      }] }
+      if (call.url.endsWith('/cases')) return { body: page([caseItem('case-2', 'Card complaint')]) }
+      if (call.url.endsWith('/cases/case-2')) return { body: caseItem('case-2', 'Card complaint') }
+      return { body: [] }
+    })
+    const user = userEvent.setup()
+    render(<CaseDemo client={client()} username="alice" initialPage={page([])} />)
+
+    await user.click(screen.getByRole('button', { name: 'My Work' }))
+    await user.click(await screen.findByRole('button', { name: /Register complaint/ }))
+    expect(await screen.findByRole('heading', { name: 'Card complaint' })).toBeInTheDocument()
+  })
 })
