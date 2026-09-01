@@ -1,7 +1,7 @@
 # Functional Requirements Support Assessment
 
-**Assessment date:** 31 August 2026  
-**Requirements source:** `/Users/ron/Downloads/functional_requirements.md`  
+**Assessment date:** 31 August 2026
+**Requirements source:** `/Users/ron/Downloads/functional_requirements.md`
 **Repository snapshot:** commit `f61ef0cafb8e284084021bfb96de165e020b4ba9`, branch `feat/bpmn-first-orchestration`
 
 ## 1. Executive conclusion

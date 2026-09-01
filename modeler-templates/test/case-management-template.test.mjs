@@ -52,6 +52,11 @@ const EXTENSION_PACKAGES = {
     xml: { tagAlias: 'lowerCase' },
     types: [
       {
+        name: 'Process',
+        extends: ['bpmn:Process'],
+        properties: [{ name: 'slaTargetId', type: 'String', isAttr: true }]
+      },
+      {
         name: 'UserTask',
         extends: ['bpmn:UserTask'],
         properties: [{ name: 'slaTargetId', type: 'String', isAttr: true }]
@@ -202,6 +207,7 @@ test('a sample opened, saved and reopened keeps its exact namespaces and values'
 
   for (const parsed of [first, second]) {
     const process = parsed.rootElement.rootElements.find((e) => e.$type === 'bpmn:Process');
+    assert.equal(attributeByNamespaceUri(process, CASEMGMT_NS, 'slaTargetId'), 'resolution');
 
     const register = findFlowElement(process, 'register');
     assert.equal(attributeByNamespaceUri(register, OPERATON_NS, 'formKey'), 'registerForm');
@@ -209,7 +215,7 @@ test('a sample opened, saved and reopened keeps its exact namespaces and values'
 
     const close = findFlowElement(process, 'close-complaint');
     assert.equal(attributeByNamespaceUri(close, OPERATON_NS, 'formKey'), 'closeForm');
-    assert.equal(attributeByNamespaceUri(close, CASEMGMT_NS, 'slaTargetId'), 'resolution');
+    assert.equal(attributeByNamespaceUri(close, CASEMGMT_NS, 'slaTargetId'), undefined);
 
     const acknowledged = findFlowElement(process, 'acknowledged');
     assert.equal(attributeByNamespaceUri(
