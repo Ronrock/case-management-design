@@ -141,8 +141,7 @@ class SlaLifecycleServiceTest extends OracleTestBase {
                    "resolution":{"scope":"TASK","calendarId":"cal-1",
                      "calendarRevision":1,"targetVersion":3,"duration":"PT1H",
                      "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED",
-                     "cancelAnchor":"USER_TASK_DELETED","pauseAnchors":["USER_TASK_CLAIMED"],
-                     "resumeAnchors":["USER_TASK_UNCLAIMED"],"warnings":["PT30M"]},
+                     "cancelAnchor":"USER_TASK_DELETED","warnings":["PT30M"]},
                    "other-task":{"scope":"TASK","calendarId":"cal-1",
                      "calendarRevision":1,"targetVersion":1,"duration":"PT2H",
                      "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED"}
@@ -205,38 +204,6 @@ class SlaLifecycleServiceTest extends OracleTestBase {
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_AUDIT_LOG WHERE ACTION_ = 'sla.start'")
                 .query(Integer.class).single()).isEqualTo(1);
 
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "CLAIMED",
-                "task-1", "resolution", Instant.parse("2026-08-30T10:10:00Z")));
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "CLAIMED",
-                "task-1", "resolution", Instant.parse("2026-08-30T10:10:00Z")));
-        assertThat(jdbc().sql("SELECT STATUS_ FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'")
-                .query(String.class).single()).isEqualTo("PAUSED");
-        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.paused'")
-                .query(Integer.class).single()).isEqualTo(1);
-
-        // A later edit to the calendar must not rewrite a clock that is already governed by
-        // the published revision captured at start. An empty calendar would make a mutable
-        // lookup fail to calculate the remaining business time at resume.
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "UNCLAIMED",
-                "task-1", "resolution", Instant.parse("2026-08-30T10:20:00Z")));
-        contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "UNCLAIMED",
-                "task-1", "resolution", Instant.parse("2026-08-30T10:20:00Z")));
-        assertThat(jdbc().sql("""
-                SELECT STATUS_, DUE_AT_, WARN_AT_, PAUSED_TOTAL_SECS_, TRANSITION_EVIDENCE_JSON_
-                FROM CM_SLA_RECORD WHERE CONTRACT_RELEASE_ID_ = 'contract-sla-root'""")
-                .query((rs, n) -> List.of(rs.getString(1), rs.getObject(2, OffsetDateTime.class),
-                        rs.getObject(3, OffsetDateTime.class), rs.getLong(4), rs.getString(5))).single())
-                .satisfies(row -> {
-                    assertThat(row.get(0)).isEqualTo("RUNNING");
-                    assertThat(row.get(1)).isEqualTo(OffsetDateTime.parse("2026-08-30T11:10:00Z"));
-                    assertThat(row.get(2)).isEqualTo(OffsetDateTime.parse("2026-08-30T10:40:00Z"));
-                    assertThat(row.get(3)).isEqualTo(600L);
-                    assertThat(String.valueOf(row.get(4))).contains("\"transition\":\"RESUMED\"")
-                            .contains("\"anchor\":\"USER_TASK_UNCLAIMED\"");
-                });
-        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.resumed'")
-                .query(Integer.class).single()).isEqualTo(1);
-
         contractLifecycle.observeAnchor(new SlaLifecyclePort.Anchor(CASE_ID, "user-task", "COMPLETED",
                 "task-1", "resolution", Instant.parse("2026-08-30T10:30:00Z")));
 
@@ -255,15 +222,14 @@ class SlaLifecycleServiceTest extends OracleTestBase {
     }
 
     @Test
-    void occurrenceTransitionsAffectOnlyTheMatchingEntityOccurrence() {
+    void occurrenceTransitionsIgnoreTaskOwnershipChangesAndAffectOnlyTheMatchingOccurrence() {
         String contract = """
                 {"key":"sla-root","orchestrationMode":"BPMN","fields":{},"forms":{},
                  "slaBindings":{
                    "review-occurrence":{"scope":"OCCURRENCE","occurrenceKey":"taskInstance",
                      "calendarId":"cal-1","calendarRevision":1,"duration":"PT1H",
                      "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED",
-                     "cancelAnchor":"USER_TASK_DELETED","pauseAnchors":["USER_TASK_CLAIMED"],
-                     "resumeAnchors":["USER_TASK_UNCLAIMED"]}
+                     "cancelAnchor":"USER_TASK_DELETED"}
                  }}""";
         SlaLifecycleService contractLifecycle = contractLifecycle(contract);
 
@@ -278,13 +244,13 @@ class SlaLifecycleServiceTest extends OracleTestBase {
 
         contractLifecycle.observeAnchor(taskAnchor("CLAIMED", "task-a", "review-occurrence",
                 "2026-08-30T10:10:00Z"));
-
-        assertThat(contractOccurrenceStatuses()).containsExactlyInAnyOrderEntriesOf(Map.of(
-                "taskInstance:task-a", "PAUSED",
-                "taskInstance:task-b", "RUNNING"));
-
         contractLifecycle.observeAnchor(taskAnchor("UNCLAIMED", "task-a", "review-occurrence",
                 "2026-08-30T10:20:00Z"));
+
+        assertThat(contractOccurrenceStatuses()).containsExactlyInAnyOrderEntriesOf(Map.of(
+                "taskInstance:task-a", "RUNNING",
+                "taskInstance:task-b", "RUNNING"));
+
         contractLifecycle.observeAnchor(taskAnchor("COMPLETED", "task-a", "review-occurrence",
                 "2026-08-30T10:30:00Z"));
 

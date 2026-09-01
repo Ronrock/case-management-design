@@ -14,6 +14,7 @@ import org.casemgmt.sla.SlaCalendarCatalog;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
@@ -451,6 +452,97 @@ class CaseDefinitionVersionServiceTest {
     }
 
     @Test
+    void rejectsUserTaskAssignedAnchorAtPublication() {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <userTask id="review" casemgmt:slaTargetId="review-sla"/>
+                </process>""",
+                """
+                "review-sla":{"scope":"TASK","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"USER_TASK_ASSIGNED","meetAnchor":"USER_TASK_COMPLETED"}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/slaBindings/review-sla/startAnchor");
+    }
+
+    @Test
+    void rejectsMilestoneReopenedAnchorAtPublication() {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <intermediateThrowEvent id="accepted" casemgmt:milestoneId="accepted"
+                                          casemgmt:slaTargetId="milestone-sla"/>
+                </process>""",
+                """
+                "milestone-sla":{"scope":"MILESTONE","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"MILESTONE_REOPENED","meetAnchor":"MILESTONE_REACHED"}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/slaBindings/milestone-sla/startAnchor");
+    }
+
+    @ParameterizedTest(name = "{0} is not an admissible SLA anchor")
+    @ValueSource(strings = {"USER_TASK_CLAIMED", "USER_TASK_UNCLAIMED"})
+    void rejectsNonAuthoritativeTaskOwnershipAnchorsAtPublication(String anchor) {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <userTask id="review" casemgmt:slaTargetId="review-sla"/>
+                </process>""",
+                """
+                "review-sla":{"scope":"TASK","calendarId":"business","duration":"PT1H",
+                  "startAnchor":"%s","meetAnchor":"USER_TASK_COMPLETED"}""".formatted(anchor)))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("/slaBindings/review-sla/startAnchor");
+    }
+
+    @Test
+    void admitsOccurrenceSlaWhenAnAncestorHasStandardLoopCharacteristics() {
+        CaseDefinitionVersionService service = validationService();
+
+        validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <subProcess id="review-cycle">
+                    <standardLoopCharacteristics/>
+                    <userTask id="review" casemgmt:slaTargetId="review-sla"/>
+                  </subProcess>
+                </process>""",
+                """
+                "review-sla":{"scope":"OCCURRENCE","occurrenceKey":"review",
+                  "calendarId":"business","duration":"PT1H",
+                  "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED"}""");
+    }
+
+    @Test
+    void rejectsOccurrenceSlaWhenRepetitionIsOnlyImpliedByASequenceFlowCycle() {
+        CaseDefinitionVersionService service = validationService();
+
+        assertThatThrownBy(() -> validateSlaArtifacts(service,
+                """
+                <process id="sample-case" isExecutable="true">
+                  <userTask id="review" casemgmt:slaTargetId="review-sla"/>
+                  <exclusiveGateway id="repeat-or-exit"/>
+                  <sequenceFlow id="review-to-decision" sourceRef="review"
+                                targetRef="repeat-or-exit"/>
+                  <sequenceFlow id="repeat-review" sourceRef="repeat-or-exit"
+                                targetRef="review"/>
+                </process>""",
+                """
+                "review-sla":{"scope":"OCCURRENCE","occurrenceKey":"review",
+                  "calendarId":"business","duration":"PT1H",
+                  "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED"}"""))
+                .isInstanceOf(InvalidCaseDefinitionException.class)
+                .hasMessageContaining("review-sla")
+                .hasMessageContaining("repeatable");
+    }
+
+    @Test
     void rejectsANonCaseBindingWithoutABpmnTargetReference() {
         CaseDefinitionVersionService service = validationService();
 
@@ -487,8 +579,7 @@ class CaseDefinitionVersionServiceTest {
                 """
                 "task-sla":{"scope":"TASK","calendarId":"business","duration":"PT1H",
                   "startAnchor":"USER_TASK_CREATED","meetAnchor":"USER_TASK_COMPLETED",
-                  "cancelAnchor":"USER_TASK_DELETED","pauseAnchors":["USER_TASK_CLAIMED"],
-                  "resumeAnchors":["USER_TASK_UNCLAIMED"]}""");
+                  "cancelAnchor":"USER_TASK_DELETED"}""");
         validateSlaArtifacts(service,
                 """
                 <process id="sample-case" isExecutable="true">
@@ -507,8 +598,7 @@ class CaseDefinitionVersionServiceTest {
                 </process>""",
                 """
                 "milestone-sla":{"scope":"MILESTONE","calendarId":"business","duration":"PT1H",
-                  "startAnchor":"MILESTONE_REOPENED","meetAnchor":"MILESTONE_REACHED",
-                  "cancelAnchor":"MILESTONE_CANCELLED"}""");
+                  "startAnchor":"MILESTONE_REACHED","meetAnchor":"MILESTONE_CANCELLED"}""");
         validateSlaArtifacts(service,
                 """
                 <process id="sample-case" isExecutable="true">

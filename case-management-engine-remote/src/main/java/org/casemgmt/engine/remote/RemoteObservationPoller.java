@@ -65,12 +65,12 @@ public final class RemoteObservationPoller {
         CaseIdentity identity = new CaseIdentity(process.caseId(), process.tenantId(),
                 process.engineId());
         int inserted = reconcilePages(ObservationStream.TASKS, process, receivedAt,
-                this::taskEnvelope, converted -> converted.envelope().observation()
+                this::taskReconciliationEnvelopes, converted -> converted.envelope().observation()
                         instanceof UserTaskObservation task
                         && task.eventType() != UserTaskObservation.EventType.CREATED
                         ? ObservationStream.TASK_TERMINALS : ObservationStream.TASKS);
         inserted += reconcilePages(ObservationStream.ACTIVITIES, process, receivedAt,
-                this::activityEnvelope, converted -> converted.envelope().observation()
+                this::activityReconciliationEnvelopes, converted -> converted.envelope().observation()
                         instanceof ActivityLifecycleObservation activity
                         && activity.eventType() != ActivityLifecycleObservation.EventType.STARTED
                         ? ObservationStream.ACTIVITY_TERMINALS
@@ -78,8 +78,12 @@ public final class RemoteObservationPoller {
                         && milestone.eventType() != MilestoneObservation.EventType.REOPENED
                         ? ObservationStream.ACTIVITY_TERMINALS : ObservationStream.ACTIVITIES);
         Map<String, Object> current = getMap("/history/process-instance/" + process.processInstanceId());
-        if (current != null && current.get("endTime") != null) {
-            Converted converted = processEnvelope(historyRow(current, receivedAt), receivedAt, identity);
+        if (current != null) {
+            Map<String, Object> authoritative = withProcessAuthority(current,
+                    process.processDefinitionId(), process.processDefinitionKey());
+            Converted converted = authoritative.get("endTime") == null
+                    ? activeProcessEnvelope(authoritative, receivedAt, identity)
+                    : processEnvelope(historyRow(authoritative, receivedAt), receivedAt, identity);
             if (converted != null) inserted += ingestion.persist(identity.tenantId(),
                     ObservationStream.PROCESSES, List.of(converted.envelope()));
         }
@@ -88,7 +92,7 @@ public final class RemoteObservationPoller {
 
     private int reconcilePages(ObservationStream sourceStream,
                                ActiveBpmnCaseRepository.ReconciliationProcess process,
-                               OffsetDateTime receivedAt, EnvelopeFactory factory,
+                               OffsetDateTime receivedAt, ReconciliationEnvelopeFactory factory,
                                StreamSelector streamSelector) {
         int inserted = 0;
         for (int first = 0; ; first += PAGE_SIZE) {
@@ -103,12 +107,13 @@ public final class RemoteObservationPoller {
             CaseIdentity identity = new CaseIdentity(process.caseId(), process.tenantId(),
                     process.engineId());
             for (Map<String, Object> row : page) {
-                Map<String, Object> history = withProcessDefinition(row,
-                        process.processDefinitionId());
-                Converted converted = factory.convert(historyRow(history, receivedAt), receivedAt,
-                        identity);
-                if (converted != null) envelopes.computeIfAbsent(streamSelector.stream(converted),
-                        ignored -> new ArrayList<>()).add(converted.envelope());
+                Map<String, Object> history = withProcessAuthority(row,
+                        process.processDefinitionId(), process.processDefinitionKey());
+                for (Converted converted : factory.convert(historyRow(history, receivedAt),
+                        receivedAt, identity)) {
+                    envelopes.computeIfAbsent(streamSelector.stream(converted),
+                            ignored -> new ArrayList<>()).add(converted.envelope());
+                }
             }
             for (var entry : envelopes.entrySet()) {
                 inserted += ingestion.persist(process.tenantId(), entry.getKey(), entry.getValue());
@@ -126,19 +131,23 @@ public final class RemoteObservationPoller {
 
     private int pollTasks(OffsetDateTime receivedAt) {
         return pollPages(ObservationStream.TASKS, "/history/task?startedAfter=", "startedBefore",
-                "startTime", "taskId", receivedAt, this::taskEnvelope);
+                "startTime", "taskId", receivedAt,
+                (row, at, identity) -> taskEnvelope(row, at, identity, LifecycleEvidence.START));
     }
     private int pollTaskTerminals(OffsetDateTime receivedAt) {
         return pollPages(ObservationStream.TASK_TERMINALS, "/history/task?finishedAfter=", "finishedBefore",
-                "endTime", "taskId", receivedAt, this::taskEnvelope);
+                "endTime", "taskId", receivedAt,
+                (row, at, identity) -> taskEnvelope(row, at, identity, LifecycleEvidence.TERMINAL));
     }
     private int pollActivities(OffsetDateTime receivedAt) {
         return pollPages(ObservationStream.ACTIVITIES, "/history/activity-instance?startedAfter=", "startedBefore",
-                "startTime", "activityInstanceId", receivedAt, this::activityEnvelope);
+                "startTime", "activityInstanceId", receivedAt,
+                (row, at, identity) -> activityEnvelope(row, at, identity, LifecycleEvidence.START));
     }
     private int pollActivityTerminals(OffsetDateTime receivedAt) {
         return pollPages(ObservationStream.ACTIVITY_TERMINALS, "/history/activity-instance?finishedAfter=", "finishedBefore",
-                "endTime", "activityInstanceId", receivedAt, this::activityEnvelope);
+                "endTime", "activityInstanceId", receivedAt,
+                (row, at, identity) -> activityEnvelope(row, at, identity, LifecycleEvidence.TERMINAL));
     }
     private int pollProcesses(OffsetDateTime receivedAt) {
         return pollPages(ObservationStream.PROCESSES, "/history/process-instance?finished=true&finishedAfter=", "finishedBefore",
@@ -197,39 +206,110 @@ public final class RemoteObservationPoller {
     }
 
     private Converted taskEnvelope(HistoryRow history, OffsetDateTime receivedAt, CaseIdentity identity) {
+        return taskEnvelope(history, receivedAt, identity,
+                history.row().get("endTime") == null
+                        ? LifecycleEvidence.START : LifecycleEvidence.TERMINAL);
+    }
+
+    private List<Converted> taskReconciliationEnvelopes(HistoryRow history,
+                                                        OffsetDateTime receivedAt,
+                                                        CaseIdentity identity) {
+        List<Converted> converted = new ArrayList<>(2);
+        if (history.row().get("startTime") != null) {
+            converted.add(taskEnvelope(history, receivedAt, identity, LifecycleEvidence.START));
+        }
+        if (history.row().get("endTime") != null) {
+            converted.add(taskEnvelope(history, receivedAt, identity, LifecycleEvidence.TERMINAL));
+        }
+        converted.removeIf(java.util.Objects::isNull);
+        return converted;
+    }
+
+    private Converted taskEnvelope(HistoryRow history, OffsetDateTime receivedAt,
+                                   CaseIdentity identity, LifecycleEvidence evidence) {
         Map<String,Object> row = history.row(); String processId = string(row.get("processInstanceId")); String taskId = string(row.get("id"));
         if (identity == null || taskId == null) return null;
-        OffsetDateTime engineAt = timeOr(row.get("endTime"), timeOr(row.get("startTime"), receivedAt));
-        UserTaskObservation.EventType event = taskEvent(row);
+        OffsetDateTime engineAt = evidence == LifecycleEvidence.START
+                ? timeOr(row.get("startTime"), receivedAt)
+                : timeOr(row.get("endTime"), receivedAt);
+        UserTaskObservation.EventType event = evidence == LifecycleEvidence.START
+                ? UserTaskObservation.EventType.CREATED : terminalTaskEvent(row);
         var metadata = classifier.taskMetadata(string(row.get("processDefinitionId")), string(row.get("taskDefinitionKey")));
-        Map<String,Object> attributes = new LinkedHashMap<>(); attributes.put("taskDefinitionKey", string(row.get("taskDefinitionKey"))); attributes.put("activityInstanceId", taskId); attributes.put("name", string(row.get("name"))); attributes.put("assignee", string(row.get("assignee"))); attributes.put("candidateGroups", metadata.candidateGroups()); attributes.put("formKey", metadata.formKey()); attributes.put("slaTargetId", metadata.slaTargetId()); attributes.put("priority", intValue(row.get("priority"))); OffsetDateTime due = time(row.get("due")); attributes.put("dueAt", due == null ? null : due.toString());
+        Map<String,Object> attributes = new LinkedHashMap<>(); attributes.put("taskDefinitionKey", string(row.get("taskDefinitionKey"))); attributes.put("activityInstanceId", taskId); attributes.put("name", string(row.get("name"))); attributes.put("assignee", string(row.get("assignee"))); attributes.put("candidateGroups", metadata.candidateGroups()); attributes.put("formKey", metadata.formKey()); attributes.put("slaTargetId", metadata.slaTargetId()); attributes.put("priority", intValue(row.get("priority"))); OffsetDateTime due = time(row.get("due")); attributes.put("dueAt", due == null ? null : due.toString()); attributes.put("historyEvidence", evidence.name()); putProcessAuthority(attributes, row); if (evidence == LifecycleEvidence.TERMINAL) { OffsetDateTime start = time(row.get("startTime")); if (start != null) attributes.put("historyStartAt", start.toString()); }
         return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new UserTaskObservation("remote-task-" + taskId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, taskId, null, event, engineAt.toInstant(), receivedAt.toInstant(), attributes)));
     }
 
     private Converted activityEnvelope(HistoryRow history, OffsetDateTime receivedAt, CaseIdentity identity) {
+        return activityEnvelope(history, receivedAt, identity,
+                history.row().get("endTime") == null
+                        ? LifecycleEvidence.START : LifecycleEvidence.TERMINAL);
+    }
+
+    private List<Converted> activityReconciliationEnvelopes(HistoryRow history,
+                                                            OffsetDateTime receivedAt,
+                                                            CaseIdentity identity) {
+        List<Converted> converted = new ArrayList<>(2);
+        if (history.row().get("startTime") != null) {
+            converted.add(activityEnvelope(history, receivedAt, identity, LifecycleEvidence.START));
+        }
+        if (history.row().get("endTime") != null) {
+            converted.add(activityEnvelope(history, receivedAt, identity,
+                    LifecycleEvidence.TERMINAL));
+        }
+        converted.removeIf(java.util.Objects::isNull);
+        return converted;
+    }
+
+    private Converted activityEnvelope(HistoryRow history, OffsetDateTime receivedAt,
+                                       CaseIdentity identity, LifecycleEvidence evidence) {
         Map<String,Object> row = history.row(); String processId = string(row.get("processInstanceId")); String activityId = string(row.get("activityId")); String instanceId = firstString(row.get("activityInstanceId"), row.get("id"));
         var classification = classifier.classify(string(row.get("processDefinitionId")), activityId);
         if (identity == null || activityId == null || instanceId == null || classification.isEmpty()) return null;
-        OffsetDateTime engineAt = timeOr(row.get("endTime"), timeOr(row.get("startTime"), receivedAt));
-        Map<String, Object> attributes = new LinkedHashMap<>(); attributes.put("activityId", activityId); attributes.put("name", string(row.get("activityName")));
+        OffsetDateTime engineAt = evidence == LifecycleEvidence.START
+                ? timeOr(row.get("startTime"), receivedAt)
+                : timeOr(row.get("endTime"), receivedAt);
+        Map<String, Object> attributes = new LinkedHashMap<>(); attributes.put("activityId", activityId); attributes.put("name", string(row.get("activityName"))); attributes.put("historyEvidence", evidence.name()); putProcessAuthority(attributes, row); if (evidence == LifecycleEvidence.TERMINAL) { OffsetDateTime start = time(row.get("startTime")); if (start != null) attributes.put("historyStartAt", start.toString()); }
         var value = classification.orElseThrow();
         attributes.put("slaTargetId", value.slaTargetId());
         if (value.kind() == org.casemgmt.projection.ActivityObservation.Kind.MILESTONE) {
-            if (!Boolean.TRUE.equals(row.get("canceled")) && row.get("endTime") == null) return null;
+            if (evidence == LifecycleEvidence.START) return null;
             MilestoneObservation.EventType event = Boolean.TRUE.equals(row.get("canceled"))
                     ? MilestoneObservation.EventType.CANCELLED : MilestoneObservation.EventType.REACHED;
             attributes.put("milestoneId", value.milestoneId());
             return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new MilestoneObservation(
                     "remote-milestone-" + instanceId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, instanceId, null, event, engineAt.toInstant(), receivedAt.toInstant(), attributes)));
         }
-        ActivityLifecycleObservation.EventType event = Boolean.TRUE.equals(row.get("canceled")) ? ActivityLifecycleObservation.EventType.CANCELLED : row.get("endTime") == null ? ActivityLifecycleObservation.EventType.STARTED : ActivityLifecycleObservation.EventType.COMPLETED;
+        ActivityLifecycleObservation.EventType event = evidence == LifecycleEvidence.START
+                ? ActivityLifecycleObservation.EventType.STARTED
+                : Boolean.TRUE.equals(row.get("canceled"))
+                ? ActivityLifecycleObservation.EventType.CANCELLED
+                : ActivityLifecycleObservation.EventType.COMPLETED;
         return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new ActivityLifecycleObservation("remote-activity-" + instanceId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, instanceId, null, event, engineAt.toInstant(), receivedAt.toInstant(), attributes)));
     }
 
     private Converted processEnvelope(HistoryRow history, OffsetDateTime receivedAt, CaseIdentity identity) {
         Map<String,Object> row = history.row(); String processId = string(row.get("id")); if (identity == null || processId == null) return null;
         OffsetDateTime engineAt = timeOr(row.get("endTime"), receivedAt); ProcessObservation.EventType event = row.get("deleteReason") == null ? ProcessObservation.EventType.COMPLETED : ProcessObservation.EventType.TERMINATED;
-        return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new ProcessObservation("remote-process-" + processId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, processId, null, event, engineAt.toInstant(), receivedAt.toInstant(), Map.of("processDefinitionKey", string(row.get("processDefinitionKey"))))));
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        putProcessAuthority(attributes, row);
+        return new Converted(identity.tenantId(), history.cursor(), new ObservationEnvelope(new ProcessObservation("remote-process-" + processId + "-" + event, 1, "remote-history", identity.engineId(), identity.tenantId(), identity.caseId(), processId, processId, null, event, engineAt.toInstant(), receivedAt.toInstant(), attributes)));
+    }
+
+    private Converted activeProcessEnvelope(Map<String, Object> row, OffsetDateTime receivedAt,
+                                            CaseIdentity identity) {
+        String processId = string(row.get("id"));
+        OffsetDateTime startedAt = time(row.get("startTime"));
+        if (identity == null || processId == null || startedAt == null) return null;
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        putProcessAuthority(attributes, row);
+        attributes.put("reconciliationActive", true);
+        return new Converted(identity.tenantId(),
+                new ObservationCursor(startedAt.toInstant(), processId),
+                new ObservationEnvelope(new ProcessObservation(
+                        "remote-process-" + processId + "-STARTED", 1, "remote-history",
+                        identity.engineId(), identity.tenantId(), identity.caseId(), processId,
+                        processId, null, ProcessObservation.EventType.STARTED,
+                        startedAt.toInstant(), receivedAt.toInstant(), attributes)));
     }
 
     private CaseIdentity identity(String processId, String businessKey) { String caseId = businessKey == null ? processBusinessKey(processId) : businessKey; if (caseId == null) return null; var c = cases.findById(caseId).orElse(null); return c == null ? null : new CaseIdentity(c.id(), c.tenantId(), c.engineId()); }
@@ -242,14 +322,39 @@ public final class RemoteObservationPoller {
         OffsetDateTime occurredAt = timeOr(row.get("endTime"), timeOr(row.get("startTime"), receivedAt));
         return new HistoryRow(new ObservationCursor(occurredAt.toInstant(), requiredId(row)), row);
     }
-    private static Map<String, Object> withProcessDefinition(Map<String, Object> row,
-                                                              String processDefinitionId) {
-        if (string(row.get("processDefinitionId")) != null || processDefinitionId == null) {
+    private static Map<String, Object> withProcessAuthority(Map<String, Object> row,
+                                                            String processDefinitionId,
+                                                            String processDefinitionKey) {
+        if ((string(row.get("processDefinitionId")) != null || processDefinitionId == null)
+                && (string(row.get("processDefinitionKey")) != null
+                    || processDefinitionKey == null)) {
             return row;
         }
         Map<String, Object> value = new LinkedHashMap<>(row);
-        value.put("processDefinitionId", processDefinitionId);
+        if (string(value.get("processDefinitionId")) == null && processDefinitionId != null) {
+            value.put("processDefinitionId", processDefinitionId);
+        }
+        if (string(value.get("processDefinitionKey")) == null && processDefinitionKey != null) {
+            value.put("processDefinitionKey", processDefinitionKey);
+        }
         return value;
+    }
+
+    private void putProcessAuthority(Map<String, Object> attributes, Map<String, Object> row) {
+        String definitionId = string(row.get("processDefinitionId"));
+        if (definitionId == null) {
+            throw new EngineException("Remote history row has no exact processDefinitionId");
+        }
+        String definitionKey = string(row.get("processDefinitionKey"));
+        if (definitionKey == null) {
+            definitionKey = classifier.processDefinitionKey(definitionId);
+        }
+        if (definitionKey == null || definitionKey.isBlank()) {
+            throw new EngineException("Remote history row has no exact processDefinitionKey for "
+                    + definitionId);
+        }
+        attributes.put("processDefinitionId", definitionId);
+        attributes.put("processDefinitionKey", definitionKey);
     }
     /** Query values are encoded exactly once before being supplied as an already-built URI. */
     private static String encoded(OffsetDateTime value) {
@@ -261,8 +366,7 @@ public final class RemoteObservationPoller {
     private static String string(Object value) { return value == null || value.toString().isBlank() ? null : value.toString(); }
     private static String firstString(Object... values) { for (Object value : values) { String string = string(value); if (string != null) return string; } return null; }
     private static int intValue(Object value) { return value instanceof Number number ? number.intValue() : 0; }
-    private static UserTaskObservation.EventType taskEvent(Map<String, Object> row) {
-        if (row.get("endTime") == null) return UserTaskObservation.EventType.CREATED;
+    private static UserTaskObservation.EventType terminalTaskEvent(Map<String, Object> row) {
         String reason = string(row.get("deleteReason"));
         if ("completed".equals(reason)) return UserTaskObservation.EventType.COMPLETED;
         if (reason == null) throw new EngineException("Finished remote task history row has no deleteReason");
@@ -271,8 +375,12 @@ public final class RemoteObservationPoller {
     private record HistoryRow(ObservationCursor cursor, Map<String,Object> row) { }
     private record Converted(String tenantId, ObservationCursor cursor, ObservationEnvelope envelope) { }
     private record CaseIdentity(String caseId, String tenantId, String engineId) { }
+    private enum LifecycleEvidence { START, TERMINAL }
     @FunctionalInterface private interface EnvelopeFactory {
         Converted convert(HistoryRow row, OffsetDateTime receivedAt, CaseIdentity identity);
+    }
+    @FunctionalInterface private interface ReconciliationEnvelopeFactory {
+        List<Converted> convert(HistoryRow row, OffsetDateTime receivedAt, CaseIdentity identity);
     }
     @FunctionalInterface private interface StreamSelector { ObservationStream stream(Converted converted); }
 }

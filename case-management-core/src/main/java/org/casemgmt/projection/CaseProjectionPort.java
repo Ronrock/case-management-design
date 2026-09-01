@@ -14,4 +14,7 @@ public interface CaseProjectionPort {
 
     /** Handler-safe projection that reports the authoritative root transition without callbacks. */
     ProcessProjectionResult observeFromHandler(ProcessCompletionObservation observation);
+
+    /** Restores one stale terminal linked-process row from explicit active engine evidence. */
+    boolean observeStartedFromHandler(ProcessStartObservation observation);
 }

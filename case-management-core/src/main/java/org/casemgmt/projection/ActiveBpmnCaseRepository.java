@@ -13,7 +13,7 @@ public final class ActiveBpmnCaseRepository {
     /** A retained engine-process identity whose complete history can rebuild an active case. */
     public record ReconciliationProcess(String caseId, String tenantId, String engineId,
                                         String processInstanceId, String processDefinitionId,
-                                        boolean root) { }
+                                        String processDefinitionKey, boolean root) { }
 
     private final JdbcClient jdbc;
 
@@ -39,7 +39,8 @@ public final class ActiveBpmnCaseRepository {
     public List<ReconciliationProcess> findAllProcessesForActiveCases() {
         List<ReconciliationProcess> rows = jdbc.sql("""
                 SELECT c.ID_ AS CASE_ID_, c.TENANT_ID_, c.ENGINE_ID_,
-                       c.ROOT_PROC_INST_ID_ AS PROC_INST_ID_, root_link.PROC_DEF_ID_, 1 AS IS_ROOT_
+                       c.ROOT_PROC_INST_ID_ AS PROC_INST_ID_, root_link.PROC_DEF_ID_,
+                       root_link.PROC_DEF_KEY_, 1 AS IS_ROOT_
                 FROM CM_CASE c
                 LEFT JOIN CM_LINKED_PROCESS root_link
                   ON root_link.CASE_ID_ = c.ID_
@@ -47,7 +48,7 @@ public final class ActiveBpmnCaseRepository {
                 WHERE c.STATE_ = 'ACTIVE' AND c.ROOT_PROC_INST_ID_ IS NOT NULL
                 UNION ALL
                 SELECT c.ID_ AS CASE_ID_, c.TENANT_ID_, c.ENGINE_ID_,
-                       linked.PROC_INST_ID_, linked.PROC_DEF_ID_, 0 AS IS_ROOT_
+                       linked.PROC_INST_ID_, linked.PROC_DEF_ID_, linked.PROC_DEF_KEY_, 0 AS IS_ROOT_
                 FROM CM_CASE c
                 JOIN CM_LINKED_PROCESS linked ON linked.CASE_ID_ = c.ID_
                 WHERE c.STATE_ = 'ACTIVE' AND linked.PROC_INST_ID_ IS NOT NULL
@@ -55,7 +56,7 @@ public final class ActiveBpmnCaseRepository {
                 .query((rs, n) -> new ReconciliationProcess(rs.getString("CASE_ID_"),
                         rs.getString("TENANT_ID_"), rs.getString("ENGINE_ID_"),
                         rs.getString("PROC_INST_ID_"), rs.getString("PROC_DEF_ID_"),
-                        rs.getBoolean("IS_ROOT_")))
+                        rs.getString("PROC_DEF_KEY_"), rs.getBoolean("IS_ROOT_")))
                 .list();
         var processes = new LinkedHashMap<String, ReconciliationProcess>();
         for (ReconciliationProcess row : rows) processes.putIfAbsent(row.processInstanceId(), row);

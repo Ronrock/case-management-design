@@ -1,6 +1,7 @@
 package org.casemgmt.rest.controller;
 
 import org.casemgmt.domain.CaseDefinition;
+import org.casemgmt.error.NotFoundException;
 import org.casemgmt.orchestration.EngineDeploymentIdentity;
 import org.casemgmt.orchestration.OrchestrationMode;
 import org.casemgmt.release.BindingStatus;
@@ -19,11 +20,13 @@ import org.casemgmt.service.CaseDefinitionReleaseService;
 import org.casemgmt.service.CaseDefinitionService;
 import org.casemgmt.service.CaseDefinitionVersionService;
 import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
+import org.casemgmt.sla.SlaCalendarCatalog;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.core.Authentication;
 
 import java.time.OffsetDateTime;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -32,12 +35,54 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CaseDefinitionLifecycleResponseTest {
 
     private static final OffsetDateTime BOUND_AT = OffsetDateTime.parse("2026-08-28T08:00:00Z");
     private static final OffsetDateTime ACTIVATED_AT = OffsetDateTime.parse("2026-08-28T08:01:00Z");
+
+    @Test
+    void standaloneContractPublicationUsesTheAuthenticatedTenantForExactCalendarValidation() {
+        CaseDefinitionReleaseRepository repository = mock(CaseDefinitionReleaseRepository.class);
+        SlaCalendarCatalog calendars = mock(SlaCalendarCatalog.class);
+        ActionPolicy policy = new ActionPolicy();
+        CallerResolver callers = mock(CallerResolver.class);
+        Authentication authentication = mock(Authentication.class);
+        Actor actor = admin();
+        when(callers.actor(authentication)).thenReturn(actor);
+        when(callers.groups(actor)).thenReturn(Set.of("admin", "tenant:t1"));
+        when(callers.requireTenant(actor, null)).thenReturn("t1");
+        when(repository.findByDigest(org.mockito.ArgumentMatchers.eq("t1"),
+                org.mockito.ArgumentMatchers.eq("orders"),
+                org.mockito.ArgumentMatchers.eq(ReleaseKind.CONTRACT),
+                org.mockito.ArgumentMatchers.any())).thenReturn(Optional.empty());
+        when(calendars.require("t1", "support", 7))
+                .thenThrow(new NotFoundException("SlaCalendarRevision", "t1/support/7"));
+        byte[] content = ("{\"key\":\"orders\",\"orchestrationMode\":\"BPMN\"," +
+                "\"fields\":{},\"forms\":{},\"slaBindings\":{\"response\":{" +
+                "\"scope\":\"CASE\",\"calendarId\":\"support\",\"calendarRevision\":7," +
+                "\"duration\":\"PT1H\",\"startAnchor\":\"CASE_CREATED\"," +
+                "\"meetAnchor\":\"CASE_CLOSED\"}}}").getBytes(StandardCharsets.UTF_8);
+        CaseDefinitionReleaseService releases = new CaseDefinitionReleaseService(
+                repository, mock(org.casemgmt.orchestration.OrchestrationDeploymentPort.class),
+                new org.casemgmt.release.JsonSchemaCaseContractValidator(), calendars);
+        CaseDefinitionReleaseController controller = new CaseDefinitionReleaseController(
+                releases, repository, mock(CaseDefinitionVersionService.class), policy, callers);
+
+        var response = controller.contract(
+                "orders", content, "application/json", authentication);
+
+        assertThat(response.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.CREATED);
+        assertThat(response.getBody())
+                .containsEntry("status", "FAILED")
+                .satisfies(body -> assertThat((String) body.get("failureDetail"))
+                        .contains("support")
+                        .contains("revision 7")
+                        .contains("tenant 't1'"));
+        verify(calendars).require("t1", "support", 7);
+    }
 
     @Test
     void bindResponseIncludesLifecycleAndFullOperationalIdentityForTheAdministrator() {

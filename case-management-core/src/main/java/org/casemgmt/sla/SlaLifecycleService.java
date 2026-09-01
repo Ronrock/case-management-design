@@ -232,9 +232,15 @@ public final class SlaLifecycleService implements SlaLifecyclePort {
                 default -> null;
             };
         }
-        return ValidatedCaseContract.SlaAnchor.valueOf(
-                anchor.observationKind().replace('-', '_').toUpperCase(java.util.Locale.ROOT)
-                        + "_" + anchor.eventType());
+        String name = anchor.observationKind().replace('-', '_').toUpperCase(java.util.Locale.ROOT)
+                + "_" + anchor.eventType();
+        try {
+            return ValidatedCaseContract.SlaAnchor.valueOf(name);
+        } catch (IllegalArgumentException unsupported) {
+            // The observation remains authoritative for its ordinary projection even when it is
+            // deliberately outside the public SLA anchor vocabulary.
+            return null;
+        }
     }
 
     private static String name(Enum<?> value) {

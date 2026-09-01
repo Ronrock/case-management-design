@@ -15,6 +15,8 @@ import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.PlanItemRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -105,6 +107,51 @@ class JdbcCaseProjectionPortTest extends OracleTestBase {
         assertThat(first.caseVersion()).isEqualTo(cases.require("case-1").version());
         assertThat(replay).isEqualTo(new ProcessProjectionResult(false, first.caseVersion()));
         assertThat(completions).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"COMPLETED", "TERMINATED"})
+    void explicitActiveProcessEvidenceRestoresOnlyItsStaleLinkedRowAndReplayIsANoOp(
+            String staleState) {
+        OffsetDateTime terminalAt = OffsetDateTime.parse("2026-08-30T10:00:00Z");
+        OffsetDateTime observedAt = terminalAt.plusMinutes(5);
+        jdbc().sql("""
+                UPDATE CM_LINKED_PROCESS SET STATE_ = :state, ENDED_AT_ = :terminalAt
+                WHERE CASE_ID_ = 'case-1' AND PROC_INST_ID_ = 'child-process'""")
+                .param("state", staleState)
+                .param("terminalAt", terminalAt)
+                .update();
+
+        ProcessStartObservation started = new ProcessStartObservation(
+                "case-1", "child-process", observedAt.minusDays(2), observedAt);
+
+        assertThat(projections.observeStartedFromHandler(started)).isTrue();
+        assertThat(projections.observeStartedFromHandler(started)).isFalse();
+
+        assertThat(jdbc().sql("""
+                SELECT STATE_, ENDED_AT_ FROM CM_LINKED_PROCESS
+                WHERE CASE_ID_ = 'case-1' AND PROC_INST_ID_ = 'child-process'""")
+                .query((rs, row) -> Map.entry(rs.getString("STATE_"),
+                        rs.getObject("ENDED_AT_") == null))
+                .single()).isEqualTo(Map.entry("ACTIVE", true));
+        assertThat(processes.findByProcessInstanceId("root-process")).get()
+                .extracting(LinkedProcessRepository.LinkedProcessRow::state)
+                .isEqualTo("ACTIVE");
+    }
+
+    @Test
+    void delayedActiveSnapshotCannotReopenANewerTerminalProjection() {
+        OffsetDateTime activeSnapshotAt = OffsetDateTime.parse("2026-08-30T10:00:00Z");
+        OffsetDateTime terminalProjectedAt = activeSnapshotAt.plusSeconds(1);
+        projections.observeFromHandler(completed("child-process", terminalProjectedAt));
+
+        boolean restored = projections.observeStartedFromHandler(new ProcessStartObservation(
+                "case-1", "child-process", activeSnapshotAt.minusDays(2), activeSnapshotAt));
+
+        assertThat(restored).isFalse();
+        assertThat(processes.findByProcessInstanceId("child-process")).get()
+                .extracting(LinkedProcessRepository.LinkedProcessRow::state)
+                .isEqualTo("COMPLETED");
     }
 
     @Test

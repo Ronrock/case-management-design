@@ -36,6 +36,7 @@ public final class RemoteProcessActivityClassifier {
 
     private final RestClient client;
     private final Map<String, ModelIndex> cache = new ConcurrentHashMap<>();
+    private final Map<String, String> definitionKeys = new ConcurrentHashMap<>();
 
     public RemoteProcessActivityClassifier(RestClient client) {
         this.client = client;
@@ -53,6 +54,28 @@ public final class RemoteProcessActivityClassifier {
         }
         return cache.computeIfAbsent(processDefinitionId, this::load).tasks()
                 .getOrDefault(activityId, new TaskMetadata(List.of(), null, null));
+    }
+
+    /** Resolves the exact engine definition key when a history DTO omits that authority field. */
+    @SuppressWarnings("unchecked")
+    public String processDefinitionKey(String processDefinitionId) {
+        if (processDefinitionId == null || processDefinitionId.isBlank()) return null;
+        return definitionKeys.computeIfAbsent(processDefinitionId, id -> {
+            String path = "/process-definition/"
+                    + URLEncoder.encode(id, StandardCharsets.UTF_8);
+            try {
+                Map<String, Object> response = client.get().uri(path).retrieve().body(Map.class);
+                Object key = response == null ? null : response.get("key");
+                if (key == null || key.toString().isBlank()) {
+                    throw new EngineException("Process definition response has no exact key for "
+                            + id);
+                }
+                return key.toString();
+            } catch (RestClientException e) {
+                throw new EngineException("Could not load process definition " + id + ": "
+                        + e.getMessage(), e);
+            }
+        });
     }
 
     @SuppressWarnings("unchecked")

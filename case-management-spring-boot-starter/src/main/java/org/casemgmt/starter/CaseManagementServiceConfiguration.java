@@ -153,13 +153,15 @@ public class CaseManagementServiceConfiguration {
     @Bean
     public CaseDefinitionReleaseService caseDefinitionReleaseService(
             CaseDefinitionReleaseRepository repo,
-            ObjectProvider<OrchestrationDeploymentPort> deployments) {
+            ObjectProvider<OrchestrationDeploymentPort> deployments,
+            SlaRepository calendars) {
         OrchestrationDeploymentPort deployment = deployments.getIfAvailable(() ->
                 (releaseId, definitionKey, tenantId, content, mediaType) -> {
                     throw new org.casemgmt.engine.EngineException(
                             "No orchestration deployment adapter is configured");
                 });
-        return new CaseDefinitionReleaseService(repo, deployment);
+        return new CaseDefinitionReleaseService(repo, deployment,
+                new org.casemgmt.release.JsonSchemaCaseContractValidator(), calendars);
     }
 
     @Bean

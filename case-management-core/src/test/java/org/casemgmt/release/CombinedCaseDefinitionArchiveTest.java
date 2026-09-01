@@ -30,11 +30,11 @@ class CombinedCaseDefinitionArchiveTest {
     void missingCalendarRevisionRejectsCombinedBundleBeforeAnyReleaseEvidence() throws Exception {
         CaseDefinitionReleaseRepository releaseRepository = mock(CaseDefinitionReleaseRepository.class);
         var deployments = mock(org.casemgmt.orchestration.OrchestrationDeploymentPort.class);
-        CaseDefinitionReleaseService releases = new CaseDefinitionReleaseService(
-                releaseRepository, deployments);
         SlaCalendarCatalog calendars = mock(SlaCalendarCatalog.class);
         when(calendars.require("t1", "support", 4))
                 .thenThrow(new NotFoundException("SlaCalendarRevision", "t1/support/4"));
+        CaseDefinitionReleaseService releases = new CaseDefinitionReleaseService(
+                releaseRepository, deployments, new JsonSchemaCaseContractValidator(), calendars);
         CaseDefinitionVersionService versions = new CaseDefinitionVersionService(
                 mock(CaseDefinitionReleaseRepository.class),
                 mock(CaseDefinitionVersionBindingRepository.class),

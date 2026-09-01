@@ -10,6 +10,7 @@ import org.casemgmt.projection.ActivityObservation;
 import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.projection.ProcessCompletionObservation;
 import org.casemgmt.projection.ProcessProjectionResult;
+import org.casemgmt.projection.ProcessStartObservation;
 import org.casemgmt.projection.ProjectionStatus;
 import org.casemgmt.projection.ProjectionEntityIdentity;
 import org.casemgmt.projection.ProjectionOwnershipException;
@@ -508,6 +509,52 @@ class DefaultEngineObservationHandlerTest {
     }
 
     @Test
+    void explicitRemoteActiveReconciliationRepairsAStaleTerminalProcessProjection() {
+        ProcessObservation observation = new ProcessObservation("obs-active-reconciliation", 1,
+                "remote-history", "engine-a", "tenant-a", "case-1", "process-1",
+                "process-1", null, ProcessObservation.EventType.STARTED,
+                OCCURRED.minusSeconds(60), RECEIVED,
+                authorityAttributes("reconciliationActive", true));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-stale-terminal", null, OCCURRED, "TERMINATED")));
+        when(projections.observeStartedFromHandler(new ProcessStartObservation(
+                "case-1", "process-1", at(OCCURRED.minusSeconds(60)), at(RECEIVED))))
+                .thenReturn(true);
+
+        ApplyResult result = handler.apply(observation);
+
+        verify(projections).observeStartedFromHandler(new ProcessStartObservation(
+                "case-1", "process-1", at(OCCURRED.minusSeconds(60)), at(RECEIVED)));
+        verify(claims).markApplied(claim);
+        verify(claims, never()).markIgnoredStale(claim);
+        assertThat(result.status()).isEqualTo(ApplyStatus.APPLIED);
+    }
+
+    @Test
+    void delayedActiveReconciliationIsIgnoredWhenProjectionHasNewerEvidence() {
+        ProcessObservation observation = new ProcessObservation("obs-delayed-active", 1,
+                "remote-history", "engine-a", "tenant-a", "case-1", "process-1",
+                "process-1", null, ProcessObservation.EventType.STARTED,
+                OCCURRED.minusSeconds(60), RECEIVED,
+                authorityAttributes("reconciliationActive", true));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-terminal", null, OCCURRED, "TERMINATED")));
+        when(projections.observeStartedFromHandler(any(ProcessStartObservation.class)))
+                .thenReturn(false);
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.IGNORED_STALE);
+
+        verify(claims).markIgnoredStale(claim);
+        verify(claims, never()).markApplied(claim);
+        verifyNoInteractions(mappings, sla);
+        verify(events, never()).publish(any());
+    }
+
+    @Test
     void equalRevisionIsIgnoredEvenWhenOccurrenceTimeIsNewer() {
         ProcessObservation observation = processObservation("obs-equal-revision", 7L,
                 OCCURRED.plusSeconds(30));
@@ -610,6 +657,67 @@ class DefaultEngineObservationHandlerTest {
 
         verify(projections, never()).observe(any(TaskObservation.class));
         verify(claims).markIgnoredStale(claim);
+    }
+
+    @Test
+    void explicitRemoteTaskTerminalEvidenceWinsItsCreatedEqualTimestampTie() {
+        UserTaskObservation observation = new UserTaskObservation("obs-remote-deleted", 1,
+                "remote-history", "engine-a", "tenant-a", "case-1", "process-1", "task-1",
+                null, UserTaskObservation.EventType.DELETED, OCCURRED, RECEIVED,
+                authorityAttributes("taskDefinitionKey", "review",
+                        "historyEvidence", "TERMINAL"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-created", null, OCCURRED, "CREATED")));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.APPLIED);
+
+        verify(projections).observe(argThat((TaskObservation projected) ->
+                projected.eventName().equals("delete")));
+        verify(claims).markApplied(claim);
+        verify(claims, never()).markIgnoredStale(claim);
+    }
+
+    @Test
+    void explicitRemoteActivityTerminalEvidenceWinsItsStartedEqualTimestampTie() {
+        ActivityLifecycleObservation observation = new ActivityLifecycleObservation(
+                "obs-remote-stage-completed", 1, "remote-history", "engine-a", "tenant-a",
+                "case-1", "process-1", "stage-instance", null,
+                ActivityLifecycleObservation.EventType.COMPLETED, OCCURRED, RECEIVED,
+                authorityAttributes("activityId", "assessment", "name", "Assessment",
+                        "historyEvidence", "TERMINAL"));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+        when(claims.latestAppliedPosition(observation)).thenReturn(Optional.of(
+                new AppliedObservationRepository.AppliedPosition(
+                        "obs-started", null, OCCURRED, "STARTED")));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.APPLIED);
+
+        verify(projections).observe(argThat((ActivityObservation projected) ->
+                projected.eventName().equals("end")));
+        verify(claims).markApplied(claim);
+        verify(claims, never()).markIgnoredStale(claim);
+    }
+
+    @Test
+    void remoteTerminalEvidenceMaterializesItsAuthoritativeStartAnchorWhenDeliveredFirst() {
+        UserTaskObservation observation = new UserTaskObservation("obs-terminal-first", 1,
+                "remote-history", "engine-a", "tenant-a", "case-1", "process-1", "task-1",
+                null, UserTaskObservation.EventType.DELETED, OCCURRED, RECEIVED,
+                authorityAttributes("taskDefinitionKey", "review", "slaTargetId", "review-sla",
+                        "historyEvidence", "TERMINAL",
+                        "historyStartAt", OCCURRED.minusSeconds(30).toString()));
+        owningClaim(observation, activeCase("tenant-a", "process-1", 7));
+
+        assertThat(handler.apply(observation).status()).isEqualTo(ApplyStatus.APPLIED);
+
+        InOrder ordered = inOrder(sla);
+        ordered.verify(sla).observeAnchor(new SlaLifecyclePort.Anchor(
+                "case-1", "user-task", "CREATED", "task-1", "review-sla",
+                OCCURRED.minusSeconds(30)));
+        ordered.verify(sla).observeAnchor(new SlaLifecyclePort.Anchor(
+                "case-1", "user-task", "DELETED", "task-1", "review-sla", OCCURRED));
     }
 
     @Test

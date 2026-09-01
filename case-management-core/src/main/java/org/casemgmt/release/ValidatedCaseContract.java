@@ -84,16 +84,12 @@ public record ValidatedCaseContract(
         CASE_CLOSED(SlaAnchorFamily.CASE),
         CASE_CANCELLED(SlaAnchorFamily.CASE),
         USER_TASK_CREATED(SlaAnchorFamily.TASK),
-        USER_TASK_CLAIMED(SlaAnchorFamily.TASK),
-        USER_TASK_UNCLAIMED(SlaAnchorFamily.TASK),
-        USER_TASK_ASSIGNED(SlaAnchorFamily.TASK),
         USER_TASK_COMPLETED(SlaAnchorFamily.TASK),
         USER_TASK_DELETED(SlaAnchorFamily.TASK),
         ACTIVITY_STARTED(SlaAnchorFamily.STAGE),
         ACTIVITY_COMPLETED(SlaAnchorFamily.STAGE),
         ACTIVITY_CANCELLED(SlaAnchorFamily.STAGE),
         MILESTONE_REACHED(SlaAnchorFamily.MILESTONE),
-        MILESTONE_REOPENED(SlaAnchorFamily.MILESTONE),
         MILESTONE_CANCELLED(SlaAnchorFamily.MILESTONE);
 
         private final SlaAnchorFamily family;

@@ -23,7 +23,7 @@ import java.util.Map;
  * Starts, pauses and resumes SLA clocks (spec §7). {@code @Transactional} is genuine only when
  * this bean is obtained through a Spring proxy — see {@code CaseService}'s Javadoc for the same
  * caveat, and beware self-invocation losing it silently. Every mutating method follows the
- * module's row + event + audit convention (see {@code CommentService}/{@code MilestoneService}):
+ * module's row + event + audit convention (see {@code CommentService}/{@code DocumentService}):
  * the {@code CM_SLA_RECORD} write, the {@code CM_EVENT} row and the {@code CM_AUDIT_LOG} row
  * commit or roll back together.
  */

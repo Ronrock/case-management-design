@@ -16,6 +16,7 @@ import org.casemgmt.projection.CaseProjectionPort;
 import org.casemgmt.projection.JdbcCaseProjectionPort;
 import org.casemgmt.projection.ProcessCompletionObservation;
 import org.casemgmt.projection.ProcessProjectionResult;
+import org.casemgmt.projection.ProcessStartObservation;
 import org.casemgmt.projection.ProjectionEntityIdentity;
 import org.casemgmt.projection.ProjectionStatus;
 import org.casemgmt.projection.TaskObservation;
@@ -237,7 +238,7 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
     }
 
     @Test
-    void commonObservationTransactionExecutesPublishedSlaStartPauseAndResumeRules() {
+    void commonObservationTransactionKeepsTaskOwnershipChangesOutsideSlaAnchorSemantics() {
         SlaLifecyclePort contractLifecycle = new SlaLifecycleService(new SlaRepository(jdbc()),
                 new CaseRepository(dataSource()), new EventPublisher(new EventRepository(jdbc()),
                 new AuditRepository(jdbc()), new WebhookRepository(jdbc()), "org.example.cm", ENGINE_ID),
@@ -259,9 +260,19 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
         transaction.executeWithoutResult(status -> contractHandler.apply(slaTaskObservation(
                 "sla-pause", 2L, UserTaskObservation.EventType.CLAIMED,
                 Instant.parse("2026-08-30T10:10:00Z"))));
+        assertThat(jdbc().sql("SELECT STATE_ FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = 'sla-task-1'")
+                .query(String.class).single()).isEqualTo("CLAIMED");
+        assertThat(jdbc().sql("SELECT ASSIGNEE_ FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = 'sla-task-1'")
+                .query(String.class).single()).isEqualTo("alice");
         transaction.executeWithoutResult(status -> contractHandler.apply(slaTaskObservation(
                 "sla-resume", 3L, UserTaskObservation.EventType.UNCLAIMED,
                 Instant.parse("2026-08-30T10:20:00Z"))));
+        assertThat(jdbc().sql("SELECT STATE_ FROM CM_TASK WHERE CAMUNDA_TASK_ID_ = 'sla-task-1'")
+                .query(String.class).single()).isEqualTo("OPEN");
+        assertThat(jdbc().sql("""
+                SELECT COUNT(*) FROM CM_TASK
+                WHERE CAMUNDA_TASK_ID_ = 'sla-task-1' AND ASSIGNEE_ IS NULL""")
+                .query(Integer.class).single()).isEqualTo(1);
 
         assertThat(jdbc().sql("""
                 SELECT STATUS_, DUE_AT_, WARN_AT_, PAUSED_TOTAL_SECS_, TRANSITION_EVIDENCE_JSON_
@@ -270,17 +281,16 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                         rs.getObject(3, OffsetDateTime.class), rs.getLong(4), rs.getString(5))).single())
                 .satisfies(row -> {
                     assertThat(row.get(0)).isEqualTo("RUNNING");
-                    assertThat(row.get(1)).isEqualTo(OffsetDateTime.parse("2026-08-30T11:10:00Z"));
-                    assertThat(row.get(2)).isEqualTo(OffsetDateTime.parse("2026-08-30T10:40:00Z"));
-                    assertThat(row.get(3)).isEqualTo(600L);
-                    assertThat(String.valueOf(row.get(4))).contains("USER_TASK_UNCLAIMED");
+                    assertThat(row.get(1)).isEqualTo(OffsetDateTime.parse("2026-08-30T11:00:00Z"));
+                    assertThat(row.get(2)).isEqualTo(OffsetDateTime.parse("2026-08-30T10:30:00Z"));
+                    assertThat(row.get(3)).isEqualTo(0L);
+                    assertThat(String.valueOf(row.get(4))).contains("USER_TASK_CREATED")
+                            .doesNotContain("USER_TASK_CLAIMED", "USER_TASK_UNCLAIMED");
                 });
         assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.started'")
                 .query(Integer.class).single()).isEqualTo(1);
-        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.paused'")
-                .query(Integer.class).single()).isEqualTo(1);
-        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.resumed'")
-                .query(Integer.class).single()).isEqualTo(1);
+        assertThat(jdbc().sql("SELECT COUNT(*) FROM CM_EVENT WHERE TYPE_ LIKE '%sla.paused' OR TYPE_ LIKE '%sla.resumed'")
+                .query(Integer.class).single()).isZero();
     }
 
     private void seedPublishedBpmnCase() {
@@ -404,15 +414,19 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
     private UserTaskObservation slaTaskObservation(String observationId, long revision,
                                                    UserTaskObservation.EventType type,
                                                    Instant occurredAt) {
-        return new UserTaskObservation(observationId, 1, "operaton:embedded", ENGINE_ID,
-                TENANT_ID, CASE_ID, PROCESS_INSTANCE_ID, "sla-task-1", revision, type,
-                occurredAt, occurredAt.plusSeconds(5), Map.of(
+        Map<String, Object> attributes = new LinkedHashMap<>(Map.of(
                 "processDefinitionId", PROCESS_DEFINITION_ID,
                 "processDefinitionKey", PROCESS_DEFINITION_KEY,
                 "taskDefinitionKey", "slaReviewTask",
                 "activityInstanceId", "sla-activity-1",
                 "name", "SLA Review",
                 "slaTargetId", "resolution"));
+        if (type == UserTaskObservation.EventType.CLAIMED) {
+            attributes.put("assignee", "alice");
+        }
+        return new UserTaskObservation(observationId, 1, "operaton:embedded", ENGINE_ID,
+                TENANT_ID, CASE_ID, PROCESS_INSTANCE_ID, "sla-task-1", revision, type,
+                occurredAt, occurredAt.plusSeconds(5), Map.copyOf(attributes));
     }
 
     private DatabaseState state() {
@@ -583,8 +597,7 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
                     "resolution":{"scope":"TASK","calendarId":"calendar-1",
                     "calendarRevision":1,"duration":"PT1H","startAnchor":"USER_TASK_CREATED",
                     "meetAnchor":"USER_TASK_COMPLETED","cancelAnchor":"USER_TASK_DELETED",
-                    "pauseAnchors":["USER_TASK_CLAIMED"],
-                    "resumeAnchors":["USER_TASK_UNCLAIMED"],"warnings":["PT30M"]}
+                    "warnings":["PT30M"]}
                   }
                 }
                 """;
@@ -756,6 +769,13 @@ class EngineObservationTransactionalIntegrationTest extends OracleTestBase {
             ProcessProjectionResult result = delegate.observeFromHandler(observation);
             failures.after(FailurePoint.AFTER_PROJECTION);
             return result;
+        }
+
+        @Override
+        public boolean observeStartedFromHandler(ProcessStartObservation observation) {
+            boolean changed = delegate.observeStartedFromHandler(observation);
+            failures.after(FailurePoint.AFTER_PROJECTION);
+            return changed;
         }
     }
 

@@ -2,11 +2,13 @@ package org.casemgmt.service;
 
 import org.casemgmt.orchestration.OrchestrationDeploymentPort;
 import org.casemgmt.orchestration.EngineDeploymentIdentity;
+import org.casemgmt.error.NotFoundException;
 import org.casemgmt.release.CaseDefinitionRelease;
 import org.casemgmt.release.JsonSchemaCaseContractValidator;
 import org.casemgmt.release.ReleaseKind;
 import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
+import org.casemgmt.sla.SlaCalendarCatalog;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -18,11 +20,43 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class CaseDefinitionReleaseServiceTest {
+
+    @Test
+    void missingExactTenantCalendarRevisionLeavesStandaloneContractFailed() {
+        CaseDefinitionReleaseRepository repository = mock(CaseDefinitionReleaseRepository.class);
+        SlaCalendarCatalog calendars = mock(SlaCalendarCatalog.class);
+        when(repository.findByDigest(eq("tenant-a"), eq("sample-case"),
+                eq(ReleaseKind.CONTRACT), any())).thenReturn(Optional.empty());
+        when(calendars.require("tenant-a", "support", 4))
+                .thenThrow(new NotFoundException(
+                        "SlaCalendarRevision", "tenant-a/support/4"));
+        byte[] content = ("{\"key\":\"sample-case\",\"orchestrationMode\":\"BPMN\"," +
+                "\"fields\":{},\"forms\":{},\"slaBindings\":{\"resolution\":{" +
+                "\"scope\":\"CASE\",\"calendarId\":\"support\",\"calendarRevision\":4," +
+                "\"duration\":\"PT1H\",\"startAnchor\":\"CASE_CREATED\"," +
+                "\"meetAnchor\":\"CASE_CLOSED\"}}}").getBytes(StandardCharsets.UTF_8);
+        CaseDefinitionReleaseService service = new CaseDefinitionReleaseService(
+                repository, mock(OrchestrationDeploymentPort.class),
+                new JsonSchemaCaseContractValidator(), calendars);
+
+        CaseDefinitionRelease release = service.publish("sample-case", "tenant-a",
+                ReleaseKind.CONTRACT, "application/json", content, "alice");
+
+        assertThat(release.status()).isEqualTo(ReleaseStatus.FAILED);
+        assertThat(release.failureDetail())
+                .contains("support")
+                .contains("revision 4")
+                .contains("tenant 'tenant-a'");
+        verify(calendars).require("tenant-a", "support", 4);
+        verify(repository, never()).transition(any(), any(), eq(ReleaseStatus.ACTIVE),
+                any(), any());
+    }
 
     @Test
     void publishesContentAddressedImmutableReleases() {

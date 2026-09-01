@@ -356,6 +356,23 @@ public class JdbcCaseProjectionPort implements CaseProjectionPort {
         return observeProcess(observation, false);
     }
 
+    @Override
+    public boolean observeStartedFromHandler(ProcessStartObservation observation) {
+        return jdbc.sql("""
+                UPDATE CM_LINKED_PROCESS SET STATE_ = 'ACTIVE', ENDED_AT_ = NULL,
+                    PROJECTION_STATUS_ = 'CURRENT', LAST_ENGINE_UPDATE_AT_ = :engineAt,
+                    LAST_PROJECTED_AT_ = :projectedAt
+                WHERE CASE_ID_ = :caseId AND PROC_INST_ID_ = :processInstanceId
+                  AND ENGINE_SYNC_ = 'SYNCED'
+                  AND STATE_ IN ('COMPLETED','TERMINATED')
+                  AND (LAST_PROJECTED_AT_ IS NULL OR LAST_PROJECTED_AT_ < :projectedAt)""")
+                .param("engineAt", observation.engineUpdatedAt())
+                .param("projectedAt", observation.observedAt())
+                .param("caseId", observation.caseId())
+                .param("processInstanceId", observation.processInstanceId())
+                .update() == 1;
+    }
+
     private ProcessProjectionResult observeProcess(ProcessCompletionObservation observation,
                                                    boolean publishLegacyCompletion) {
         String terminalState = "cancelled".equalsIgnoreCase(observation.endState())

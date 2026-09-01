@@ -58,11 +58,11 @@ public class CombinedCaseDefinitionDeploymentService {
         // still a release an operator saw appear. Binding validates again because it is a public
         // entry point in its own right.
         contracts.validate(key, parsed.contractJson().getBytes(StandardCharsets.UTF_8));
-        releases.validateForPublication(key, ReleaseKind.ORCHESTRATION, "application/zip",
+        releases.validateForPublication(key, tenantId, ReleaseKind.ORCHESTRATION, "application/zip",
                 parsed.orchestrationZip());
-        releases.validateForPublication(key, ReleaseKind.CONTRACT, "application/json",
+        releases.validateForPublication(key, tenantId, ReleaseKind.CONTRACT, "application/json",
                 parsed.contractJson().getBytes(StandardCharsets.UTF_8));
-        releases.validateForPublication(key, ReleaseKind.PRESENTATION, "application/json",
+        releases.validateForPublication(key, tenantId, ReleaseKind.PRESENTATION, "application/json",
                 parsed.presentationJson().getBytes(StandardCharsets.UTF_8));
         versions.validateArtifacts(key, tenantId, parsed.orchestrationZip(), "application/zip",
                 parsed.contractJson().getBytes(StandardCharsets.UTF_8),

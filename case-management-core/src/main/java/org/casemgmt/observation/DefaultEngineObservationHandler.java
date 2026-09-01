@@ -11,6 +11,7 @@ import org.casemgmt.projection.ProcessCompletionObservation;
 import org.casemgmt.projection.ProjectionEntityIdentity;
 import org.casemgmt.projection.ProjectionOwnershipException;
 import org.casemgmt.projection.ProcessProjectionResult;
+import org.casemgmt.projection.ProcessStartObservation;
 import org.casemgmt.projection.TaskObservation;
 import org.casemgmt.repo.AppliedObservationRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
@@ -120,6 +121,11 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
             recordProjectionRejection(observation, rejected);
             throw rejected;
         }
+        if (!projection.lifecycleAccepted()) {
+            claims.markIgnoredStale(ownership);
+            return new ApplyResult(observation.observationId(), ApplyStatus.IGNORED_STALE,
+                    caseInstance.version(), List.of());
+        }
         long caseVersion = projection.caseVersion();
         List<CanonicalPatch.AuditChange> canonicalChanges = List.of();
         if (observation instanceof UserTaskObservation task
@@ -138,6 +144,10 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
             canonicalChanges = patch.auditSummary();
         }
 
+        SlaLifecyclePort.Anchor authoritativeStart = authoritativeRemoteStartAnchor(observation);
+        if (authoritativeStart != null) {
+            sla.observeAnchor(authoritativeStart);
+        }
         sla.observeAnchor(anchor(observation));
         if (projection.rootTerminalState() != null) {
             sla.terminalizeRoot(observation.caseId(), projection.rootTerminalState(),
@@ -189,25 +199,31 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
         }
         if (observation instanceof UserTaskObservation task) {
             projections.observe(taskProjection(task));
-            return new ProjectionOutcome(caseInstance.version(), null);
+            return new ProjectionOutcome(caseInstance.version(), null, true);
         }
         if (observation instanceof ActivityLifecycleObservation activity) {
             projections.observe(activityProjection(activity));
-            return new ProjectionOutcome(caseInstance.version(), null);
+            return new ProjectionOutcome(caseInstance.version(), null, true);
         }
         MilestoneObservation milestone = (MilestoneObservation) observation;
         projections.observe(milestoneProjection(milestone));
-        return new ProjectionOutcome(caseInstance.version(), null);
+        return new ProjectionOutcome(caseInstance.version(), null, true);
     }
 
     private ProjectionOutcome projectProcess(ProcessObservation process,
                                              CaseInstance caseInstance) {
+        if (authoritativeActiveReconciliation(process)) {
+            boolean restored = projections.observeStartedFromHandler(new ProcessStartObservation(process.caseId(),
+                    process.processInstanceId(), at(process.engineOccurredAt()),
+                    at(process.receivedAt())));
+            return new ProjectionOutcome(caseInstance.version(), null, restored);
+        }
         if (process.eventType() != ProcessObservation.EventType.COMPLETED
                 && process.eventType() != ProcessObservation.EventType.TERMINATED) {
             // Existing lower-level projection support has no process-start row mutation. The
             // linked row is already ACTIVE when the process is correlated; the accepted anchor,
             // audit and event are still applied atomically.
-            return new ProjectionOutcome(caseInstance.version(), null);
+            return new ProjectionOutcome(caseInstance.version(), null, true);
         }
         boolean cancelled = process.eventType() == ProcessObservation.EventType.TERMINATED;
         ProcessProjectionResult result = projections.observeFromHandler(new ProcessCompletionObservation(process.caseId(),
@@ -215,15 +231,15 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
                 cancelled ? "cancelled" : "completed", at(process.engineOccurredAt()),
                 at(process.receivedAt())));
         if (!Objects.equals(caseInstance.rootProcessInstanceId(), process.processInstanceId())) {
-            return new ProjectionOutcome(result.caseVersion(), null);
+            return new ProjectionOutcome(result.caseVersion(), null, true);
         }
         if (!result.rootTransitioned()) {
-            return new ProjectionOutcome(result.caseVersion(), null);
+            return new ProjectionOutcome(result.caseVersion(), null, true);
         }
         SlaLifecyclePort.TerminalState terminal = cancelled
                 ? SlaLifecyclePort.TerminalState.CANCELLED
                 : SlaLifecyclePort.TerminalState.COMPLETED;
-        return new ProjectionOutcome(result.caseVersion(), terminal);
+        return new ProjectionOutcome(result.caseVersion(), terminal, true);
     }
 
     private static TaskObservation taskProjection(UserTaskObservation task) {
@@ -302,6 +318,9 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
 
     private static boolean stale(EngineObservation incoming,
                                  AppliedObservationRepository.AppliedPosition current) {
+        if (authoritativeActiveReconciliation(incoming)) {
+            return false;
+        }
         // Cancellation is an irreversible engine fact. Operaton publishes a cancelled history
         // record before its synchronous execution "end" callback while deleting an active
         // subprocess, and that later callback must not resurrect the activity as completed.
@@ -320,6 +339,9 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
         String incomingType = incoming.eventType().name();
         if (incomingType.equals(current.eventType())) {
             return true;
+        }
+        if (forwardRemoteTerminalTie(incoming, current)) {
+            return false;
         }
         // Arrival order is trustworthy only for callbacks delivered synchronously from the
         // embedded Operaton command. Remote polling/reconciliation can reorder distinct facts
@@ -346,6 +368,33 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
                     || "TERMINATED".equals(current.eventType());
         }
         return "CANCELLED".equals(current.eventType());
+    }
+
+    private static boolean authoritativeActiveReconciliation(EngineObservation observation) {
+        return observation instanceof ProcessObservation process
+                && process.eventType() == ProcessObservation.EventType.STARTED
+                && "remote-history".equals(process.source())
+                && Boolean.TRUE.equals(process.attributes().get("reconciliationActive"));
+    }
+
+    private static boolean forwardRemoteTerminalTie(
+            EngineObservation incoming,
+            AppliedObservationRepository.AppliedPosition current) {
+        if (!"remote-history".equals(incoming.source())
+                || !"TERMINAL".equals(incoming.attributes().get("historyEvidence"))) {
+            return false;
+        }
+        if (incoming instanceof UserTaskObservation task) {
+            return "CREATED".equals(current.eventType())
+                    && (task.eventType() == UserTaskObservation.EventType.COMPLETED
+                        || task.eventType() == UserTaskObservation.EventType.DELETED);
+        }
+        if (incoming instanceof ActivityLifecycleObservation activity) {
+            return "STARTED".equals(current.eventType())
+                    && (activity.eventType() == ActivityLifecycleObservation.EventType.COMPLETED
+                        || activity.eventType() == ActivityLifecycleObservation.EventType.CANCELLED);
+        }
+        return false;
     }
 
     private void recordApplied(EngineObservation observation, CaseInstance caseInstance,
@@ -453,6 +502,40 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
                 observation.engineOccurredAt());
     }
 
+    /**
+     * Remote terminal rows retain their authoritative start timestamp. Materializing that anchor
+     * in the terminal transaction makes SLA causality independent of inbox-worker claim order;
+     * a later standalone start fact remains idempotent at the lifecycle layer.
+     */
+    private static SlaLifecyclePort.Anchor authoritativeRemoteStartAnchor(
+            EngineObservation observation) {
+        if (!"remote-history".equals(observation.source())
+                || !"TERMINAL".equals(observation.attributes().get("historyEvidence"))) {
+            return null;
+        }
+        String startEvent;
+        if (observation instanceof UserTaskObservation) {
+            startEvent = "CREATED";
+        } else if (observation instanceof ActivityLifecycleObservation) {
+            startEvent = "STARTED";
+        } else {
+            return null;
+        }
+        String historyStartAt = optionalString(observation, "historyStartAt");
+        if (historyStartAt == null) {
+            return null;
+        }
+        final Instant occurredAt;
+        try {
+            occurredAt = OffsetDateTime.parse(historyStartAt).toInstant();
+        } catch (java.time.format.DateTimeParseException invalid) {
+            throw new IllegalArgumentException("Observation attribute 'historyStartAt' must be "
+                    + "an ISO offset date-time", invalid);
+        }
+        return new SlaLifecyclePort.Anchor(observation.caseId(), kind(observation), startEvent,
+                observation.entityId(), optionalString(observation, "slaTargetId"), occurredAt);
+    }
+
     private static String kind(EngineObservation observation) {
         if (observation instanceof ProcessObservation) return "process";
         if (observation instanceof UserTaskObservation) return "user-task";
@@ -539,5 +622,6 @@ public class DefaultEngineObservationHandler implements EngineObservationHandler
     }
 
     private record ProjectionOutcome(long caseVersion,
-                                     SlaLifecyclePort.TerminalState rootTerminalState) { }
+                                     SlaLifecyclePort.TerminalState rootTerminalState,
+                                     boolean lifecycleAccepted) { }
 }

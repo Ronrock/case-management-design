@@ -80,9 +80,9 @@ class RemoteObservationPollerHttpTest {
         RemoteObservationInboxWorker worker = mock(RemoteObservationInboxWorker.class);
         when(activeCases.findAllProcessesForActiveCases()).thenReturn(List.of(
                 new ActiveBpmnCaseRepository.ReconciliationProcess("case-1", "tenant-a",
-                        "engine-west", "root-old", "definition-1", true),
+                        "engine-west", "root-old", "definition-1", "complaint", true),
                 new ActiveBpmnCaseRepository.ReconciliationProcess("case-1", "tenant-a",
-                        "engine-west", "linked-old", "definition-1", false)));
+                        "engine-west", "linked-old", "definition-1", "complaint", false)));
         when(cases.findById("case-1")).thenReturn(Optional.of(caseInstance()));
         when(classifier.taskMetadata(any(), any())).thenReturn(
                 new RemoteProcessActivityClassifier.TaskMetadata(List.of(), null, "review-sla"));
@@ -144,7 +144,9 @@ class RemoteObservationPollerHttpTest {
             }
             if (uri.getPath().equals("/history/process-instance/root-old")) {
                 return withSuccess(json(Map.of("id", "root-old", "businessKey", "case-1",
-                        "processDefinitionKey", "complaint")), MediaType.APPLICATION_JSON)
+                        "processDefinitionKey", "complaint",
+                        "startTime", "2026-08-01T09:00:00.000Z")),
+                        MediaType.APPLICATION_JSON)
                         .createResponse(request);
             }
             if (uri.getPath().equals("/history/process-instance/linked-old")) {
@@ -166,7 +168,7 @@ class RemoteObservationPollerHttpTest {
 
         int inserted = poller.reconcileAllActive();
 
-        assertThat(inserted).isEqualTo(505);
+        assertThat(inserted).isEqualTo(508);
         assertThat(reconciliationTaskPages).containsExactly("root-old:0", "root-old:500",
                 "linked-old:0");
         assertThat(persisted).extracting(envelope -> envelope.observation())
@@ -215,6 +217,21 @@ class RemoteObservationPollerHttpTest {
                         .isInstanceOf(MilestoneObservation.class)
                         .matches(milestone -> milestone.eventType()
                                 == MilestoneObservation.EventType.REOPENED));
+        assertThat(persisted).extracting(ObservationEnvelope::observation)
+                .filteredOn(observation -> observation instanceof UserTaskObservation task
+                        && task.entityId().equals("task-completed"))
+                .extracting(observation -> observation.eventType().name())
+                .containsExactly("CREATED", "COMPLETED");
+        assertThat(persisted).extracting(ObservationEnvelope::observation)
+                .filteredOn(observation -> observation instanceof ActivityLifecycleObservation activity
+                        && activity.entityId().equals("stage-completed"))
+                .extracting(observation -> observation.eventType().name())
+                .containsExactly("STARTED", "COMPLETED");
+        assertThat(persisted).extracting(ObservationEnvelope::observation)
+                .filteredOn(observation -> observation instanceof ProcessObservation process
+                        && process.processInstanceId().equals("root-old"))
+                .extracting(observation -> observation.eventType().name())
+                .containsExactly("STARTED");
         verify(worker).drainOnce();
         verify(worker).drainUntilIdle();
         verify(ingestion, never()).advanceCompletedWindow(any(), any(), any());
@@ -242,7 +259,7 @@ class RemoteObservationPollerHttpTest {
         RemoteProcessActivityClassifier classifier = mock(RemoteProcessActivityClassifier.class);
         when(activeCases.findAllProcessesForActiveCases()).thenReturn(List.of(
                 new ActiveBpmnCaseRepository.ReconciliationProcess("case-1", "tenant-a",
-                        "engine-west", "root-old", "definition-1", true)));
+                        "engine-west", "root-old", "definition-1", "complaint", true)));
         when(classifier.taskMetadata(any(), any())).thenReturn(
                 new RemoteProcessActivityClassifier.TaskMetadata(List.of(), null, null));
         when(classifier.classify("definition-1", "stage")).thenReturn(Optional.of(
@@ -269,7 +286,8 @@ class RemoteObservationPollerHttpTest {
                         MediaType.APPLICATION_JSON).createResponse(request);
             }
             if (uri.getPath().equals("/history/process-instance/root-old")) {
-                return withSuccess(json(Map.of("id", "root-old", "businessKey", "case-1")),
+                return withSuccess(json(Map.of("id", "root-old", "businessKey", "case-1",
+                                "startTime", "2026-08-01T09:00:00.000Z")),
                         MediaType.APPLICATION_JSON).createResponse(request);
             }
             throw new AssertionError("unexpected endpoint " + uri);
@@ -278,12 +296,14 @@ class RemoteObservationPollerHttpTest {
         RemoteObservationPoller poller = new RemoteObservationPoller(builder.build(), activeCases,
                 mock(CaseRepository.class), classifier, ingestion, worker);
 
-        assertThat(poller.reconcileAllActive()).isEqualTo(504);
-        assertThat(effects).hasSize(504);
+        assertThat(poller.reconcileAllActive()).isEqualTo(507);
+        assertThat(effects).hasSize(507);
         assertThat(jdbc.sql("SELECT COUNT(*) FROM CM_REMOTE_OBS_INBOX WHERE STATUS_ = 'APPLIED'")
-                .query(Long.class).single()).isEqualTo(504L);
+                .query(Long.class).single()).isEqualTo(507L);
         assertThat(poller.reconcileAllActive()).isZero();
-        assertThat(effects).hasSize(504);
+        assertThat(effects).hasSize(507);
+        assertThat(effects.values()).anyMatch(observation -> observation instanceof ProcessObservation
+                && observation.eventType() == ProcessObservation.EventType.STARTED);
         assertThat(effects.values()).noneMatch(observation -> observation instanceof MilestoneObservation
                 && ((MilestoneObservation) observation).eventType()
                 == MilestoneObservation.EventType.REOPENED);
@@ -362,11 +382,8 @@ class RemoteObservationPollerHttpTest {
             if (uri.getPath().equals("/history/task")) taskQueries.add(query(uri));
         }).andRespond(request -> {
             Map<String, String> query = query(request.getURI());
-            if (request.getURI().getPath().equals("/history/task") && query.containsKey("finishedAfter")) return withSuccess(json(List.of(Map.of(
-                    "id", "task-long-running", "processInstanceId", "process-1", "businessKey", "case-1",
-                    "startTime", "2026-08-01T10:00:00.000Z", "endTime", "2026-08-30T10:00:00.000Z",
-                    "deleteReason", "completed", "processDefinitionId", "definition-1",
-                    "taskDefinitionKey", "review", "name", "Review", "priority", 50))),
+            if (request.getURI().getPath().equals("/history/task") && query.containsKey("finishedAfter")) return withSuccess(json(List.of(
+                    terminalTask("task-long-running", "completed"))),
                     MediaType.APPLICATION_JSON).createResponse(request);
             return withSuccess("[]", MediaType.APPLICATION_JSON).createResponse(request);
         });
@@ -379,6 +396,78 @@ class RemoteObservationPollerHttpTest {
         assertThat(taskQueries).anySatisfy(query -> assertThat(query)
                 .containsKey("finishedAfter").containsKey("finishedBefore")
                 .containsEntry("sortBy", "taskId"));
+        server.verify();
+    }
+
+    @Test
+    void rowsReturnedByBothLifecycleFeedsPreserveStartThenTerminalEvidence() throws Exception {
+        RestClient.Builder builder = RestClient.builder().baseUrl("http://engine.test");
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        List<ObservationEnvelope> persisted = new ArrayList<>();
+        ActiveBpmnCaseRepository activeCases = mock(ActiveBpmnCaseRepository.class);
+        CaseRepository cases = mock(CaseRepository.class);
+        RemoteProcessActivityClassifier classifier = mock(RemoteProcessActivityClassifier.class);
+        RemoteObservationIngestionService ingestion = mock(RemoteObservationIngestionService.class);
+        RemoteObservationInboxWorker worker = mock(RemoteObservationInboxWorker.class);
+        when(cases.findById("case-1")).thenReturn(Optional.of(caseInstance()));
+        when(classifier.taskMetadata(any(), any())).thenReturn(
+                new RemoteProcessActivityClassifier.TaskMetadata(List.of(), null, "review-sla"));
+        when(classifier.classify("definition-1", "assessment")).thenReturn(Optional.of(
+                new RemoteProcessActivityClassifier.Classification(ActivityObservation.Kind.STAGE,
+                        null, "assessment-sla")));
+        when(ingestion.oldestCursor(any())).thenReturn(Optional.empty());
+        doAnswer(invocation -> {
+            List<ObservationEnvelope> page = invocation.getArgument(2);
+            persisted.addAll(page);
+            return page.size();
+        }).when(ingestion).persistPage(eq("tenant-a"), any(ObservationStream.class), any());
+
+        Map<String, Object> task = new java.util.LinkedHashMap<>(
+                terminalTask("task-fast", "completed"));
+        task.put("startTime", "2026-08-30T09:59:00.000Z");
+        task.put("endTime", "2026-08-30T10:00:00.000Z");
+        Map<String, Object> activity = activity("activity-fast", "assessment",
+                "2026-08-30T10:00:00.000Z");
+        activity.put("processInstanceId", "process-1");
+        activity.put("businessKey", "case-1");
+        activity.put("processDefinitionId", "definition-1");
+        activity.put("startTime", "2026-08-30T09:59:00.000Z");
+        server.expect(ExpectedCount.manyTimes(), request -> {
+        }).andRespond(request -> {
+            URI uri = request.getURI();
+            Map<String, String> query = query(uri);
+            if (uri.getPath().equals("/history/task")) {
+                return withSuccess(json(List.of(task)), MediaType.APPLICATION_JSON)
+                        .createResponse(request);
+            }
+            if (uri.getPath().equals("/history/activity-instance")) {
+                return withSuccess(json(List.of(activity)), MediaType.APPLICATION_JSON)
+                        .createResponse(request);
+            }
+            return withSuccess("[]", MediaType.APPLICATION_JSON).createResponse(request);
+        });
+
+        new RemoteObservationPoller(builder.build(), activeCases, cases, classifier, ingestion,
+                worker).pollOnce();
+
+        assertThat(persisted).extracting(envelope -> envelope.observation().eventType().name())
+                .containsExactly("CREATED", "COMPLETED", "STARTED", "COMPLETED");
+        assertThat(persisted).extracting(envelope -> envelope.observation().engineOccurredAt())
+                .containsExactly(
+                        OffsetDateTime.parse("2026-08-30T09:59:00Z").toInstant(),
+                        OffsetDateTime.parse("2026-08-30T10:00:00Z").toInstant(),
+                        OffsetDateTime.parse("2026-08-30T09:59:00Z").toInstant(),
+                        OffsetDateTime.parse("2026-08-30T10:00:00Z").toInstant());
+        assertThat(persisted).allSatisfy(envelope -> {
+            assertThat(envelope.observation().attributes())
+                    .containsEntry("processDefinitionId", "definition-1")
+                    .containsEntry("processDefinitionKey", "complaint");
+        });
+        assertThat(persisted).filteredOn(envelope ->
+                        "TERMINAL".equals(envelope.observation().attributes()
+                                .get("historyEvidence")))
+                .allSatisfy(envelope -> assertThat(envelope.observation().attributes())
+                        .containsEntry("historyStartAt", "2026-08-30T09:59Z"));
         server.verify();
     }
 
@@ -530,14 +619,21 @@ class RemoteObservationPollerHttpTest {
     private static Map<String, Object> task(String id, String startTime) {
         return Map.of("id", id, "processInstanceId", "process-1", "businessKey", "case-1",
                 "startTime", startTime, "processDefinitionId", "definition-1",
-                "taskDefinitionKey", "review", "name", "Review", "priority", 50);
+                "processDefinitionKey", "complaint", "taskDefinitionKey", "review",
+                "name", "Review", "priority", 50);
     }
 
     private static Map<String, Object> terminalTask(String id, String deleteReason) {
-        return Map.of("id", id, "processInstanceId", "process-1", "businessKey", "case-1",
-                "startTime", "2026-08-01T10:00:00.000Z", "endTime", "2026-08-30T10:00:00.000Z",
-                "deleteReason", deleteReason, "processDefinitionId", "definition-1",
-                "taskDefinitionKey", "review", "name", "Review", "priority", 50);
+        return Map.ofEntries(
+                Map.entry("id", id), Map.entry("processInstanceId", "process-1"),
+                Map.entry("businessKey", "case-1"),
+                Map.entry("startTime", "2026-08-01T10:00:00.000Z"),
+                Map.entry("endTime", "2026-08-30T10:00:00.000Z"),
+                Map.entry("deleteReason", deleteReason),
+                Map.entry("processDefinitionId", "definition-1"),
+                Map.entry("processDefinitionKey", "complaint"),
+                Map.entry("taskDefinitionKey", "review"), Map.entry("name", "Review"),
+                Map.entry("priority", 50));
     }
 
     private static Map<String, Object> activity(String instanceId, String activityId,
@@ -549,6 +645,7 @@ class RemoteObservationPollerHttpTest {
         row.put("activityName", activityId);
         row.put("processInstanceId", "root-old");
         row.put("businessKey", "case-1");
+        row.put("processDefinitionKey", "complaint");
         row.put("startTime", "2026-08-01T10:00:00.000Z");
         if (endTime != null) row.put("endTime", endTime);
         return row;
@@ -581,8 +678,8 @@ class RemoteObservationPollerHttpTest {
         for (int i = first; i < Math.min(first + 500, ROWS); i++) {
             rows.add(Map.of("id", "task-%04d".formatted(i), "processInstanceId", "process-1",
                     "businessKey", "case-1", "startTime", "2026-08-30T10:00:00.000Z",
-                    "processDefinitionId", "definition-1", "taskDefinitionKey", "review",
-                    "name", "Review", "priority", 50));
+                    "processDefinitionId", "definition-1", "processDefinitionKey", "complaint",
+                    "taskDefinitionKey", "review", "name", "Review", "priority", 50));
         }
         return rows;
     }

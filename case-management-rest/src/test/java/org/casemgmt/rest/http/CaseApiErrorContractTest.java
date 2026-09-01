@@ -284,12 +284,12 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
     }
 
     /**
-     * The spec declares {@code If-Match} on milestone achieve and process start (fix round 1,
-     * I6). Neither sub-resource carries a version of its own, so it is enforced against the
-     * case's — a real precondition, not a header read and discarded.
+     * The spec declares {@code If-Match} on process start (fix round 1, I6). The process
+     * sub-resource carries no version of its own, so the header is enforced against the case's —
+     * a real precondition, not a header read and discarded.
      */
     @Test
-    void milestoneAchieveAndProcessStartRequireAndEnforceIfMatch() {
+    void processStartRequiresAndEnforcesIfMatch() {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");
 

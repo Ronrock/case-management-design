@@ -9,8 +9,10 @@ import org.casemgmt.release.CaseContractValidator;
 import org.casemgmt.release.JsonSchemaCaseContractValidator;
 import org.casemgmt.release.ReleaseKind;
 import org.casemgmt.release.ReleaseStatus;
+import org.casemgmt.release.ValidatedCaseContract;
 import org.casemgmt.repo.CaseDefinitionReleaseRepository;
 import org.casemgmt.repo.JsonCodec;
+import org.casemgmt.sla.SlaCalendarCatalog;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -36,6 +38,7 @@ public class CaseDefinitionReleaseService {
     private final CaseDefinitionReleaseRepository repository;
     private final OrchestrationDeploymentPort deployments;
     private final CaseContractValidator contracts;
+    private final SlaCalendarCatalog calendars;
 
     public CaseDefinitionReleaseService(CaseDefinitionReleaseRepository repository) {
         this(repository, (releaseId, definitionKey, tenantId, content, mediaType) -> {
@@ -52,9 +55,21 @@ public class CaseDefinitionReleaseService {
     public CaseDefinitionReleaseService(CaseDefinitionReleaseRepository repository,
                                         OrchestrationDeploymentPort deployments,
                                         CaseContractValidator contracts) {
+        this(repository, deployments, contracts,
+                (tenantId, calendarId, revision) -> {
+                    throw new IllegalStateException(
+                            "No SLA calendar catalog is configured for contract publication");
+                });
+    }
+
+    public CaseDefinitionReleaseService(CaseDefinitionReleaseRepository repository,
+                                        OrchestrationDeploymentPort deployments,
+                                        CaseContractValidator contracts,
+                                        SlaCalendarCatalog calendars) {
         this.repository = repository;
         this.deployments = deployments;
         this.contracts = contracts;
+        this.calendars = Objects.requireNonNull(calendars, "calendars");
     }
 
     @Transactional
@@ -69,7 +84,7 @@ public class CaseDefinitionReleaseService {
                     id, key, tenantId, kind, normalizedMediaType, bytes, digest, publishedBy);
             repository.insert(draft);
             try {
-                validateContent(key, kind, normalizedMediaType, bytes);
+                validateContent(key, tenantId, kind, normalizedMediaType, bytes);
             } catch (RuntimeException invalidContent) {
                 return transition(draft, ReleaseStatus.FAILED, null,
                         boundFailure(invalidContent.getMessage()));
@@ -150,9 +165,15 @@ public class CaseDefinitionReleaseService {
 
     /** Runs every deterministic release check without persisting or deploying anything. */
     public void validateForPublication(String key, ReleaseKind kind, String mediaType, byte[] content) {
+        validateForPublication(key, null, kind, mediaType, content);
+    }
+
+    /** Runs every tenant-aware deterministic release check without persisting or deploying anything. */
+    public void validateForPublication(String key, String tenantId, ReleaseKind kind,
+                                       String mediaType, byte[] content) {
         byte[] bytes = snapshot(content);
         String normalizedMediaType = validateEnvelope(key, kind, mediaType, bytes);
-        validateContent(key, kind, normalizedMediaType, bytes);
+        validateContent(key, tenantId, kind, normalizedMediaType, bytes);
     }
 
     private String validateEnvelope(String key, ReleaseKind kind, String mediaType, byte[] bytes) {
@@ -175,7 +196,8 @@ public class CaseDefinitionReleaseService {
         return content == null ? new byte[0] : content.clone();
     }
 
-    private void validateContent(String key, ReleaseKind kind, String mediaType, byte[] content) {
+    private void validateContent(String key, String tenantId, ReleaseKind kind,
+                                 String mediaType, byte[] content) {
         if (kind == ReleaseKind.CONTRACT || kind == ReleaseKind.PRESENTATION) {
             Map<String, Object> json;
             try {
@@ -188,7 +210,8 @@ public class CaseDefinitionReleaseService {
                 if (mode == null || mode.toString().isBlank()) {
                     throw invalid(key, "Contract release requires orchestrationMode");
                 }
-                contracts.validate(key, content);
+                ValidatedCaseContract contract = contracts.validate(key, content);
+                validateCalendarRevisions(key, tenantId, contract);
             } else {
                 Object version = json.getOrDefault("version", json.get("schemaVersion"));
                 String text = String.valueOf(version);
@@ -210,6 +233,23 @@ public class CaseDefinitionReleaseService {
         }
         if (kind == ReleaseKind.ORCHESTRATION) {
             BpmnReleaseValidator.validate(key, content, mediaType);
+        }
+    }
+
+    private void validateCalendarRevisions(String key, String tenantId,
+                                            ValidatedCaseContract contract) {
+        if (!contract.slaBindings().isEmpty() && (tenantId == null || tenantId.isBlank())) {
+            throw invalid(key, "Contract release with SLA bindings requires a tenant");
+        }
+        for (ValidatedCaseContract.SlaBindingDefinition binding : contract.slaBindings()) {
+            try {
+                calendars.require(tenantId, binding.calendarId(), binding.calendarRevision());
+            } catch (org.casemgmt.error.NotFoundException missing) {
+                throw invalid(key, "SLA binding '" + binding.id()
+                        + "' references missing calendar '" + binding.calendarId()
+                        + "' revision " + binding.calendarRevision()
+                        + " for tenant '" + tenantId + "'");
+            }
         }
     }
 

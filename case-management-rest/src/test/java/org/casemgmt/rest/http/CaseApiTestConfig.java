@@ -285,8 +285,11 @@ public class CaseApiTestConfig {
 
     @Bean
     public CaseDefinitionReleaseService caseDefinitionReleaseService(
-            CaseDefinitionReleaseRepository repo, OrchestrationDeploymentPort orchestrationDeployments) {
-        return new CaseDefinitionReleaseService(repo, orchestrationDeployments);
+            CaseDefinitionReleaseRepository repo,
+            OrchestrationDeploymentPort orchestrationDeployments,
+            SlaRepository calendars) {
+        return new CaseDefinitionReleaseService(repo, orchestrationDeployments,
+                new org.casemgmt.release.JsonSchemaCaseContractValidator(), calendars);
     }
 
     @Bean
