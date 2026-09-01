@@ -73,19 +73,32 @@ jobs:
             ${{ matrix.module }}/target/failsafe-reports/**
           if-no-files-found: error
 
+  # This normal dependency gate is durable evidence that the complete matrix succeeded. When
+  # any leg fails, is cancelled, or is skipped, this job is skipped too; a partial rerun cannot
+  # turn that original skipped sentinel into success by reporting only the rerun leg's result.
+  java-module-complete:
+    name: Java module matrix complete
+    needs: java-module
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm complete module matrix
+        run: 'true'
+
   java:
     name: Java reactor
     if: always()
-    needs: [java-core, java-module]
+    needs: [java-core, java-module, java-module-complete]
     runs-on: ubuntu-latest
     steps:
       - name: Require every Java job to succeed
         env:
           CORE_RESULT: ${{ needs.java-core.result }}
           MODULE_RESULT: ${{ needs.java-module.result }}
+          MODULE_COMPLETE_RESULT: ${{ needs.java-module-complete.result }}
         run: |
           test "$CORE_RESULT" = success
           test "$MODULE_RESULT" = success
+          test "$MODULE_COMPLETE_RESULT" = success
 
   # The published modeling vocabulary. This is a required check in its own right: a template
   # that binds the wrong namespace produces models the validator silently ignores, and nothing
