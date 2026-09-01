@@ -114,4 +114,50 @@ describe('case demo', () => {
     await user.click(await screen.findByRole('button', { name: /Register complaint/ }))
     expect(await screen.findByRole('heading', { name: 'Card complaint' })).toBeInTheDocument()
   })
+
+  it('focuses work opened from the inbox and refreshes both workspace and worklist after claim', async () => {
+    let claimed = false
+    let globalTaskReads = 0
+    let caseReads = 0
+    const task = () => ({
+      id: 'task-2', caseId: 'case-2', name: 'Register complaint', state: claimed ? 'CLAIMED' : 'OPEN',
+      assignee: claimed ? 'alice' : undefined, candidateGroups: ['complaints-handlers'], version: 1,
+      availableActions: claimed ? [] : [{ action: 'claim', name: 'Claim', href: '/tasks/task-2/claim', method: 'POST' }],
+    })
+    const calls = installFetchScript((call) => {
+      if (call.url === '/case-api/v2/tasks') {
+        globalTaskReads += 1
+        return { body: [task()] }
+      }
+      if (call.url.endsWith('/tasks/task-2/claim')) {
+        claimed = true
+        return { body: {} }
+      }
+      if (call.url.endsWith('/cases')) return { body: page([caseItem('case-2', 'Card complaint')]) }
+      if (call.url.endsWith('/cases/case-2')) {
+        caseReads += 1
+        return { body: caseItem('case-2', 'Card complaint') }
+      }
+      if (call.url.endsWith('/cases/case-2/tasks')) return { body: [task()] }
+      return { body: [] }
+    })
+    const user = userEvent.setup()
+    render(<CaseDemo client={client()} username="alice" initialPage={page([])} />)
+
+    await user.click(screen.getByRole('button', { name: 'My Work' }))
+    await user.click(await screen.findByRole('button', { name: /Register complaint/ }))
+    const taskTitle = await screen.findByText('Register complaint')
+    const taskCard = taskTitle.closest('[data-slot="card"]')
+    expect(taskCard).toHaveAttribute('data-highlighted', 'true')
+    expect(taskCard).toHaveFocus()
+
+    const caseReadsBeforeClaim = caseReads
+    await user.click(screen.getByRole('button', { name: 'Claim' }))
+    expect(caseReads).toBe(caseReadsBeforeClaim + 1)
+    await user.click(screen.getByRole('button', { name: 'My Work' }))
+    expect(await screen.findByRole('heading', { name: 'Assigned to me' })).toBeInTheDocument()
+    expect(await screen.findByText('alice')).toBeInTheDocument()
+    expect(globalTaskReads).toBe(2)
+    expect(calls.filter((call) => call.url.endsWith('/tasks/task-2/claim'))).toHaveLength(1)
+  })
 })

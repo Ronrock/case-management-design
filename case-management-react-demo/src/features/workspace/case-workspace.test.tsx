@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -54,4 +54,51 @@ describe('case workspace', () => {
     expect(screen.getByLabelText('Add internal comment')).toBeInTheDocument()
     expect(calls.some((call) => call.url.endsWith('/cases/case-1/comments'))).toBe(true)
   })
+
+  it('reloads the workspace only when explicitly requested', async () => {
+    let caseReads = 0
+    installFetchScript((call) => {
+      if (call.url.endsWith('/cases/case-1')) {
+        caseReads += 1
+        return { body: caseDetail }
+      }
+      return { body: [] }
+    })
+    const user = userEvent.setup()
+    render(<CaseWorkspace client={clientForTest()} caseId="case-1" refreshKey={0} />)
+
+    expect(await screen.findByRole('heading', { name: 'Card complaint' })).toBeInTheDocument()
+    expect(caseReads).toBe(1)
+    await user.click(screen.getByRole('button', { name: 'Refresh case' }))
+    expect(await screen.findByRole('heading', { name: 'Card complaint' })).toBeInTheDocument()
+    expect(caseReads).toBe(2)
+  })
+
+  it.each([
+    [403, 'The backend refused this task action for your account.', 1],
+    [412, 'This item changed on the server. The workspace has been refreshed.', 2],
+  ])('keeps the snapshot and contextual guidance for task status %s', async (status, message, expectedReads) => {
+    let caseReads = 0
+    installFetchScript((call) => {
+      if (call.url.endsWith('/tasks/task-1/claim')) return { status, body: { title: status === 403 ? 'Forbidden' : 'Precondition Failed' } }
+      if (call.url.endsWith('/cases/case-1')) {
+        caseReads += 1
+        return { body: caseDetail }
+      }
+      if (call.url.endsWith('/cases/case-1/tasks')) return { body: [{ id: 'task-1', caseId: 'case-1', name: 'Assess complaint', state: 'AVAILABLE', candidateGroups: [], version: 1, availableActions: [{ action: 'claim', name: 'Claim', href: '/tasks/task-1/claim', method: 'POST' }] }] }
+      return { body: [] }
+    })
+    const user = userEvent.setup()
+    render(<CaseWorkspace client={clientForTest()} caseId="case-1" refreshKey={0} />)
+
+    expect(await screen.findByRole('heading', { name: 'Card complaint' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Claim' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(message)
+    await waitFor(() => expect(caseReads).toBe(expectedReads))
+    expect(screen.getByRole('heading', { name: 'Card complaint' })).toBeInTheDocument()
+  })
 })
+
+function clientForTest() {
+  return new CaseApiClient({ baseUrl: '/case-api/v2', credentials: { username: 'alice', password: 'alice' } })
+}

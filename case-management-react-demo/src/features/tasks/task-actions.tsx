@@ -11,7 +11,7 @@ interface TaskActionsProps {
   client: CaseApiClient
   caseItem: CaseSummary
   task: TaskSummary
-  onChanged(): void
+  onChanged(message?: string): void
 }
 
 export function TaskActions({ client, caseItem, task, onChanged }: TaskActionsProps) {
@@ -30,9 +30,12 @@ export function TaskActions({ client, caseItem, task, onChanged }: TaskActionsPr
       await client.executeTaskAction(claim, task.version)
       onChanged()
     } catch (reason) {
-      if (reason instanceof ApiError && reason.status === 412) {
-        setError('This item changed on the server. The workspace has been refreshed.')
-        onChanged()
+      if (reason instanceof ApiError && reason.status === 403) {
+        setError('The backend refused this task action for your account.')
+      } else if (reason instanceof ApiError && reason.status === 412) {
+        const message = 'This item changed on the server. The workspace has been refreshed.'
+        setError(message)
+        onChanged(message)
       } else {
         setError(reason instanceof Error ? reason.message : 'Could not claim this task')
       }
@@ -68,9 +71,12 @@ export function TaskActions({ client, caseItem, task, onChanged }: TaskActionsPr
               setOpen(false)
               onChanged()
             } catch (reason) {
-              if (reason instanceof ApiError && reason.status === 412) {
-                setError('This item changed on the server. The workspace has been refreshed.')
-                onChanged()
+              if (reason instanceof ApiError && reason.status === 403) {
+                setError('The backend refused this task action for your account.')
+              } else if (reason instanceof ApiError && reason.status === 412) {
+                const message = 'This item changed on the server. The workspace has been refreshed.'
+                setError(message)
+                onChanged(message)
               } else {
                 setError(reason instanceof Error ? reason.message : 'Could not complete this task')
               }

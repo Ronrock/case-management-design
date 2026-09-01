@@ -54,4 +54,15 @@ describe('task actions', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('This item changed')
     expect(onChanged).toHaveBeenCalledOnce()
   })
+
+  it('keeps a forbidden task action in context without refreshing', async () => {
+    installFetchScript(() => ({ status: 403, body: { title: 'Forbidden' } }))
+    const onChanged = vi.fn()
+    const task: TaskSummary = { id: 'task-1', caseId: 'case-1', name: 'Assess', state: 'AVAILABLE', candidateGroups: [], version: 7, availableActions: [{ action: 'claim', name: 'Claim', href: '/case-api/v2/tasks/task-1/claim', method: 'POST' }] }
+    render(<TaskActions client={client()} caseItem={caseItem} task={task} onChanged={onChanged} />)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Claim' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The backend refused this task action for your account.')
+    expect(onChanged).not.toHaveBeenCalled()
+  })
 })

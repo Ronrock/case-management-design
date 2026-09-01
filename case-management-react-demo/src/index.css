@@ -133,6 +133,7 @@
 .facts-list dt { color: var(--muted-foreground); font-size: .78rem; font-weight: 650; text-transform: uppercase; }
 .facts-list dd { margin: 0; overflow-wrap: anywhere; }
 .task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(245px, 1fr)); gap: .9rem; }
+.task-card[data-highlighted="true"] { box-shadow: 0 0 0 3px #9dd6d2; }
 .sla-cockpit > h3 { margin: 0 0 1rem; color: var(--registry-blue); font-size: 1rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .sla-grid { display: grid; gap: .75rem; }
 .sla-card { min-width: 0; }
