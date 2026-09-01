@@ -36,7 +36,7 @@ Create the application at repository root as `case-management-react-demo/`.
 
 - React and TypeScript on Vite.
 - shadcn/ui components using the supported Vite and Tailwind CSS setup documented at <https://ui.shadcn.com/docs/installation/vite>.
-- Radix-backed shadcn primitives for accessible buttons, dialogs, forms, tabs, badges, scroll areas, separators, and tooltips.
+- Radix-backed shadcn primitives for accessible buttons, dialogs, inputs, selects, badges, scroll areas, separators, skeletons, and alerts.
 - Lucide icons supplied by the shadcn setup.
 - Native `fetch` behind a typed API client; no additional query/state framework.
 - Vitest, jsdom, React Testing Library, and user-event for behavior tests.
