@@ -88,7 +88,7 @@ Countdown text is calculated at render time from server timestamps. There is no 
 
 Events and comments are normalized into a small presentation type, merged, and sorted newest first. They remain visually distinguishable: events are system observations; comments are worker-authored collaboration. The UI does not claim that this is a complete compliance audit trail.
 
-The comment composer posts `{ "text": ..., "visibility": "internal" }` to `POST /cases/{caseId}/comments`. Empty comments are rejected client-side. The composer is shown for an active case when the caller has the same case mutation tier represented by an advertised update action; the server remains authoritative and can still return `403`. A successful post clears the composer and refreshes comments and events.
+The comment composer posts `{ "text": ..., "visibility": "internal" }` through the `comment` action advertised in the case response's `collaborationActions`. Empty comments are rejected client-side. The server remains authoritative and can still return `403`. A successful post clears the composer and refreshes comments and events.
 
 ## REST Client Changes
 
@@ -98,7 +98,7 @@ The typed client gains methods for:
 - updating, closing, and cancelling a case;
 - pausing and resuming an SLA;
 - listing comments; and
-- adding a comment.
+- adding a comment through an advertised collaboration action.
 
 A shared advertised-action executor owns safe URL normalization, headers, JSON bodies, and problem-detail parsing. It accepts API-root-relative action links such as `/tasks/{id}/claim` and prefixes the configured case API base while continuing to reject cross-origin and malformed links.
 
@@ -125,7 +125,7 @@ A workspace refresh is atomic from the user's perspective: the existing snapshot
 - Submissions are disabled while active to prevent duplicate clicks.
 - Close and Cancel require explicit confirmation; Cancel also requires non-blank reason text.
 
-The UI never invents permissions. Case, task, and SLA controls come from `availableActions`. Comment creation uses the current API's closest discoverable mutation tier, but authorization is always enforced again by the backend.
+The UI never invents permissions. Case and task controls come from `availableActions`, SLA controls come from each clock's `availableActions`, and comment creation comes from the case's `collaborationActions`. Authorization is always enforced again by the backend.
 
 ## Responsive and Accessible Behavior
 
