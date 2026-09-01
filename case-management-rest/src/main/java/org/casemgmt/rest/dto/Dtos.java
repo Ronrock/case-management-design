@@ -3,6 +3,8 @@ package org.casemgmt.rest.dto;
 import org.casemgmt.domain.CaseInstance;
 import org.casemgmt.domain.CaseTask;
 import org.casemgmt.domain.PlanItem;
+import org.casemgmt.permissions.FieldProjection;
+import org.casemgmt.permissions.PermissionDecision;
 import org.casemgmt.rest.policy.AvailableAction;
 import org.casemgmt.search.SearchFacetGroup;
 import org.casemgmt.search.SearchFacetValue;
@@ -152,43 +154,69 @@ public final class Dtos {
     public record SearchSuggestionResponse(String value, String label, String suggestionType,
                                            String scope) {}
 
-    public record CaseResponse(String id, String engineId, String tenantId, String caseDefinitionKey,
+    public record CaseResponse(String id, String engineId, String tenantId, String caseDefinitionId,
+                               String caseDefinitionKey,
                                int caseDefinitionVersion, String businessKey, String title,
                                String state, String priority, String assignee, String slaStatus,
-                               String outcome, Map<String, Object> variables, long version,
+                               String outcome, String cancelReason,
+                               Map<String, Object> variables, long version,
                                OffsetDateTime createdAt, OffsetDateTime updatedAt,
                                OffsetDateTime closedAt,
+                               String rootProcessInstanceId, String projectionStatus,
+                               OffsetDateTime lastEngineUpdateAt, OffsetDateTime lastProjectedAt,
                                List<AvailableAction> availableActions,
                                List<AvailableAction> collaborationActions) {
 
         public static CaseResponse of(CaseInstance c, List<AvailableAction> actions,
                                       List<AvailableAction> collaborationActions) {
-            return new CaseResponse(c.id(), c.engineId(), c.tenantId(), c.caseDefKey(),
-                    c.caseDefVersion(), c.businessKey(), c.title(), c.state().name(),
-                    c.priority().name(), c.assignee(), c.slaStatus(), c.outcome(), c.variables(),
-                    c.version(), c.createdAt(), c.updatedAt(), c.closedAt(), actions,
+            return of(c, actions, collaborationActions, PermissionDecision.allow(c.id()));
+        }
+
+        public static CaseResponse of(CaseInstance c, List<AvailableAction> actions,
+                                      List<AvailableAction> collaborationActions,
+                                      PermissionDecision fields) {
+            return new CaseResponse(c.id(), c.engineId(), c.tenantId(), c.caseDefId(), c.caseDefKey(),
+                    c.caseDefVersion(),
+                    FieldProjection.value(fields, "businessKey", c.businessKey()),
+                    FieldProjection.value(fields, "title", c.title()), c.state().name(),
+                    FieldProjection.value(fields, "priority", c.priority().name()),
+                    FieldProjection.value(fields, "assignee", c.assignee()),
+                    FieldProjection.value(fields, "slaStatus", c.slaStatus()),
+                    FieldProjection.value(fields, "outcome", c.outcome()),
+                    FieldProjection.value(fields, "cancelReason", c.cancelReason()),
+                    FieldProjection.variables(fields, c.variables()),
+                    c.version(), c.createdAt(), c.updatedAt(), c.closedAt(),
+                    c.rootProcessInstanceId(), c.projectionStatus().name(),
+                    c.lastEngineUpdateAt(), c.lastProjectedAt(), actions,
                     collaborationActions);
         }
     }
 
     public record PlanItemResponse(String id, String caseId, String type, String name, String state,
                                    String parentStageId, int repetitionNo, long version,
+                                   String engineActivityId, String projectionStatus,
+                                   OffsetDateTime lastEngineUpdateAt, OffsetDateTime lastProjectedAt,
                                    List<AvailableAction> availableActions) {
 
         public static PlanItemResponse of(PlanItem i, List<AvailableAction> actions) {
             return new PlanItemResponse(i.id(), i.caseId(), i.type().name(), i.name(),
-                    i.state().name(), i.parentStageId(), i.repetitionNo(), i.version(), actions);
+                    i.state().name(), i.parentStageId(), i.repetitionNo(), i.version(),
+                    i.engineActivityId(), i.projectionStatus().name(), i.lastEngineUpdateAt(),
+                    i.lastProjectedAt(), actions);
         }
     }
 
     public record TaskResponse(String id, String caseId, String planItemId, String name, String state,
                                String assignee, List<String> candidateGroups, String formKey,
-                               String engineSync, long version, List<AvailableAction> availableActions) {
+                               String engineSync, long version, String projectionStatus,
+                               OffsetDateTime lastEngineUpdateAt, OffsetDateTime lastProjectedAt,
+                               List<AvailableAction> availableActions) {
 
         public static TaskResponse of(CaseTask t, List<AvailableAction> actions) {
             return new TaskResponse(t.id(), t.caseId(), t.planItemId(), t.name(), t.state().name(),
                     t.assignee(), t.candidateGroups(), t.formKey(), t.engineSync().name(),
-                    t.version(), actions);
+                    t.version(), t.projectionStatus().name(), t.lastEngineUpdateAt(),
+                    t.lastProjectedAt(), actions);
         }
     }
 

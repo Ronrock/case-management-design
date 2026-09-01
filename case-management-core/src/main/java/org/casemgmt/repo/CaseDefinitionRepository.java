@@ -2,6 +2,7 @@ package org.casemgmt.repo;
 
 import org.casemgmt.domain.*;
 import org.casemgmt.error.NotFoundException;
+import org.casemgmt.orchestration.OrchestrationMode;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
@@ -150,12 +151,13 @@ public class CaseDefinitionRepository {
 
     private static void insertCaseDefRow(JdbcClient jdbc, CaseDefinition d) {
         jdbc.sql("""
-                INSERT INTO CM_CASE_DEF (ID_, KEY_, VERSION_NO_, NAME_, TENANT_ID_, DESCRIPTION_,
+                INSERT INTO CM_CASE_DEF (ID_, KEY_, VERSION_NO_, NAME_, TENANT_ID_, DESCRIPTION_, ORCHESTRATION_MODE_,
                     SLA_POLICY_ID_, ROLES_JSON_, ATTACH_CATS_JSON_, FORMS_JSON_, DEPLOYED_AT_, DEPLOYED_BY_)
-                VALUES (:id, :key, :ver, :name, :tenant, :desc, :sla, :roles, :cats, :forms,
+                VALUES (:id, :key, :ver, :name, :tenant, :desc, :mode, :sla, :roles, :cats, :forms,
                     :deployedAt, :deployedBy)""")
             .param("id", d.id()).param("key", d.key()).param("ver", d.versionNo())
             .param("name", d.name()).param("tenant", d.tenantId()).param("desc", d.description())
+            .param("mode", d.orchestrationMode().name())
             .param("sla", d.slaPolicyId())
             .param("roles", JsonCodec.toJson(d.roles()))
             .param("cats", JsonCodec.toJson(d.attachmentCategories()))
@@ -188,7 +190,7 @@ public class CaseDefinitionRepository {
 
     public Optional<CaseDefinition> findById(String id) {
         return jdbc.sql("""
-                SELECT ID_, KEY_, VERSION_NO_, NAME_, TENANT_ID_, DESCRIPTION_, SLA_POLICY_ID_,
+                SELECT ID_, KEY_, VERSION_NO_, NAME_, TENANT_ID_, DESCRIPTION_, ORCHESTRATION_MODE_, SLA_POLICY_ID_,
                        ROLES_JSON_, ATTACH_CATS_JSON_, FORMS_JSON_, DEPLOYED_AT_, DEPLOYED_BY_
                 FROM CM_CASE_DEF WHERE ID_ = :id""")
                 .param("id", id)
@@ -198,6 +200,15 @@ public class CaseDefinitionRepository {
 
     public CaseDefinition require(String id) {
         return findById(id).orElseThrow(() -> new NotFoundException("CaseDefinition", id));
+    }
+
+    public Optional<CaseDefinition> findVersion(String key, int version, String tenantId) {
+        return jdbc.sql("""
+                SELECT ID_ FROM CM_CASE_DEF
+                WHERE KEY_ = :key AND VERSION_NO_ = :version
+                  AND (TENANT_ID_ = :tenant OR (:tenant IS NULL AND TENANT_ID_ IS NULL))""")
+                .param("key", key).param("version", version).param("tenant", tenantId)
+                .query(String.class).optional().map(this::require);
     }
 
     /** Latest version of every deployed key — backs GET /case-definitions. */
@@ -222,6 +233,24 @@ public class CaseDefinitionRepository {
                 SELECT ID_ FROM CM_CASE_DEF
                 WHERE KEY_ = :key AND (TENANT_ID_ = :tenant OR (:tenant IS NULL AND TENANT_ID_ IS NULL))
                 ORDER BY VERSION_NO_ DESC FETCH FIRST 1 ROWS ONLY""")
+                .param("key", key).param("tenant", tenantId)
+                .query(String.class).optional()
+                .flatMap(this::findById);
+    }
+
+    /** Latest BPMN definition that may start a new case with its immutable binding ACTIVE. */
+    public Optional<CaseDefinition> findLatestStartable(String key, String tenantId) {
+        return jdbc.sql("""
+                SELECT d.ID_ FROM CM_CASE_DEF d
+                WHERE d.KEY_ = :key
+                  AND (d.TENANT_ID_ = :tenant
+                    OR (:tenant IS NULL AND d.TENANT_ID_ IS NULL))
+                  AND d.ORCHESTRATION_MODE_ = 'BPMN'
+                  AND EXISTS (
+                      SELECT 1 FROM CM_CASE_DEF_BINDING binding
+                      WHERE binding.CASE_DEF_ID_ = d.ID_
+                        AND binding.STATUS_ = 'ACTIVE')
+                ORDER BY d.VERSION_NO_ DESC FETCH FIRST 1 ROWS ONLY""")
                 .param("key", key).param("tenant", tenantId)
                 .query(String.class).optional()
                 .flatMap(this::findById);
@@ -262,7 +291,7 @@ public class CaseDefinitionRepository {
      * version-pinned and tenant-scoped: no {@code ORDER BY VERSION_NO_} to drift under a later
      * deploy, and no cross-tenant row to pick by accident. Callers already hold the id —
      * {@code CM_CASE.CASE_DEF_ID_} is stamped at case creation and is what
-     * {@code CaseService.snapshot} resolves the whole plan model through.
+     * {@code CaseService.snapshot} uses to resolve the pinned contract and projected work.
      *
      * <p>Deliberately a separate name rather than an overload of {@link #formSchema}: both take
      * two {@code String}s, so an overload would be indistinguishable at the call site — exactly
@@ -310,6 +339,7 @@ public class CaseDefinitionRepository {
                 JsonCodec.toList(rs.getString("ATTACH_CATS_JSON_")),
                 JsonCodec.toMap(rs.getString("FORMS_JSON_")),
                 items,
+                OrchestrationMode.valueOf(rs.getString("ORCHESTRATION_MODE_")),
                 rs.getObject("DEPLOYED_AT_", OffsetDateTime.class),
                 rs.getString("DEPLOYED_BY_"));
     }

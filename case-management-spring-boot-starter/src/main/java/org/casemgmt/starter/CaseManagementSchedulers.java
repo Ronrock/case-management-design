@@ -1,6 +1,7 @@
 package org.casemgmt.starter;
 
 import org.casemgmt.engine.EngineCommandDispatcher;
+import org.casemgmt.engine.remote.RemoteObservationPoller;
 import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.repo.IdempotencyRepository;
 import org.casemgmt.sla.SlaSweeper;
@@ -29,16 +30,19 @@ public class CaseManagementSchedulers {
 
     private final WebhookDispatcher webhooks;
     private final ObjectProvider<EngineCommandDispatcher> engineCommands;
+    private final ObjectProvider<RemoteObservationPoller> remoteObservations;
     private final SlaSweeper sla;
     private final IdempotencyRepository idempotency;
     private final CaseManagementProperties properties;
 
     public CaseManagementSchedulers(WebhookDispatcher webhooks,
                                     ObjectProvider<EngineCommandDispatcher> engineCommands,
+                                    ObjectProvider<RemoteObservationPoller> remoteObservations,
                                     SlaSweeper sla, IdempotencyRepository idempotency,
                                     CaseManagementProperties properties) {
         this.webhooks = webhooks;
         this.engineCommands = engineCommands;
+        this.remoteObservations = remoteObservations;
         this.sla = sla;
         this.idempotency = idempotency;
         this.properties = properties;
@@ -53,6 +57,16 @@ public class CaseManagementSchedulers {
     @Scheduled(fixedDelayString = "${casemgmt.schedulers.engine-command-interval-ms:5000}")
     public void dispatchEngineCommands() {
         engineCommands.ifAvailable(EngineCommandDispatcher::drainOnce);
+    }
+
+    @Scheduled(fixedDelayString = "${casemgmt.schedulers.engine-poll-interval-ms:5000}")
+    public void pollRemoteEngine() {
+        remoteObservations.ifAvailable(RemoteObservationPoller::pollOnce);
+    }
+
+    @Scheduled(fixedDelayString = "${casemgmt.schedulers.engine-reconcile-interval-ms:300000}")
+    public void reconcileRemoteEngine() {
+        remoteObservations.ifAvailable(RemoteObservationPoller::reconcileAllActive);
     }
 
     @Scheduled(fixedDelayString = "${casemgmt.schedulers.sla-sweep-interval-ms:60000}")

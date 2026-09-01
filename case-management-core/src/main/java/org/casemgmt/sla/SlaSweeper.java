@@ -9,6 +9,7 @@ import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.EventTypes;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.SlaRepository;
+import org.casemgmt.release.ValidatedCaseContract.SlaBreachAction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.transaction.annotation.Transactional;
@@ -77,16 +78,23 @@ public class SlaSweeper {
     public int sweep() {
         OffsetDateTime now = OffsetDateTime.now();
         int handled = 0;
-        var claimedRecords = sla.claimDueRecords(now);
+        // Select without locks, then acquire the shared case lock before leasing an SLA row.
+        // The root observation follows the same order (case -> SLA), so the two paths cannot
+        // deadlock and a root completion always makes the following claim predicate fail.
+        var dueCandidates = sla.dueRecords(now);
         Map<String, SlaRepository.TargetRow> targetsById = sla.targetsById(
-                claimedRecords.stream().map(c -> c.record().targetId()).toList());
+                dueCandidates.stream().map(SlaRecord::targetId).toList());
 
-        for (SlaRepository.ClaimedRecord claimed : claimedRecords) {
-            SlaRepository.TargetRow target = targetsById.get(claimed.record().targetId());
+        for (SlaRecord candidate : dueCandidates) {
+            cases.lockForSlaLifecycle(candidate.caseId());
+            var claimed = sla.claimDueRecord(candidate.id(), now);
+            if (claimed.isEmpty()) continue;
+            SlaRepository.ClaimedRecord lease = claimed.orElseThrow();
+            SlaRepository.TargetRow target = targetsById.get(lease.record().targetId());
             if (target == null) {
-                throw new NotFoundException("SlaTarget", claimed.record().targetId());
+                throw new NotFoundException("SlaTarget", lease.record().targetId());
             }
-            if (processOne(claimed, target, now)) {
+            if (processOne(lease, target, now)) {
                 handled++;
             }
         }
@@ -128,11 +136,12 @@ public class SlaSweeper {
             // gates the breach event; ESCALATE emits its own escalation event and audit row. The
             // record/case status writes above and below are the SLA breach fact itself, not a
             // declared "action", so they always happen regardless.
-            if (target.breachActions().contains("EMIT_EVENT")) {
-                emit(c, EventTypes.SLA_BREACHED, record);
-            }
-            if (target.breachActions().contains("ESCALATE")) {
-                escalate(c, target, record);
+            for (String actionName : target.breachActions()) {
+                SlaBreachAction action = SlaBreachAction.valueOf(actionName);
+                switch (action) {
+                    case EMIT_EVENT -> emit(c, EventTypes.SLA_BREACHED, record);
+                    case ESCALATE -> escalate(c, target, record);
+                }
             }
         } else {
             cases.updateSlaStatusMonotonic(c.id(), "WARNING");
@@ -143,12 +152,14 @@ public class SlaSweeper {
 
     private SlaRecord breached(SlaRecord r) {
         return new SlaRecord(r.id(), r.caseId(), r.targetId(), "BREACHED", r.startedAt(),
-                r.dueAt(), r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), r.version());
+                r.dueAt(), r.warnAt(), r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), r.version(),
+                OffsetDateTime.now());
     }
 
     private SlaRecord warned(SlaRecord r) {
         return new SlaRecord(r.id(), r.caseId(), r.targetId(), r.status(), r.startedAt(),
-                r.dueAt(), null, r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), r.version());
+                r.dueAt(), null, r.pausedAt(), r.pausedReason(), r.pausedTotalSeconds(), r.version(),
+                r.terminalAt());
     }
 
     private void emit(CaseInstance c, String type, SlaRecord record) {

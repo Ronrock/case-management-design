@@ -198,37 +198,18 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
      * {@code IllegalStateException} — an opaque 500 with no {@code code} to switch on.
      */
     @Test
-    void aTaskDeclaringAFormKeyTheDefinitionDoesNotDefineIsAClientErrorNotAServerFault() {
-        deployDefinitionWithADanglingFormKey();
+    void aBpmnTaskReferencingAnUnknownFormIsRejectedAtPublication() {
+        ResponseEntity<Map> deployed = deployDefinitionWithADanglingFormKey();
 
-        ResponseEntity<Map> created = alice().post().uri("/cases")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("caseDefinitionKey", "dangling-form", "tenantId", TENANT, "title", "T"))
-                .retrieve().toEntity(Map.class);
-        assertThat(created.getStatusCode().value()).isEqualTo(201);
-        String caseId = (String) created.getBody().get("id");
-
-        Map<String, Object> task = openTask(caseId);
-        ResponseEntity<Map> claimed = alice().post().uri("/tasks/{id}/claim", task.get("id"))
-                .header("If-Match", "\"" + ((Number) task.get("version")).longValue() + "\"")
-                .retrieve().toEntity(Map.class);
-        assertThat(claimed.getStatusCode().value()).isEqualTo(200);
-
-        ResponseEntity<Map> completed = alice().post().uri("/tasks/{id}/complete", task.get("id"))
-                .header("If-Match", claimed.getHeaders().getETag())
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("variables", Map.of("outcome", "approve")))
-                .retrieve().toEntity(Map.class);
-
-        assertThat(completed.getStatusCode().value())
-                .as("a definition-authoring typo must not surface as a 500")
+        assertThat(deployed.getStatusCode().value())
+                .as("a definition-authoring typo must be rejected before cases can use it")
                 .isEqualTo(400);
-        assertThat(completed.getHeaders().getContentType())
+        assertThat(deployed.getHeaders().getContentType())
                 .isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
-        assertThat(completed.getBody())
+        assertThat(deployed.getBody())
                 .containsEntry("code", "case-definition-invalid")
-                .containsEntry("caseDefinitionKey", "dangling-form");
-        assertThat((String) completed.getBody().get("detail")).contains("noSuchForm");
+                .containsEntry("caseDefinitionKey", DEFINITION_KEY);
+        assertThat((String) deployed.getBody().get("detail")).contains("reviewForm");
     }
 
     /**
@@ -292,13 +273,23 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
         assertThat(rightType.getStatusCode().value()).isEqualTo(200);
     }
 
+    @Test
+    void legacyJsonDefinitionDeploymentIsNoLongerAnApiOperation() {
+        ResponseEntity<String> response = alice().post().uri("/case-definitions")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(definitionJson())
+                .retrieve().toEntity(String.class);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(415);
+    }
+
     /**
-     * The spec declares {@code If-Match} on milestone achieve and process start (fix round 1,
-     * I6). Neither sub-resource carries a version of its own, so it is enforced against the
-     * case's — a real precondition, not a header read and discarded.
+     * The spec declares {@code If-Match} on process start (fix round 1, I6). The process
+     * sub-resource carries no version of its own, so the header is enforced against the case's —
+     * a real precondition, not a header read and discarded.
      */
     @Test
-    void milestoneAchieveAndProcessStartRequireAndEnforceIfMatch() {
+    void processStartRequiresAndEnforcesIfMatch() {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");
 
@@ -394,61 +385,18 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
 
     @Test
     void aMalformedCaseDefinitionIsRejectedAtDeployTimeAsAClientError() {
+        String invalidContract = definitionJson()
+                .replace("\"widget-review\"", "\"bad-criteria\"")
+                .replace("\n}", ",\n  \"unexpectedBehavior\": true\n}");
         ResponseEntity<Map> response = alice().post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body("""
-                        {"key":"bad-criteria","name":"Bad Criteria","tenantId":"%s",
-                         "planItems":[
-                           {"defKey":"done","type":"MILESTONE","name":"Done",
-                            "entryCriteria":["${items.missing.state == 'COMPLETED'}"],
-                            "sortOrder":10}]}""".formatted(TENANT))
+                .contentType(MediaType.valueOf("application/zip"))
+                .body(archive(invalidContract))
                 .retrieve().toEntity(Map.class);
 
         assertThat(response.getStatusCode().value()).isEqualTo(400);
         assertThat(response.getBody())
                 .containsEntry("code", "case-definition-invalid")
                 .containsEntry("caseDefinitionKey", "bad-criteria");
-    }
-
-    /**
-     * Final whole-branch review, Minor: the 500 {@code model-error} path copied
-     * {@code e.getMessage()} straight into the client-visible {@code detail}. Exception messages
-     * in this codebase quote plan-item ids, case-definition keys, state names and raw criterion
-     * expressions, so that is information disclosure on a fault the client did not cause and can
-     * do nothing about.
-     *
-     * <p>Triggers a real {@code CriterionEvaluationException} by deploying a definition whose
-     * entry criterion is not a valid expression, then creating a case of it — the evaluator runs
-     * inside {@code CaseService.create}. Asserts BOTH halves: the contract shape survives (still
-     * problem+json, still a stable {@code code}), and the leaked identifier is absent from the
-     * entire serialised body, not merely from {@code detail} — a message copied into some other
-     * property would leak just as much.
-     */
-    @Test
-    void aServerFaultDoesNotLeakTheExceptionMessageToTheClient() {
-        String key = "leaky-model";
-        alice().post().uri("/case-definitions").contentType(MediaType.APPLICATION_JSON)
-                .body("""
-                        {"key":"%s","name":"Leaky","tenantId":"%s",
-                         "planItems":[
-                           {"defKey":"gate","type":"HUMAN_TASK","name":"gate",
-                            "entryCriteria":["${ this is not a valid juel expression }"],
-                            "sortOrder":10}]}""".formatted(key, TENANT))
-                .retrieve().toEntity(Map.class);
-
-        ResponseEntity<String> raw = alice().post().uri("/cases")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(Map.of("caseDefinitionKey", key, "tenantId", TENANT, "title", "T"))
-                .retrieve().toEntity(String.class);
-
-        assertThat(raw.getStatusCode().value()).isEqualTo(500);
-        assertThat(raw.getHeaders().getContentType().toString())
-                .startsWith("application/problem+json");
-        assertThat(raw.getBody())
-                .contains("\"code\":\"model-error\"")
-                .as("the plan-item defKey the exception message quotes must not reach the client")
-                .doesNotContain("gate")
-                .doesNotContain("juel");
     }
 
     private Map<String, Object> openTask(String caseId) {
@@ -463,23 +411,11 @@ class CaseApiErrorContractTest extends CaseApiHttpTestBase {
      * visible in one place — and, like every other definition in this module, it names no real
      * case type.
      */
-    private void deployDefinitionWithADanglingFormKey() {
-        String json = """
-                {
-                  "key": "dangling-form",
-                  "name": "Dangling Form",
-                  "tenantId": "t1",
-                  "roles": ["owner", "handler"],
-                  "forms": { "presentForm": { "type": "object" } },
-                  "planItems": [
-                    { "defKey": "step", "type": "HUMAN_TASK", "name": "Step",
-                      "manualActivation": false, "required": true, "formKey": "noSuchForm",
-                      "candidateGroups": ["reviewers"], "sortOrder": 10 }
-                  ]
-                }""";
-        ResponseEntity<Map> deployed = alice().post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON).body(json)
+    private ResponseEntity<Map> deployDefinitionWithADanglingFormKey() {
+        String contract = definitionJson()
+                .replace("\"reviewForm\"", "\"presentForm\"");
+        return alice().post().uri("/case-definitions")
+                .contentType(MediaType.valueOf("application/zip")).body(archive(contract))
                 .retrieve().toEntity(Map.class);
-        assertThat(deployed.getStatusCode().value()).isEqualTo(201);
     }
 }

@@ -38,7 +38,14 @@ class RecordingEngineGateway implements EngineGateway {
     @Override
     public EngineProcessRef startProcess(StartProcessRequest request) {
         return new EngineProcessRef("engine-proc-" + ids.incrementAndGet(),
-                request.processDefinitionKey());
+                request.processDefinitionId(), request.processDefinitionKey(), request.caseId());
+    }
+
+    @Override
+    public EngineProcessRef startProcessByKey(org.casemgmt.engine.StartProcessByKeyRequest request) {
+        return new EngineProcessRef("engine-proc-" + ids.incrementAndGet(),
+                "definition:" + request.processDefinitionKey() + ":1",
+                request.processDefinitionKey(), request.caseId());
     }
 
     @Override
@@ -47,5 +54,13 @@ class RecordingEngineGateway implements EngineGateway {
     @Override
     public List<EngineTaskRef> findTasks(EngineTaskQuery query) {
         return List.of();
+    }
+}
+
+/** Test remote boundary: task creation is synchronous, claim/complete remain durable requests. */
+class DeferredRecordingEngineGateway extends RecordingEngineGateway {
+    @Override
+    public boolean defersTaskMutations() {
+        return true;
     }
 }

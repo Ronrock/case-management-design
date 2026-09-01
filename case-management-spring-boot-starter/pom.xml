@@ -38,6 +38,11 @@
       <artifactId>h2</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-liquibase</artifactId>
+      <scope>test</scope>
+    </dependency>
     <!-- Every class in this module is an @AutoConfiguration — spring-boot-autoconfigure is a
          genuine, direct compile-time dependency of the module's own main sources
          (@AutoConfiguration, @ConditionalOnProperty, @ConditionalOnClass,

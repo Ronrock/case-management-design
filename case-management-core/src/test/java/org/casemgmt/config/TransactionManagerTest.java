@@ -57,14 +57,14 @@ class TransactionManagerTest extends OracleTestBase {
     }
 
     private int countRows(String id1, String id2) {
-        return jdbc().sql("SELECT COUNT(*) FROM CM_ENGINE_COMMAND WHERE ID_ IN (:a, :b)")
+        return jdbc().sql("SELECT COUNT(*) FROM CM_AUDIT_LOG WHERE ID_ IN (:a, :b)")
                 .param("a", id1).param("b", id2)
                 .query(Integer.class).single();
     }
 
     /**
      * A minimal Spring-managed bean whose methods each perform two inserts. Writes into
-     * CM_ENGINE_COMMAND purely because it is a convenient FK-free table already in the schema —
+     * CM_AUDIT_LOG purely because it is a convenient FK-free table already in the schema —
      * this test is about proving the transaction mechanism works, not about the engine command
      * outbox itself (Task 13's second half, built separately in {@code org.casemgmt.engine}).
      */
@@ -90,7 +90,11 @@ class TransactionManagerTest extends OracleTestBase {
         }
 
         private void insert(String id) {
-            jdbc.sql("INSERT INTO CM_ENGINE_COMMAND (ID_, CASE_ID_, TYPE_) VALUES (:id, 'case-1', 'CREATE_TASK')")
+            jdbc.sql("""
+                    INSERT INTO CM_AUDIT_LOG
+                      (ID_, CASE_ID_, ACTOR_, ACTION_, RESOURCE_TYPE_, RESOURCE_ID_)
+                    VALUES (:id, 'case-1', 'tester', 'test.transaction', 'CASE', 'case-1')
+                    """)
                     .param("id", id)
                     .update();
         }

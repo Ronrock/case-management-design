@@ -6,9 +6,13 @@ services:
     ports:
       - "1521:1521"
     volumes:
-      - ./docker/oracle-init:/container-entrypoint-initdb.d
+      # Startup hooks run for both a new database and later container restarts. The SQL is
+      # deliberately idempotent so an interrupted first initialization cannot permanently leave
+      # the quickstart without its application accounts.
+      - ./docker/oracle-init:/container-entrypoint-startdb.d:ro
     healthcheck:
-      test: ["CMD", "healthcheck.sh"]
+      # The second argument ignores stale entrypoint marker files and checks the actual PDB state.
+      test: ["CMD", "healthcheck.sh", "FREEPDB1", "ignore-entrypoint-markers"]
       interval: 10s
       timeout: 5s
       retries: 30

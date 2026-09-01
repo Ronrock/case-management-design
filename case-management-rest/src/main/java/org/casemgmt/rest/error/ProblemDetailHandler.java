@@ -2,7 +2,6 @@ package org.casemgmt.rest.error;
 
 import org.casemgmt.error.*;
 import org.casemgmt.rules.CriterionEvaluationException;
-import org.casemgmt.rules.PlanModelLoopException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -85,18 +84,18 @@ public class ProblemDetailHandler extends ResponseEntityExceptionHandler {
      * (at ERROR, with the stack trace) so it stays available to whoever operates the deployment;
      * the response says only which subsystem failed.
      */
-    @ExceptionHandler({CriterionEvaluationException.class, PlanModelLoopException.class})
+    @ExceptionHandler(CriterionEvaluationException.class)
     public ProblemDetail onModelError(RuntimeException e) {
-        log.error("Plan-model evaluation failed", e);
+        log.error("Case evaluation failed", e);
         return problem(HttpStatus.INTERNAL_SERVER_ERROR, "model-error",
-                "The case's plan model could not be evaluated. The failure has been logged; "
+                "The case could not be evaluated. The failure has been logged; "
                         + "quote the request's timestamp when reporting it.", Map.of());
     }
 
     // Scoped to MalformedETagException, NOT a blanket IllegalArgumentException handler
     // (review finding, Important): core throws IllegalArgumentException from several
     // sites that are not client-shaped — WebhookRepository's paging-limit guard,
-    // PlanModelInstantiator's bad parentStageKey (which the status table above routes to
+    // a bad parentStageKey (which the status table above routes to
     // 500 model-error) — and a blanket handler here would misclassify both as 400. See
     // MalformedETagException's javadoc.
     @ExceptionHandler(MalformedETagException.class)

@@ -82,22 +82,9 @@ class WorkerPermissionsAuthorizationHttpTest extends CaseApiHttpTestBase {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");
         String version = "\"" + created.get("version") + "\"";
-        ResponseEntity<List> planItems = alice().get().uri("/cases/{id}/plan-items", caseId)
-                .retrieve().toEntity(List.class);
-        String planItemId = (String) ((List<Map<String, Object>>) planItems.getBody()).stream()
-                .filter(i -> "MILESTONE".equals(i.get("type"))).findFirst()
-                .orElseThrow().get("id");
-        String milestoneId = "ms-" + UUID.randomUUID();
-        milestoneRepo.insert(milestoneId, caseId, planItemId, "Blocked checkpoint");
-
         assertForbidden(client("erin").post().uri("/cases/{id}/comments", caseId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("text", "blocked", "visibility", "internal"))
-                .retrieve().toEntity(Map.class));
-        assertForbidden(client("erin").post()
-                .uri("/cases/{caseId}/milestones/{milestoneId}/achieve",
-                        caseId, milestoneId)
-                .header("If-Match", version)
                 .retrieve().toEntity(Map.class));
         assertForbidden(client("erin").post().uri("/cases/{id}/processes", caseId)
                 .header("If-Match", version)

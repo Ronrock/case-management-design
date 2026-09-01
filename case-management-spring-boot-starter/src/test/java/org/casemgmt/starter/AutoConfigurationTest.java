@@ -3,9 +3,17 @@ package org.casemgmt.starter;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
+import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
+import org.casemgmt.engine.embedded.PersistedProcessCaseCorrelation;
+import org.casemgmt.engine.embedded.ProcessActivityClassifier;
+import org.casemgmt.engine.embedded.ProcessCaseCorrelation;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.event.WebhookDispatcher;
 import org.casemgmt.event.WebhookSecretStore;
+import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.SlaLifecyclePort;
+import org.casemgmt.observation.EngineProcessAuthorityLookup;
+import org.casemgmt.observation.ProcessCaseAuthority;
 import org.casemgmt.repo.IdempotencyRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
@@ -16,10 +24,14 @@ import org.casemgmt.service.CaseService;
 import org.casemgmt.service.FormValidator;
 import org.casemgmt.service.WebhookService;
 import org.casemgmt.sla.SlaSweeper;
+import org.casemgmt.sla.SlaLifecycleService;
 import org.junit.jupiter.api.Test;
 import org.operaton.bpm.engine.ProcessEngine;
+import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.TaskService;
+import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
+import org.operaton.bpm.engine.spring.SpringProcessEngineConfiguration;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 // Spring Boot 4 relocated DataSourceAutoConfiguration out of spring-boot-autoconfigure's
@@ -170,7 +182,82 @@ class AutoConfigurationTest {
                     assertThat(context).hasSingleBean(CaseService.class);
                     assertThat(context.getBean(EngineGateway.class))
                             .isInstanceOf(OutboxEngineGateway.class);
+                    assertThat(context).doesNotHaveBean("planModelEvaluator");
+                    assertThat(context).doesNotHaveBean("planModelInstantiator");
+                    assertThat(context).doesNotHaveBean("planModelOrchestration");
+                    assertThat(context).doesNotHaveBean("legacyPlanModelObservationHandler");
+                    assertThat(context).doesNotHaveBean("planItemService");
+                    assertThat(context).doesNotHaveBean("stageCompletion");
+                    assertThat(context).doesNotHaveBean("transitionApplier");
                 });
+    }
+
+    @Test
+    void embeddedModeRegistersTheSpringEventProjectionBridgeAfterItsPort() {
+        runner.withUserConfiguration(EmbeddedOperatonAuthorityConfiguration.class)
+                .withBean(TaskService.class, () -> mock(TaskService.class))
+                .withBean(RuntimeService.class, () -> mock(RuntimeService.class))
+                .withBean(RepositoryService.class, () -> mock(RepositoryService.class))
+                .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=embedded",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(EmbeddedEngineEventBridge.class);
+                    assertThat(context).hasSingleBean(EngineObservationHandler.class);
+                    assertThat(context).hasSingleBean(EngineProcessAuthorityLookup.class);
+                    assertThat(context).hasSingleBean(ProcessCaseAuthority.class);
+                    assertThat(context.getBean(ProcessCaseCorrelation.class))
+                            .isInstanceOf(PersistedProcessCaseCorrelation.class);
+                });
+    }
+
+    @Test
+    void embeddedLifecycleExtensionPointsBackOffForConsumerSubstitutes() {
+        ProcessCaseCorrelation correlation = processInstanceId -> "consumer-case";
+        ProcessActivityClassifier classifier = mock(ProcessActivityClassifier.class);
+        EmbeddedEngineEventBridge bridge = new EmbeddedEngineEventBridge(
+                mock(EngineObservationHandler.class), correlation, classifier,
+                mock(RepositoryService.class), mock(TaskService.class), "consumer-engine");
+
+        runner.withUserConfiguration(EmbeddedOperatonAuthorityConfiguration.class)
+                .withBean(TaskService.class, () -> mock(TaskService.class))
+                .withBean(RuntimeService.class, () -> mock(RuntimeService.class))
+                .withBean(RepositoryService.class, () -> mock(RepositoryService.class))
+                .withBean(ProcessCaseCorrelation.class, () -> correlation)
+                .withBean(ProcessActivityClassifier.class, () -> classifier)
+                .withBean(EmbeddedEngineEventBridge.class, () -> bridge)
+                .withPropertyValues("casemgmt.enabled=true", "casemgmt.engine-id=eng-a",
+                        "casemgmt.engine.mode=embedded",
+                        "casemgmt.events.type-prefix=org.example.cm",
+                        "casemgmt.schedulers.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(ProcessCaseCorrelation.class)).isSameAs(correlation);
+                    assertThat(context).doesNotHaveBean(EngineProcessAuthorityLookup.class);
+                    assertThat(context.getBean(ProcessActivityClassifier.class)).isSameAs(classifier);
+                    assertThat(context.getBean(EmbeddedEngineEventBridge.class)).isSameAs(bridge);
+                });
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class EmbeddedOperatonAuthorityConfiguration {
+
+        @Bean
+        ProcessEngineConfigurationImpl processEngineConfiguration(
+                javax.sql.DataSource dataSource,
+                PlatformTransactionManager transactionManager) {
+            var configuration = new SpringProcessEngineConfiguration();
+            configuration.setDataSource(dataSource);
+            configuration.setTransactionManager(transactionManager);
+            return configuration;
+        }
+
+        @Bean
+        ProcessEngine processEngine() {
+            return mock(ProcessEngine.class);
+        }
     }
 
     @Test
@@ -353,6 +440,8 @@ class AutoConfigurationTest {
                     assertThat(context).hasSingleBean(EventPublisher.class);
                     assertThat(context.getBean(CriterionEvaluator.class))
                             .isInstanceOf(JuelCriterionEvaluator.class);
+                    assertThat(context.getBean(SlaLifecyclePort.class))
+                            .isInstanceOf(SlaLifecycleService.class);
                 });
     }
 

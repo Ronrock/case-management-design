@@ -11,9 +11,13 @@ import javax.sql.DataSource;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayOutputStream;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 /**
  * Shared plumbing for the HTTP-level controller tests: a real servlet container on a random
@@ -80,12 +84,12 @@ abstract class CaseApiHttpTestBase extends OracleTestBase {
         return client("alice");
     }
 
-    /** Deploys {@code widget-review} through the API and returns the deploy response body. */
+    /** Publishes the BPMN-backed {@code widget-review} bundle through the production API. */
     @SuppressWarnings("unchecked")
     Map<String, Object> deployDefinition() {
         ResponseEntity<Map> response = alice().post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(definitionJson())
+                .contentType(MediaType.valueOf("application/zip"))
+                .body(definitionArchive())
                 .retrieve().toEntity(Map.class);
         if (response.getStatusCode().value() != 201) {
             throw new IllegalStateException("Fixture deploy failed: " + response);
@@ -101,13 +105,17 @@ abstract class CaseApiHttpTestBase extends OracleTestBase {
 
     @SuppressWarnings("unchecked")
     ResponseEntity<Map> createCase(String title) {
-        return alice().post().uri("/cases")
+        ResponseEntity<Map> response = alice().post().uri("/cases")
                 .header("Idempotency-Key", UUID.randomUUID().toString())
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("caseDefinitionKey", DEFINITION_KEY, "tenantId", TENANT,
                         "title", title, "priority", "HIGH",
                         "variables", Map.of("channel", "web")))
                 .retrieve().toEntity(Map.class);
+        if (response.getStatusCode().value() == 201) {
+            projectObservedFixtureActivities((String) response.getBody().get("id"));
+        }
+        return response;
     }
 
     /** Deploys the definition and creates one case, returning the created case body. */
@@ -131,5 +139,89 @@ abstract class CaseApiHttpTestBase extends OracleTestBase {
         } catch (IOException e) {
             throw new IllegalStateException("Could not read the case definition fixture", e);
         }
+    }
+
+    static byte[] definitionArchive() {
+        return archive(definitionJson());
+    }
+
+    static byte[] archive(String contractJson) {
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
+                write(zip, "processes/widget-review.bpmn", """
+                        <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                            xmlns:operaton="http://operaton.org/schema/1.0/bpmn">
+                          <bpmn:process id="widget-review" isExecutable="true">
+                            <bpmn:startEvent id="start"/>
+                            <bpmn:sequenceFlow id="to-review" sourceRef="start" targetRef="review"/>
+                            <bpmn:userTask id="review" name="Review"
+                                operaton:formKey="reviewForm"
+                                operaton:candidateGroups="reviewers"/>
+                            <bpmn:sequenceFlow id="to-end" sourceRef="review" targetRef="end"/>
+                            <bpmn:endEvent id="end"/>
+                          </bpmn:process>
+                        </bpmn:definitions>
+                        """);
+                write(zip, "contract.json", contractJson);
+                write(zip, "presentation.json", "{\"version\":\"1.0\",\"sections\":[]}");
+            }
+            return bytes.toByteArray();
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not build the BPMN test bundle", e);
+        }
+    }
+
+    private static void write(ZipOutputStream zip, String path, String value) throws IOException {
+        zip.putNextEntry(new ZipEntry(path));
+        zip.write(value.getBytes(StandardCharsets.UTF_8));
+        zip.closeEntry();
+    }
+
+    /**
+     * Simulates the engine-observation bridge that is outside this REST slice. These rows are
+     * projections of the BPMN user task and milestone, never inputs to a local state machine.
+     */
+    void projectObservedFixtureActivities(String caseId) {
+        String processInstanceId = jdbc().sql("""
+                SELECT PROC_INST_ID_ FROM CM_LINKED_PROCESS
+                WHERE CASE_ID_=:caseId AND IS_CASE_ROOT_=1
+                """).param("caseId", caseId).query(String.class).single();
+        OffsetDateTime now = OffsetDateTime.now();
+        String taskPlanItemId = "pi-" + UUID.randomUUID();
+        String engineTaskId = "engine-task-" + UUID.randomUUID();
+        String taskActivityInstanceId = "activity-" + UUID.randomUUID();
+        jdbc().sql("""
+                INSERT INTO CM_PLAN_ITEM
+                  (ID_,CASE_ID_,PI_DEF_ID_,TYPE_,NAME_,STATE_,AD_HOC_,REPETITION_NO_,
+                   CAMUNDA_TASK_ID_,PROC_INST_ID_,VERSION_,CREATED_AT_,UPDATED_AT_,
+                   ENGINE_ACTIVITY_ID_,PROJECTION_STATUS_,LAST_ENGINE_UPDATE_AT_,LAST_PROJECTED_AT_)
+                VALUES (:id,:caseId,'review','HUMAN_TASK','Review','ACTIVE',0,1,
+                        :taskId,:processId,0,:now,:now,:activityInstanceId,'CURRENT',:now,:now)
+                """).param("id", taskPlanItemId).param("caseId", caseId)
+                .param("taskId", engineTaskId).param("processId", processInstanceId)
+                .param("activityInstanceId", taskActivityInstanceId)
+                .param("now", now).update();
+        jdbc().sql("""
+                INSERT INTO CM_TASK
+                  (ID_,CASE_ID_,PLAN_ITEM_ID_,CAMUNDA_TASK_ID_,NAME_,STATE_,CAND_GROUPS_JSON_,
+                   FORM_KEY_,PRIORITY_,ENGINE_SYNC_,VERSION_,CREATED_AT_,UPDATED_AT_,
+                   PROJECTION_STATUS_,LAST_ENGINE_UPDATE_AT_,LAST_PROJECTED_AT_,PROC_INST_ID_)
+                VALUES (:id,:caseId,:planItemId,:engineTaskId,'Review','OPEN','[\"reviewers\"]',
+                        'reviewForm',50,'SYNCED',0,:now,:now,'CURRENT',:now,:now,:processId)
+                """).param("id", "task-" + UUID.randomUUID()).param("caseId", caseId)
+                .param("planItemId", taskPlanItemId).param("engineTaskId", engineTaskId)
+                .param("processId", processInstanceId).param("now", now).update();
+        jdbc().sql("""
+                INSERT INTO CM_PLAN_ITEM
+                  (ID_,CASE_ID_,PI_DEF_ID_,TYPE_,NAME_,STATE_,AD_HOC_,REPETITION_NO_,
+                   PROC_INST_ID_,VERSION_,CREATED_AT_,UPDATED_AT_,ENGINE_ACTIVITY_ID_,
+                   PROJECTION_STATUS_,LAST_ENGINE_UPDATE_AT_,LAST_PROJECTED_AT_)
+                VALUES (:id,:caseId,'reviewed','MILESTONE','Reviewed','AVAILABLE',0,1,
+                        :processId,0,:now,:now,:activityInstanceId,'CURRENT',:now,:now)
+                """).param("id", "pi-" + UUID.randomUUID()).param("caseId", caseId)
+                .param("processId", processInstanceId)
+                .param("activityInstanceId", "activity-" + UUID.randomUUID())
+                .param("now", now).update();
     }
 }

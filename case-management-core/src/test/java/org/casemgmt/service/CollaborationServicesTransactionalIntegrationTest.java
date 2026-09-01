@@ -1,11 +1,15 @@
 package org.casemgmt.service;
 
 import org.casemgmt.OracleTestBase;
-import org.casemgmt.domain.*;
-import org.casemgmt.engine.EngineGateway;
-import org.casemgmt.error.CaseConflictException;
+import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.event.EventPublisher;
-import org.casemgmt.repo.*;
+import org.casemgmt.repo.AuditRepository;
+import org.casemgmt.repo.CaseRepository;
+import org.casemgmt.repo.CommentRepository;
+import org.casemgmt.repo.DocumentRepository;
+import org.casemgmt.repo.EventRepository;
+import org.casemgmt.repo.LinkedProcessRepository;
+import org.casemgmt.repo.WebhookRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -15,226 +19,106 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 import javax.sql.DataSource;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/**
- * Companion to {@code CaseServiceTransactionalIntegrationTest} / {@code
- * CaseTaskServiceTransactionalIntegrationTest} for the three Task 18 collaboration services:
- * proves their {@code @Transactional} annotations are load-bearing, not inert.
- *
- * <p>{@link CollaborationServicesTest} — like every other repository/service test in this module —
- * builds {@link CommentService}, {@link LinkedProcessService} and {@link MilestoneService} with a
- * plain {@code new} via {@link TestServices}, which never puts a bean behind the Spring AOP proxy
- * that actually opens/commits/rolls back a transaction (Task 15). This class puts the REAL beans
- * under test via {@link OracleTestBase#springContext}.
- *
- * <p>All three mutating methods share the same shape — a domain write, then {@code
- * publisher.publish}, then {@code publisher.audit} — so, like {@code
- * CaseTaskServiceTransactionalIntegrationTest.claimRollsBackWhenAuditingFails}, each rollback test
- * here injects the failure into the audit call via {@link FailingAuditEventPublisher}: it is a
- * genuine downstream write, not a synthetic hook, and by the time it fires the domain write and
- * the CM_EVENT row are already sitting in the transaction, real, waiting to be undone.
- *
- * <p><b>Mutation-tested manually</b>: temporarily removing {@code @Transactional} from {@code
- * CommentService.add}, {@code LinkedProcessService.start} and {@code MilestoneService.achieve} in
- * turn and re-running this class makes the corresponding rollback test fail (the CM_COMMENT /
- * CM_LINKED_PROCESS / CM_MILESTONE+CM_EVENT rows the failing run wrote stay committed instead of
- * disappearing) — confirmed during development, one annotation at a time.
- */
+/** Transactional rollback coverage for the remaining mutable collaboration services. */
 class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
 
-    private AnnotationConfigApplicationContext ctx;
-    private CaseService cases;
+    private AnnotationConfigApplicationContext context;
     private CommentService comments;
+    private DocumentService documents;
     private LinkedProcessService processes;
-    private MilestoneService milestones;
     private FailingAuditEventPublisher publisher;
     private final Actor alice = new Actor("alice", List.of("reviewers"));
     private String caseId;
-    private String reviewedPlanItemId;
 
     @BeforeEach
     void setUp() throws Exception {
-        String json = new String(getClass().getResourceAsStream("/definitions/test-definition.json")
-                .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
-
-        ctx = springContext(CollaborationServicesTestConfig.class);
-        cases = ctx.getBean(CaseService.class);
-        comments = ctx.getBean(CommentService.class);
-        processes = ctx.getBean(LinkedProcessService.class);
-        milestones = ctx.getBean(MilestoneService.class);
-        publisher = ctx.getBean(FailingAuditEventPublisher.class);
-
-        caseId = cases.create("widget-review", "t1", null, "T", CasePriority.MEDIUM, Map.of(), alice).id();
-        reviewedPlanItemId = new PlanItemRepository(jdbc()).findByCase(caseId).stream()
-                .filter(i -> i.name().equals("reviewed")).findFirst().orElseThrow().id();
+        CaseDefinition definition = TestServices.deployBpmnDefinition(dataSource(), "widget-review", "t1");
+        context = springContext(CollaborationServicesTestConfig.class);
+        comments = context.getBean(CommentService.class);
+        documents = context.getBean(DocumentService.class);
+        processes = context.getBean(LinkedProcessService.class);
+        publisher = context.getBean(FailingAuditEventPublisher.class);
+        caseId = TestServices.insertBpmnCase(dataSource(), definition, "T", alice.userId()).id();
     }
 
     @AfterEach
     void tearDown() {
-        ctx.close();
+        context.close();
     }
 
     @Test
     void addCommentRollsBackEverythingWhenAuditingFails() {
-        int commentCountBefore = countAll("CM_COMMENT");
-        int eventCountBefore = countAll("CM_EVENT");
-        int auditCountBefore = countAll("CM_AUDIT_LOG");
-
+        int commentsBefore = countAll("CM_COMMENT");
+        int eventsBefore = countAll("CM_EVENT");
+        int auditBefore = countAll("CM_AUDIT_LOG");
         publisher.failNextAudit();
 
         assertThatThrownBy(() -> comments.add(caseId, "note", "internal", alice))
                 .isInstanceOf(IllegalStateException.class);
 
-        assertThat(countAll("CM_COMMENT")).isEqualTo(commentCountBefore);
-        assertThat(countAll("CM_EVENT")).isEqualTo(eventCountBefore);
-        assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditCountBefore);
+        assertThat(countAll("CM_COMMENT")).isEqualTo(commentsBefore);
+        assertThat(countAll("CM_EVENT")).isEqualTo(eventsBefore);
+        assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditBefore);
     }
 
     @Test
     void startProcessRollsBackEverythingWhenAuditingFails() {
-        int processCountBefore = countAll("CM_LINKED_PROCESS");
-        int eventCountBefore = countAll("CM_EVENT");
-        int auditCountBefore = countAll("CM_AUDIT_LOG");
-
+        int processesBefore = countAll("CM_LINKED_PROCESS");
+        int eventsBefore = countAll("CM_EVENT");
+        int auditBefore = countAll("CM_AUDIT_LOG");
         publisher.failNextAudit();
 
         assertThatThrownBy(() -> processes.start(caseId, null, "letter-process", Map.of(), alice))
                 .isInstanceOf(IllegalStateException.class);
 
-        assertThat(countAll("CM_LINKED_PROCESS")).isEqualTo(processCountBefore);
-        assertThat(countAll("CM_EVENT")).isEqualTo(eventCountBefore);
-        assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditCountBefore);
+        assertThat(countAll("CM_LINKED_PROCESS")).isEqualTo(processesBefore);
+        assertThat(countAll("CM_EVENT")).isEqualTo(eventsBefore);
+        assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditBefore);
     }
 
     @Test
-    void achieveMilestoneRollsBackEverythingWhenAuditingFails() {
-        MilestoneRepository milestoneRepo = new MilestoneRepository(jdbc());
-        String milestoneId = CaseIds.newId();
-        milestoneRepo.insert(milestoneId, caseId, reviewedPlanItemId, "Reviewed");
-        int eventCountBefore = countAll("CM_EVENT");
-        int auditCountBefore = countAll("CM_AUDIT_LOG");
-
+    void addDocumentRollsBackEverythingWhenAuditingFails() {
+        int documentsBefore = countAll("CM_DOCUMENT");
+        int eventsBefore = countAll("CM_EVENT");
+        int auditBefore = countAll("CM_AUDIT_LOG");
         publisher.failNextAudit();
 
-        assertThatThrownBy(() -> milestones.achieve(caseId, milestoneId, alice))
+        assertThatThrownBy(() -> documents.add(caseId, "passport.pdf", "evidence", "application/pdf",
+                123L, "https://dms.example/documents/passport", alice))
                 .isInstanceOf(IllegalStateException.class);
 
-        // The ACHIEVED_ = 1 write the UPDATE made before the failing audit call must be gone too
-        // — proof this is a whole-transaction rollback, not just the CM_EVENT row escaping.
-        MilestoneRepository.MilestoneRow reloaded = milestoneRepo.findByCase(caseId).stream()
-                .filter(m -> m.id().equals(milestoneId)).findFirst().orElseThrow();
-        assertThat(reloaded.achieved()).isFalse();
-        assertThat(countAll("CM_EVENT")).isEqualTo(eventCountBefore);
-        assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditCountBefore);
+        assertThat(countAll("CM_DOCUMENT")).isEqualTo(documentsBefore);
+        assertThat(countAll("CM_EVENT")).isEqualTo(eventsBefore);
+        assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditBefore);
     }
 
-    /**
-     * Genuine two-thread race, the same technique {@code
-     * EngineCommandClaimSafetyTest.concurrentClaimsNeverAssignTheSameCommandToBothCallers} uses:
-     * two callers hit {@link MilestoneService#achieve} for the SAME milestone at (as near as a
-     * {@link CountDownLatch} can arrange) the same instant. {@link MilestoneRepository#achieve}'s
-     * {@code UPDATE ... WHERE ACHIEVED_ = 0} — and {@link MilestoneService#achieve} basing its
-     * "did I just achieve it" decision on that UPDATE's own affected-row count rather than an
-     * earlier, racy read — is what has to hold for exactly one caller to succeed and exactly one
-     * {@code case.milestone.achieved} event to exist afterward. Reintroducing the TOCTOU version
-     * (deciding from the pre-UPDATE read instead) reproducibly makes both callers "succeed" and
-     * writes two events — verified manually during development by reverting {@link
-     * MilestoneService#achieve} to that shape and rerunning this test.
-     */
     @Test
-    void concurrentDoubleAchieveProducesExactlyOneEvent() throws Exception {
-        MilestoneRepository milestoneRepo = new MilestoneRepository(jdbc());
-        String milestoneId = CaseIds.newId();
-        milestoneRepo.insert(milestoneId, caseId, reviewedPlanItemId, "Reviewed");
+    void removeDocumentRollsBackEverythingWhenAuditingFails() {
+        DocumentRepository repository = new DocumentRepository(jdbc());
+        repository.insert("document-1", caseId, "passport.pdf", "evidence", "application/pdf",
+                123L, "https://dms.example/documents/passport", alice.userId());
+        int eventsBefore = countAll("CM_EVENT");
+        int auditBefore = countAll("CM_AUDIT_LOG");
+        publisher.failNextAudit();
 
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        CountDownLatch start = new CountDownLatch(1);
-        AtomicInteger conflicts = new AtomicInteger();
-        List<MilestoneRepository.MilestoneRow> successes;
-        try {
-            Future<MilestoneRepository.MilestoneRow> a = pool.submit(() -> attempt(milestoneId, start, conflicts));
-            Future<MilestoneRepository.MilestoneRow> b = pool.submit(() -> attempt(milestoneId, start, conflicts));
-            start.countDown();
+        assertThatThrownBy(() -> documents.remove(caseId, "document-1", alice))
+                .isInstanceOf(IllegalStateException.class);
 
-            successes = java.util.stream.Stream.of(a, b)
-                    .map(this::get)
-                    .filter(java.util.Objects::nonNull)
-                    .collect(Collectors.toList());
-        } finally {
-            pool.shutdownNow();
-        }
-
-        // Exactly one of the two racing callers actually achieved it, and the other got a real
-        // conflict rather than silently believing it succeeded too — that pairing is only
-        // possible because MilestoneService.achieve trusts MilestoneRepository.achieve's own
-        // affected-row count instead of an earlier, racy read (see class Javadoc).
-        assertThat(successes).hasSize(1);
-        assertThat(conflicts.get()).isEqualTo(1);
-
-        MilestoneRepository.MilestoneRow reloaded = milestoneRepo.findByCase(caseId).stream()
-                .filter(m -> m.id().equals(milestoneId)).findFirst().orElseThrow();
-        assertThat(reloaded.achieved()).isTrue();
-
-        List<String> milestoneEventIds = jdbc().sql(
-                "SELECT ID_ FROM CM_EVENT WHERE TYPE_ LIKE '%case.milestone.achieved' AND SUBJECT_ = :caseId")
-                .param("caseId", caseId)
-                .query(String.class).list();
-        assertThat(milestoneEventIds).hasSize(1);
-    }
-
-    private MilestoneRepository.MilestoneRow attempt(String milestoneId, CountDownLatch start,
-                                                      AtomicInteger conflicts) {
-        try {
-            start.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException(e);
-        }
-        try {
-            return milestones.achieve(caseId, milestoneId, alice);
-        } catch (CaseConflictException e) {
-            conflicts.incrementAndGet();
-            return null;
-        }
-    }
-
-    private <T> T get(Future<T> f) {
-        try {
-            return f.get(30, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertThat(repository.findById(caseId, "document-1")).isPresent();
+        assertThat(countAll("CM_EVENT")).isEqualTo(eventsBefore);
+        assertThat(countAll("CM_AUDIT_LOG")).isEqualTo(auditBefore);
     }
 
     private int countAll(String table) {
         return jdbc().sql("SELECT COUNT(*) FROM " + table).query(Integer.class).single();
     }
 
-    /**
-     * Registers the REAL {@link CommentService}, {@link LinkedProcessService} and {@link
-     * MilestoneService} beans (plus the {@link CaseService} fixtures depend on) so {@code
-     * TransactionManagerConfig}'s auto-proxy creator wraps them. {@link CaseService} is wired via
-     * {@link TestServices#caseService} (its own, non-failing {@link EventPublisher}) so fixture
-     * setup in {@code @BeforeEach} never trips the shared {@link FailingAuditEventPublisher} the
-     * three services under test share — the same split {@code
-     * CaseTaskServiceTransactionalIntegrationTest} uses between its fixture {@link CaseService}
-     * and the {@link org.casemgmt.service.CaseTaskService} actually under test.
-     */
     @Configuration
     static class CollaborationServicesTestConfig {
         @Bean
@@ -250,14 +134,15 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
         }
 
         @Bean
-        CaseService caseService(DataSource dataSource, CaseServiceTransactionalIntegrationTest.FailingGateway gateway) {
-            return TestServices.caseService(dataSource, gateway);
-        }
-
-        @Bean
         CommentService commentService(DataSource dataSource, FailingAuditEventPublisher publisher) {
             JdbcClient jdbc = JdbcClient.create(dataSource);
             return new CommentService(new CommentRepository(jdbc), new CaseRepository(jdbc), publisher);
+        }
+
+        @Bean
+        DocumentService documentService(DataSource dataSource, FailingAuditEventPublisher publisher) {
+            JdbcClient jdbc = JdbcClient.create(dataSource);
+            return new DocumentService(new DocumentRepository(jdbc), new CaseRepository(jdbc), publisher);
         }
 
         @Bean
@@ -268,30 +153,19 @@ class CollaborationServicesTransactionalIntegrationTest extends OracleTestBase {
             return new LinkedProcessService(new LinkedProcessRepository(jdbc), new CaseRepository(jdbc),
                     gateway, publisher);
         }
-
-        @Bean
-        MilestoneService milestoneService(DataSource dataSource, FailingAuditEventPublisher publisher) {
-            JdbcClient jdbc = JdbcClient.create(dataSource);
-            return new MilestoneService(new MilestoneRepository(jdbc), new CaseRepository(jdbc), publisher);
-        }
     }
 
-    /**
-     * An {@link EventPublisher} whose {@code audit} call can be told to fail once — copies {@code
-     * CaseTaskServiceTransactionalIntegrationTest.FailingAuditEventPublisher}'s shape rather than
-     * reusing it directly (that one is package-private to its own file, and this class needs the
-     * SAME instance shared across three different services, which a private nested class in a
-     * different test class cannot cleanly provide).
-     */
     static class FailingAuditEventPublisher extends EventPublisher {
-        private volatile boolean failAudit = false;
+        private volatile boolean failAudit;
 
         FailingAuditEventPublisher(EventRepository events, AuditRepository audit, WebhookRepository webhooks,
                                    String typePrefix, String engineId) {
             super(events, audit, webhooks, typePrefix, engineId);
         }
 
-        void failNextAudit() { failAudit = true; }
+        void failNextAudit() {
+            failAudit = true;
+        }
 
         @Override
         public void audit(String caseId, String tenantId, String actor, String action,

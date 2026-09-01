@@ -28,8 +28,10 @@ public abstract class EngineGatewayContract {
 
     protected abstract EngineGateway gateway();
 
-    /** Deploys the test BPMN process and returns its definition key. */
-    protected abstract String deployTestProcess();
+    /** Deploys one test BPMN version and returns the exact engine definition identity. */
+    protected abstract DeployedProcess deployTestProcess(int version);
+
+    public record DeployedProcess(String id, String key, String tenantId) {}
 
     @BeforeEach
     void isolateContractIds() {
@@ -154,21 +156,71 @@ public abstract class EngineGatewayContract {
 
     @Test
     void startsAProcessCorrelatedToTheCase() {
-        String key = deployTestProcess();
+        DeployedProcess process = deployTestProcess(1);
 
         EngineProcessRef ref = gateway().startProcess(new StartProcessRequest(
-                caseId("6"), planItemId("6"), key, Map.of("reason", "test")));
+                caseId("6"), planItemId("6"), process.id(), process.key(), process.tenantId(),
+                Map.of("reason", "test"), null));
 
         assertThat(ref.processInstanceId()).isNotBlank();
-        assertThat(ref.processDefinitionKey()).isEqualTo(key);
+        assertThat(ref.processDefinitionKey()).isEqualTo(process.key());
         assertThat(ref.businessKey()).isEqualTo(caseId("6"));
     }
 
     @Test
-    void findsTheUserTaskSpawnedByAStartedProcess() {
-        String key = deployTestProcess();
+    void startsTheSelectedV1AfterV2ExistsUnderTheSameKey() {
+        DeployedProcess v1 = deployTestProcess(1);
+        DeployedProcess v2 = deployTestProcess(2);
+        assertThat(v1.key()).isEqualTo(v2.key());
+        assertThat(v1.id()).isNotEqualTo(v2.id());
 
-        gateway().startProcess(new StartProcessRequest(caseId("8"), planItemId("8"), key, Map.of()));
+        gateway().startProcess(new StartProcessRequest(
+                caseId("exact-v1"), planItemId("exact-v1"), v1.id(), v1.key(), v1.tenantId(),
+                Map.of(), null));
+
+        assertThat(gateway().findTasks(new EngineTaskQuery(
+                null, null, caseId("exact-v1"), 10)))
+                .extracting(EngineTaskRef::name)
+                .containsExactly("Wait v1");
+    }
+
+    @Test
+    void startsTheSelectedV2WhenBothVersionsExist() {
+        deployTestProcess(1);
+        DeployedProcess v2 = deployTestProcess(2);
+
+        gateway().startProcess(new StartProcessRequest(
+                caseId("exact-v2"), planItemId("exact-v2"), v2.id(), v2.key(), v2.tenantId(),
+                Map.of(), null));
+
+        assertThat(gateway().findTasks(new EngineTaskQuery(
+                null, null, caseId("exact-v2"), 10)))
+                .extracting(EngineTaskRef::name)
+                .containsExactly("Wait v2");
+    }
+
+    @Test
+    void explicitStartByKeySelectsTheLatestVersionForLinkedProcesses() {
+        DeployedProcess v1 = deployTestProcess(1);
+        DeployedProcess v2 = deployTestProcess(2);
+        assertThat(v1.key()).isEqualTo(v2.key());
+
+        gateway().startProcessByKey(new StartProcessByKeyRequest(
+                caseId("legacy-key"), planItemId("legacy-key"), v1.key(), Map.of(), null));
+
+        assertThat(gateway().findTasks(new EngineTaskQuery(
+                null, null, caseId("legacy-key"), 10)))
+                .extracting(EngineTaskRef::name)
+                .containsExactly("Wait v2");
+    }
+
+    @Test
+    void findsTheUserTaskSpawnedByAStartedProcess() {
+        DeployedProcess process = deployTestProcess(1);
+
+        gateway().startProcess(new StartProcessRequest(
+                caseId("8"), planItemId("8"), process.id(), process.key(), process.tenantId(),
+                Map.of(), null));
 
         // test-process.bpmn's caseId lands as a *process* variable (it is passed to
         // startProcess, not createHumanTask), which is a different variable scope than a
@@ -180,7 +232,7 @@ public abstract class EngineGatewayContract {
 
         assertThat(found).hasSize(1);
         assertThat(found).allSatisfy(t -> {
-            assertThat(t.name()).isEqualTo("Wait");
+                    assertThat(t.name()).isEqualTo("Wait v1");
             assertThat(t.caseId()).isEqualTo(caseId("8"));
             assertThat(t.createdAt()).isNotNull();
         });
@@ -188,9 +240,10 @@ public abstract class EngineGatewayContract {
 
     @Test
     void cancelsARunningProcess() {
-        String key = deployTestProcess();
+        DeployedProcess process = deployTestProcess(1);
         EngineProcessRef ref = gateway().startProcess(new StartProcessRequest(
-                caseId("7"), planItemId("7"), key, Map.of()));
+                caseId("7"), planItemId("7"), process.id(), process.key(), process.tenantId(),
+                Map.of(), null));
 
         gateway().cancelProcess(ref.processInstanceId(), "no longer needed");
 

@@ -5,6 +5,7 @@ import org.casemgmt.rest.controller.CaseController;
 import org.casemgmt.rest.controller.CaseDefinitionController;
 import org.casemgmt.rest.controller.CollaborationController;
 import org.casemgmt.rest.controller.EventController;
+import org.casemgmt.rest.controller.EngineOperationController;
 import org.casemgmt.rest.controller.PlanItemController;
 import org.casemgmt.rest.controller.SearchController;
 import org.casemgmt.rest.controller.SlaController;
@@ -33,6 +34,7 @@ import org.springframework.context.annotation.Import;
         CaseDefinitionController.class,
         CollaborationController.class,
         EventController.class,
+        EngineOperationController.class,
         SlaController.class,
         SearchController.class,
         ProblemDetailHandler.class

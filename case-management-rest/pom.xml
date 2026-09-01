@@ -15,8 +15,8 @@
       <groupId>org.casemgmt</groupId>
       <artifactId>case-management-core</artifactId>
     </dependency>
-    <!-- Test-jar of case-management-core: brings in PlanModelFixtures so ActionPolicyTest can
-         build CaseSnapshot fixtures without duplicating case-definition/plan-item boilerplate. -->
+    <!-- Test-jar of case-management-core supplies the shared Oracle test base and engine
+         contract, without exporting legacy plan-model fixtures. -->
     <dependency>
       <groupId>org.casemgmt</groupId>
       <artifactId>case-management-core</artifactId>

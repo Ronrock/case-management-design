@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+  <!-- A cancellation is a terminal SLA fact in its own right.  Keep it separate from MET_AT_
+       so support/audit can distinguish a commitment achieved by the case from one stopped when
+       the case itself was cancelled. -->
+  <!-- An older database may already carry this column.  Presence alone is not compatibility:
+       accepting a VARCHAR2/DATE shadow column would make root terminalisation appear to work
+       until the first write.  This guard deliberately permits only absence (fresh install) or
+       the exact Oracle timestamp-with-zone representation. -->
+  <changeSet id="cm-sla-root-terminalization-column-shape-guard" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+      onFailMessage="CM_SLA_RECORD.CANCELLED_AT_ must be TIMESTAMP WITH TIME ZONE; migration stopped without changing the existing column.">
+      <or>
+        <not><columnExists tableName="CM_SLA_RECORD" columnName="CANCELLED_AT_"/></not>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT COUNT(*) FROM USER_TAB_COLUMNS
+          WHERE TABLE_NAME = 'CM_SLA_RECORD' AND COLUMN_NAME = 'CANCELLED_AT_'
+            AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE'
+        ]]></sqlCheck>
+      </or>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-sla-root-terminalization-column" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_SLA_RECORD" columnName="CANCELLED_AT_"/></not>
+    </preConditions>
+    <addColumn tableName="CM_SLA_RECORD">
+      <column name="CANCELLED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+  </changeSet>
+
+  <!-- Do not silently drop an operator-customised constraint.  Only the original four-state
+       shape or this exact five-state shape is a known predecessor; any other shape needs an
+       explicit migration rather than weakening an unknown production guard. -->
+  <changeSet id="cm-sla-root-terminalization-status" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT"
+      onFailMessage="CK_CM_SLAR_STATUS is not a recognised SLA lifecycle constraint; migration stopped without changing it.">
+      <sqlCheck expectedResult="1"><![CDATA[
+        SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_SLA_RECORD' AND CONSTRAINT_NAME = 'CK_CM_SLAR_STATUS'
+          AND CONSTRAINT_TYPE = 'C'
+          AND (REGEXP_LIKE(REPLACE(UPPER(SEARCH_CONDITION_VC), ' ', ''),
+               'STATUS_?IN\(''RUNNING'',''PAUSED'',''MET'',''BREACHED''\)')
+            OR REGEXP_LIKE(REPLACE(UPPER(SEARCH_CONDITION_VC), ' ', ''),
+               'STATUS_?IN\(''RUNNING'',''PAUSED'',''MET'',''CANCELLED'',''BREACHED''\)'))
+      ]]></sqlCheck>
+    </preConditions>
+    <sql>ALTER TABLE CM_SLA_RECORD DROP CONSTRAINT CK_CM_SLAR_STATUS</sql>
+    <sql>ALTER TABLE CM_SLA_RECORD ADD CONSTRAINT CK_CM_SLAR_STATUS CHECK (STATUS_ IN ('RUNNING','PAUSED','MET','CANCELLED','BREACHED'))</sql>
+  </changeSet>
+
+  <changeSet id="cm-sla-contract-occurrence-snapshot" author="casemgmt">
+    <addColumn tableName="CM_SLA_RECORD">
+      <column name="CONTRACT_RELEASE_ID_" type="VARCHAR2(128)"/>
+      <column name="CONTRACT_SHA256_" type="VARCHAR2(64)"/>
+      <column name="TARGET_KEY_" type="VARCHAR2(200)"/>
+      <column name="TARGET_VERSION_" type="NUMBER(10)"/>
+      <column name="SLA_SCOPE_" type="VARCHAR2(20)"/>
+      <column name="OCCURRENCE_KEY_" type="VARCHAR2(200)"/>
+      <column name="CALENDAR_ID_" type="VARCHAR2(128)"/>
+      <column name="CALENDAR_REVISION_" type="NUMBER(10)"/>
+      <column name="MEET_ANCHOR_" type="VARCHAR2(128)"/>
+      <column name="CANCEL_ANCHOR_" type="VARCHAR2(128)"/>
+      <column name="TRANSITION_EVIDENCE_JSON_" type="CLOB"/>
+    </addColumn>
+    <!-- A regular unique constraint would also collapse every legacy row with a non-null case
+         id and null snapshots.  The function-based index applies uniqueness only once a row is
+         contract-derived, preserving pre-existing policy clocks. -->
+    <sql>CREATE UNIQUE INDEX UQ_CM_SLAR_OCCURRENCE ON CM_SLA_RECORD (CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN CASE_ID_ END, CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN CONTRACT_RELEASE_ID_ END, CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN TARGET_KEY_ END, CASE WHEN CONTRACT_RELEASE_ID_ IS NOT NULL THEN OCCURRENCE_KEY_ END)</sql>
+  </changeSet>
+
+  <changeSet id="cm-sla-contract-occurrence-transitions" author="casemgmt">
+    <addColumn tableName="CM_SLA_RECORD">
+      <column name="CALENDAR_DEFINITION_JSON_" type="CLOB"/>
+      <column name="PAUSE_ANCHORS_JSON_" type="CLOB"/>
+      <column name="RESUME_ANCHORS_JSON_" type="CLOB"/>
+    </addColumn>
+  </changeSet>
+</databaseChangeLog>

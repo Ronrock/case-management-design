@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+  <!-- A cursor is separate for every tenant/feed. The ordered pair prevents equal timestamps
+       from collapsing into one global watermark. Inbox delivery is added with its handler slice;
+       this table first closes the history-loss gap. -->
+  <changeSet id="cm-remote-observation-checkpoint" author="casemgmt">
+    <createTable tableName="CM_REMOTE_OBS_CHECKPOINT">
+      <column name="TENANT_ID_" type="VARCHAR2(64 BYTE)"><constraints nullable="false"/></column>
+      <column name="STREAM_" type="VARCHAR2(32 BYTE)"><constraints nullable="false"/></column>
+      <column name="EVENT_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="EVENT_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="UPDATED_AT_" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="SYSTIMESTAMP"><constraints nullable="false"/></column>
+    </createTable>
+    <addPrimaryKey tableName="CM_REMOTE_OBS_CHECKPOINT" columnNames="TENANT_ID_,STREAM_"
+                   constraintName="PK_CM_REMOTE_OBS_CP"/>
+  </changeSet>
+  <changeSet id="cm-remote-observation-checkpoint-stream-check" author="casemgmt">
+    <sql>ALTER TABLE CM_REMOTE_OBS_CHECKPOINT ADD CONSTRAINT CK_CM_REMOTE_OBS_CP_STREAM
+      CHECK (STREAM_ IN ('TASKS','ACTIVITIES','PROCESSES'))</sql>
+  </changeSet>
+  <changeSet id="cm-remote-observation-inbox" author="casemgmt">
+    <createTable tableName="CM_REMOTE_OBS_INBOX">
+      <column name="FINGERPRINT_" type="VARCHAR2(64 BYTE)"><constraints primaryKey="true" nullable="false"/></column>
+      <column name="TENANT_ID_" type="VARCHAR2(64 BYTE)"><constraints nullable="false"/></column>
+      <column name="STREAM_" type="VARCHAR2(32 BYTE)"><constraints nullable="false"/></column>
+      <column name="PAYLOAD_" type="CLOB"><constraints nullable="false"/></column>
+      <column name="STATUS_" type="VARCHAR2(16 BYTE)" defaultValue="PENDING"><constraints nullable="false"/></column>
+      <column name="ATTEMPTS_" type="NUMBER(10)" defaultValueNumeric="0"><constraints nullable="false"/></column>
+      <column name="CREATED_AT_" type="TIMESTAMP WITH TIME ZONE" defaultValueComputed="SYSTIMESTAMP"><constraints nullable="false"/></column>
+      <column name="APPLIED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="FAILURE_DETAIL_" type="VARCHAR2(2000 BYTE)"/>
+      <column name="LEASE_TOKEN_" type="VARCHAR2(64 BYTE)"/>
+      <column name="LEASED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </createTable>
+  </changeSet>
+  <changeSet id="cm-remote-observation-inbox-index" author="casemgmt">
+    <createIndex tableName="CM_REMOTE_OBS_INBOX" indexName="IX_CM_REMOTE_OBS_INBOX_STATUS">
+      <column name="STATUS_"/><column name="CREATED_AT_"/>
+    </createIndex>
+  </changeSet>
+  <changeSet id="cm-remote-observation-inbox-lease-index" author="casemgmt">
+    <createIndex tableName="CM_REMOTE_OBS_INBOX" indexName="IX_CM_REMOTE_OBS_INBOX_LEASE">
+      <column name="STATUS_"/><column name="LEASED_AT_"/><column name="CREATED_AT_"/>
+    </createIndex>
+  </changeSet>
+  <changeSet id="cm-remote-observation-checkpoint-terminal-streams" author="casemgmt">
+    <sql>ALTER TABLE CM_REMOTE_OBS_CHECKPOINT DROP CONSTRAINT CK_CM_REMOTE_OBS_CP_STREAM</sql>
+    <sql>ALTER TABLE CM_REMOTE_OBS_CHECKPOINT ADD CONSTRAINT CK_CM_REMOTE_OBS_CP_STREAM
+      CHECK (STREAM_ IN ('TASKS','TASK_TERMINALS','ACTIVITIES','ACTIVITY_TERMINALS','PROCESSES'))</sql>
+  </changeSet>
+</databaseChangeLog>

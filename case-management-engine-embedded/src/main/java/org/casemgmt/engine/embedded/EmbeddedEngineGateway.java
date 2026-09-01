@@ -2,6 +2,7 @@ package org.casemgmt.engine.embedded;
 
 import org.casemgmt.engine.*;
 import org.operaton.bpm.engine.ProcessEngineException;
+import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.RuntimeService;
 import org.operaton.bpm.engine.TaskService;
 import org.operaton.bpm.engine.task.Task;
@@ -22,14 +23,24 @@ public class EmbeddedEngineGateway implements EngineGateway {
 
     /** Process/task variable carrying the owning case. Also the process business key. */
     public static final String CASE_ID_VARIABLE = "caseId";
+    /** Reserved high-entropy persisted start correlation; never accepted from caller variables. */
+    public static final String LIFECYCLE_CORRELATION_VARIABLE = "__casemgmtLifecycleCorrelation";
     private static final String PLAN_ITEM_VARIABLE = "planItemId";
 
     private final TaskService taskService;
     private final RuntimeService runtimeService;
+    private final RepositoryService repositoryService;
 
-    public EmbeddedEngineGateway(TaskService taskService, RuntimeService runtimeService) {
+    public EmbeddedEngineGateway(TaskService taskService, RuntimeService runtimeService,
+                                 RepositoryService repositoryService) {
         this.taskService = taskService;
         this.runtimeService = runtimeService;
+        this.repositoryService = repositoryService;
+    }
+
+    @Override
+    public boolean emitsSynchronousLifecycleObservations() {
+        return true;
     }
 
     @Override
@@ -91,26 +102,112 @@ public class EmbeddedEngineGateway implements EngineGateway {
 
     @Override
     public EngineProcessRef startProcess(StartProcessRequest request) {
+        var definition = repositoryService.createProcessDefinitionQuery()
+                .processDefinitionId(request.processDefinitionId())
+                .singleResult();
+        if (definition == null) {
+            throw new EngineException("No process definition " + request.processDefinitionId());
+        }
+        if (!java.util.Objects.equals(definition.getTenantId(), request.tenantId())) {
+            throw new EngineException("Process definition " + request.processDefinitionId()
+                    + " belongs to another tenant");
+        }
+        if (request.processDefinitionKey() != null
+                && !request.processDefinitionKey().equals(definition.getKey())) {
+            throw new EngineException("Process definition " + request.processDefinitionId()
+                    + " does not match key " + request.processDefinitionKey());
+        }
         Map<String, Object> variables = new HashMap<>(
                 request.variables() == null ? Map.of() : request.variables());
         variables.put(CASE_ID_VARIABLE, request.caseId());
         variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
+        putLifecycleCorrelation(variables, request.correlationId());
         try {
-            var instance = runtimeService.startProcessInstanceByKey(
-                    request.processDefinitionKey(), request.caseId(), variables);
-            return new EngineProcessRef(instance.getId(), request.processDefinitionKey(), request.caseId());
+            var instance = runtimeService.startProcessInstanceById(
+                    request.processDefinitionId(), request.caseId(), variables);
+            String actualDefinitionId = instance == null ? null : instance.getProcessDefinitionId();
+            if (actualDefinitionId != null
+                    && !request.processDefinitionId().equals(actualDefinitionId)) {
+                throw new EngineException("Engine start returned an inconsistent process-definition id");
+            }
+            return processRef(instance == null ? null : instance.getId(),
+                    request.processDefinitionId(), definition.getKey(), request.caseId());
+        } catch (ProcessEngineException e) {
+            throw new EngineException(
+                    "Could not start process " + request.processDefinitionId(), e);
+        }
+    }
+
+    @Override
+    public EngineProcessRef startProcessByKey(StartProcessByKeyRequest request) {
+        var query = repositoryService.createProcessDefinitionQuery()
+                .processDefinitionKey(request.processDefinitionKey())
+                .latestVersion();
+        query = request.tenantId() == null
+                ? query.withoutTenantId()
+                : query.tenantIdIn(request.tenantId());
+        var definition = query.singleResult();
+        if (definition == null) {
+            throw new EngineException("No process definition " + request.processDefinitionKey()
+                    + " for tenant " + request.tenantId());
+        }
+        Map<String, Object> variables = new HashMap<>(request.variables());
+        variables.put(CASE_ID_VARIABLE, request.caseId());
+        variables.put(PLAN_ITEM_VARIABLE, request.planItemId());
+        putLifecycleCorrelation(variables, request.correlationId());
+        try {
+            var instance = runtimeService.startProcessInstanceById(
+                    definition.getId(), request.caseId(), variables);
+            return processRef(instance == null ? null : instance.getId(),
+                    definition.getId(), definition.getKey(), request.caseId());
         } catch (ProcessEngineException e) {
             throw new EngineException(
                     "Could not start process " + request.processDefinitionKey(), e);
         }
     }
 
+    private static EngineProcessRef processRef(
+            String processInstanceId, String processDefinitionId,
+            String processDefinitionKey, String caseId) {
+        if (processInstanceId == null || processInstanceId.isBlank()) {
+            throw new EngineException("Engine start returned no process-instance id");
+        }
+        if (processDefinitionId == null || processDefinitionId.isBlank()) {
+            throw new EngineException("Engine start returned no process-definition id");
+        }
+        return new EngineProcessRef(processInstanceId, processDefinitionId,
+                processDefinitionKey, caseId);
+    }
+
+    private static void putLifecycleCorrelation(Map<String, Object> variables,
+                                                String correlationId) {
+        // Always remove a caller-provided value. Only the caller-owned request coordinate minted
+        // by the case service may mark a process as lifecycle-managed.
+        variables.remove(LIFECYCLE_CORRELATION_VARIABLE);
+        if (correlationId != null && !correlationId.isBlank()) {
+            variables.put(LIFECYCLE_CORRELATION_VARIABLE, correlationId);
+        }
+    }
+
     @Override
     public void cancelProcess(String processInstanceId, String reason) {
         try {
-            runtimeService.deleteProcessInstance(processInstanceId, reason);
+            runtimeService.deleteProcessInstance(processInstanceId,
+                    EmbeddedCancellationReason.encode(reason));
         } catch (ProcessEngineException e) {
             throw new EngineException("Could not cancel process " + processInstanceId, e);
+        }
+    }
+
+    @Override
+    public void correlateMessage(MessageCorrelationRequest request) {
+        try {
+            runtimeService.createMessageCorrelation(request.messageName())
+                    .processInstanceBusinessKey(request.caseId())
+                    .setVariables(request.variables() == null ? Map.of() : request.variables())
+                    .correlate();
+        } catch (ProcessEngineException e) {
+            throw new EngineException("Could not correlate message " + request.messageName(), e);
         }
     }
 

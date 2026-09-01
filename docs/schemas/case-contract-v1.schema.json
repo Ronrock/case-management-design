@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://casemgmt.org/schemas/case-contract-v1.schema.json",
+  "title": "Case contract v1",
+  "description": "A BPMN case-definition contract. Every behaviour-driving object is closed, so an unknown or misspelled property fails publication instead of being ignored until a live case reaches it. Unversioned extension data belongs under an 'extensions' object, which is deliberately open.",
+  "type": "object",
+  "allOf": [{ "$ref": "#/$defs/bpmnContract" }],
+
+  "$defs": {
+
+    "bpmnContract": {
+      "type": "object",
+      "required": ["key", "orchestrationMode", "fields", "forms"],
+      "additionalProperties": false,
+      "properties": {
+        "key": { "$ref": "#/$defs/identifier" },
+        "name": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "version": { "const": "1.0" },
+        "orchestrationMode": { "const": "BPMN" },
+        "tenantId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "roles": { "$ref": "#/$defs/nameList" },
+        "candidateGroups": { "$ref": "#/$defs/nameList" },
+        "attachmentCategories": { "$ref": "#/$defs/nameList" },
+        "fields": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/field" }
+        },
+        "forms": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/form" }
+        },
+        "searchProfiles": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/searchProfile" }
+        },
+        "slaBindings": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": { "$ref": "#/$defs/slaBinding" }
+        },
+        "mappings": { "type": "array", "items": { "$ref": "#/$defs/mapping" } },
+        "adHocActions": { "type": "array", "items": { "$ref": "#/$defs/adHocAction" } },
+        "policyRefs": { "$ref": "#/$defs/nameList" },
+        "extensions": { "type": "object" }
+      }
+    },
+
+    "field": {
+      "type": "object",
+      "required": ["schema"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "schema": { "type": "object" },
+        "readRoles": { "$ref": "#/$defs/nameList" },
+        "writeRoles": { "$ref": "#/$defs/nameList" },
+        "extensions": { "type": "object" }
+      }
+    },
+
+    "form": {
+      "type": "object",
+      "required": ["schema"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "maxLength": 200 },
+        "schema": { "type": "object" },
+        "uiSchema": { "type": "object" },
+        "extensions": { "type": "object" }
+      }
+    },
+
+    "searchProfile": {
+      "type": "object",
+      "required": ["scopes"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "maxLength": 200 },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["cases", "documents", "tasks", "comments"] }
+        },
+        "filters": { "type": "array", "items": { "$ref": "#/$defs/searchFilter" } },
+        "facets": { "$ref": "#/$defs/nameList" },
+        "sort": { "type": "array", "items": { "$ref": "#/$defs/searchSort" } },
+        "extensions": { "type": "object" }
+      }
+    },
+
+    "searchFilter": {
+      "type": "object",
+      "required": ["field"],
+      "additionalProperties": false,
+      "properties": {
+        "field": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "operator": {
+          "enum": ["EQ", "NE", "IN", "PREFIX", "CONTAINS", "GT", "GTE", "LT", "LTE", "BETWEEN"]
+        },
+        "value": {},
+        "required": { "type": "boolean" }
+      }
+    },
+
+    "searchSort": {
+      "type": "object",
+      "required": ["field"],
+      "additionalProperties": false,
+      "properties": {
+        "field": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "direction": { "enum": ["ASC", "DESC"] }
+      }
+    },
+
+    "slaBinding": {
+      "description": "One executable SLA target, keyed by the id a BPMN casemgmt:slaTargetId attribute resolves against. Publication fixes the start, pause, resume and root-outcome rules that a runtime occurrence snapshots.",
+      "type": "object",
+      "required": ["scope", "calendarId", "duration", "startAnchor", "meetAnchor"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "maxLength": 200 },
+        "targetVersion": { "type": "integer", "minimum": 1 },
+        "scope": { "enum": ["CASE", "STAGE", "TASK", "MILESTONE", "OCCURRENCE"] },
+        "occurrenceKey": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "calendarId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "calendarRevision": { "type": "integer", "minimum": 1 },
+        "duration": { "$ref": "#/$defs/duration" },
+        "startAnchor": { "$ref": "#/$defs/anchor" },
+        "meetAnchor": { "$ref": "#/$defs/anchor" },
+        "cancelAnchor": { "$ref": "#/$defs/anchor" },
+        "pauseAnchors": { "type": "array", "items": { "$ref": "#/$defs/anchor" } },
+        "resumeAnchors": { "type": "array", "items": { "$ref": "#/$defs/anchor" } },
+        "warnings": { "type": "array", "maxItems": 1, "items": { "$ref": "#/$defs/duration" } },
+        "breachActions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["EMIT_EVENT", "ESCALATE"] }
+        },
+        "extensions": { "type": "object" }
+      }
+    },
+
+    "mapping": {
+      "description": "One explicit movement of a value between canonical case data and the engine. Engine variables are not automatically canonical business data, so each direction is declared.",
+      "type": "object",
+      "required": ["direction", "source", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "direction": { "enum": ["CASE_TO_ENGINE", "ENGINE_TO_CASE"] },
+        "source": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "target": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "type": { "enum": ["string", "integer", "number", "boolean", "object", "array"] },
+        "writeMode": { "enum": ["REPLACE", "MERGE"] },
+        "required": { "type": "boolean" },
+        "transformRef": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "submitRoles": { "$ref": "#/$defs/nameList" },
+        "extensions": { "type": "object" }
+      }
+    },
+
+    "adHocAction": {
+      "description": "Explicit external BPMN capabilities. Contracts cannot activate human tasks outside the BPMN token flow. 'type' discriminates into a closed variant, so a property belonging to another variant is a publication failure rather than a silently dropped instruction.",
+      "type": "object",
+      "required": ["id", "type", "roles"],
+      "properties": {
+        "type": { "enum": ["PROCESS", "MESSAGE"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "PROCESS" } }, "required": ["type"] },
+          "then": { "$ref": "#/$defs/processAction" }
+        },
+        {
+          "if": { "properties": { "type": { "const": "MESSAGE" } }, "required": ["type"] },
+          "then": { "$ref": "#/$defs/messageAction" }
+        }
+      ]
+    },
+
+    "processAction": {
+      "required": ["processDefinitionKey", "orchestrationReleaseId"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "type": { "const": "PROCESS" },
+        "name": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "roles": { "$ref": "#/$defs/requiredNameList" },
+        "formRef": { "$ref": "#/$defs/identifier" },
+        "candidateGroups": { "$ref": "#/$defs/nameList" },
+        "availabilityExpression": { "$ref": "#/$defs/expression" },
+        "processDefinitionKey": { "$ref": "#/$defs/identifier" },
+        "orchestrationReleaseId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "completionEffect": { "enum": ["NONE", "COMPLETE_CASE", "SIGNAL_CASE"] },
+        "mappings": { "type": "array", "items": { "$ref": "#/$defs/mapping" } },
+        "extensions": { "type": "object" }
+      }
+    },
+
+    "messageAction": {
+      "required": ["messageName"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "type": { "const": "MESSAGE" },
+        "name": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "roles": { "$ref": "#/$defs/requiredNameList" },
+        "formRef": { "$ref": "#/$defs/identifier" },
+        "candidateGroups": { "$ref": "#/$defs/nameList" },
+        "availabilityExpression": { "$ref": "#/$defs/expression" },
+        "messageName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "correlationKeys": { "$ref": "#/$defs/nameList" },
+        "mappings": { "type": "array", "items": { "$ref": "#/$defs/mapping" } },
+        "extensions": { "type": "object" }
+      }
+    },
+
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$"
+    },
+
+    "nameList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+    },
+
+    "requiredNameList": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+    },
+
+    "expression": { "type": "string", "minLength": 1, "maxLength": 500 },
+
+    "anchor": {
+      "enum": [
+        "CASE_CREATED", "CASE_CLOSED", "CASE_CANCELLED",
+        "USER_TASK_CREATED", "USER_TASK_COMPLETED", "USER_TASK_DELETED",
+        "ACTIVITY_STARTED", "ACTIVITY_COMPLETED", "ACTIVITY_CANCELLED",
+        "MILESTONE_REACHED", "MILESTONE_CANCELLED"
+      ]
+    },
+
+    "duration": {
+      "description": "ISO-8601 duration, e.g. P5D or PT4H30M.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^P(?:\\d+[YMWD])*(?:T(?:\\d+(?:\\.\\d+)?[HMS])+)?$"
+    }
+  }
+}

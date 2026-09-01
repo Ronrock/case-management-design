@@ -4,9 +4,14 @@ import org.casemgmt.engine.EngineCommandDispatcher;
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.OutboxEngineGateway;
 import org.casemgmt.engine.remote.RemoteEngineGateway;
-import org.casemgmt.repo.CaseTaskRepository;
+import org.casemgmt.engine.remote.RemoteObservationPoller;
+import org.casemgmt.engine.remote.RemoteProcessActivityClassifier;
+import org.casemgmt.orchestration.OrchestrationDeploymentPort;
+import org.casemgmt.orchestration.OutboxOrchestrationDeploymentPort;
 import org.casemgmt.repo.EngineCommandRepository;
-import org.casemgmt.repo.LinkedProcessRepository;
+import org.casemgmt.projection.ActiveBpmnCaseRepository;
+import org.casemgmt.projection.CaseProjectionPort;
+import org.casemgmt.projection.RemotePollingCheckpointRepository;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -128,13 +133,29 @@ public class RemoteEngineAutoConfiguration {
         return new RemoteEngineGateway(engineRestClient);
     }
 
+    @Bean
+    public RemoteObservationPoller remoteObservationPoller(
+            RestClient engineRestClient, ActiveBpmnCaseRepository activeCases,
+            org.casemgmt.repo.CaseRepository cases, RemoteProcessActivityClassifier classifier,
+            org.casemgmt.observation.RemoteObservationIngestionService ingestion,
+            org.casemgmt.observation.RemoteObservationInboxWorker inboxWorker) {
+        return new RemoteObservationPoller(engineRestClient, activeCases, cases, classifier,
+                ingestion, inboxWorker);
+    }
+
+    @Bean
+    public RemoteProcessActivityClassifier remoteProcessActivityClassifier(
+            RestClient engineRestClient) {
+        return new RemoteProcessActivityClassifier(engineRestClient);
+    }
+
     /**
      * What the services get: writes commands in the local transaction (spec §3.5).
      *
      * <p>{@code @Primary} is a fix beyond the brief: {@code RemoteEngineGateway} itself
      * implements {@link EngineGateway} (deliberately, so {@code EngineCommandDispatcher} can
      * call it directly), so without a tie-breaker, every plain {@code EngineGateway} injection
-     * point in {@code CaseManagementAutoConfiguration} (e.g. {@code transitionApplier}) fails to
+     * point in {@code CaseManagementAutoConfiguration} fails to
      * start in remote mode with {@code NoUniqueBeanDefinitionException: expected single matching
      * bean but found 2: remoteEngineGateway,outboxEngineGateway} — confirmed by running
      * {@code AutoConfigurationTest.remoteModeRegistersTheOutboxGateway} without this annotation.
@@ -148,31 +169,34 @@ public class RemoteEngineAutoConfiguration {
         return new OutboxEngineGateway(commands, id -> { });
     }
 
+    @Bean
+    public OrchestrationDeploymentPort remoteOrchestrationDeploymentPort(
+            EngineCommandRepository commands) {
+        return new OutboxOrchestrationDeploymentPort(commands);
+    }
+
     /**
-     * The {@code SyncReporter} lambda reports against one of two correlation keys depending on
-     * which command type is being confirmed ({@code EngineCommandDispatcher.SyncReporter}'s
-     * Javadoc): a {@code planItemId} for {@code CREATE_TASK}, or a {@code CM_LINKED_PROCESS} row
-     * id for {@code START_PROCESS}. The brief's own sketch only wired the task half (and used the
-     * wrong lookup — {@code CaseTaskRepository.findByCase} takes a case id, not a plan item id,
-     * fixed below via {@link CaseTaskRepository#findByPlanItemId}) and left {@code
-     * LinkedProcessRepository} untouched, which would have meant a linked process started in
-     * remote mode never leaves {@code ENGINE_SYNC_ = PENDING} once the outbox actually confirms
-     * it. Both repository calls are safe to make unconditionally for every report: ids are minted
-     * by {@code CaseIds.newId()} and are therefore globally unique, so a task-shaped key can never
-     * match a linked-process row and vice versa — the "wrong" call is just a harmless no-op
-     * (an absent {@code Optional} for the task lookup, a zero-row UPDATE for the linked-process
-     * one).
+     * Task confirmations remain single-row sync reports. Process start success takes the richer
+     * callback so the linked row and, for a root, the owning case receive the real engine identity
+     * in one transaction. A definitive process-start failure updates only the waiting link state.
      */
     @Bean
-    public EngineCommandDispatcher engineCommandDispatcher(EngineCommandRepository commands,
-                                                            RemoteEngineGateway delegate,
-                                                            CaseTaskRepository tasks,
-                                                            LinkedProcessRepository linkedProcesses) {
+    public org.casemgmt.observation.CommandConfirmationLifecycleReporter commandConfirmationLifecycleReporter(
+            org.casemgmt.repo.CaseRepository cases,
+            org.casemgmt.repo.LinkedProcessRepository processes,
+            org.casemgmt.observation.EngineObservationHandler lifecycle) {
+        return new org.casemgmt.observation.CommandConfirmationLifecycleReporter(cases, processes,
+                lifecycle);
+    }
+
+    @Bean
+    public EngineCommandDispatcher engineCommandDispatcher(
+            EngineCommandRepository commands, RemoteEngineGateway delegate,
+            org.casemgmt.event.EventPublisher events,
+            org.casemgmt.observation.CommandConfirmationLifecycleReporter lifecycleReporter) {
         return new EngineCommandDispatcher(commands, delegate,
-                (correlationKey, sync, engineId) -> {
-                    tasks.findByPlanItemId(correlationKey)
-                            .ifPresent(t -> tasks.markSync(t.id(), sync, engineId));
-                    linkedProcesses.markSync(correlationKey, sync, engineId);
-                });
+                "remote-dispatcher-" + java.util.UUID.randomUUID(),
+                java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(5), events,
+                lifecycleReporter::confirmed);
     }
 }

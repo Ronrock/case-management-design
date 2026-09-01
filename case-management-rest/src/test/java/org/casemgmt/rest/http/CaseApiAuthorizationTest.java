@@ -91,13 +91,11 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
     }
 
     @Test
-    void aNonParticipantCannotDrivePlanItems() {
+    void planItemProjectionIsReadOnlyForParticipantsAndNonParticipants() {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");
 
         Map<String, Object> item = activePlanItem(caseId);
-        String itemId = (String) item.get("id");
-        String etag = "\"" + ((Number) item.get("version")).longValue() + "\"";
 
         ResponseEntity<List> carolsView = client("carol").get()
                 .uri("/cases/{id}/plan-items", caseId).retrieve().toEntity(List.class);
@@ -105,25 +103,12 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         assertThat((List<Map<String, Object>>) carolsView.getBody())
                 .allSatisfy(i -> assertThat((List<?>) i.get("availableActions")).isEmpty());
 
-        ResponseEntity<Map> terminate = client("carol").post()
-                .uri("/cases/{c}/plan-items/{i}/terminate", caseId, itemId)
-                .header("If-Match", etag)
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("reason", "no"))
-                .retrieve().toEntity(Map.class);
-        assertThat(terminate.getStatusCode().value()).isEqualTo(409);
-        assertThat(terminate.getBody()).containsEntry("code", "action-not-available");
-
-        // Still ACTIVE — the refusal stopped the write, it did not merely report on it.
-        assertThat(activePlanItem(caseId)).containsEntry("id", itemId);
-
-        // And the owner's identical call goes through.
-        ResponseEntity<Map> ownersTerminate = alice().post()
-                .uri("/cases/{c}/plan-items/{i}/terminate", caseId, itemId)
-                .header("If-Match", etag)
-                .contentType(MediaType.APPLICATION_JSON).body(Map.of("reason", "no"))
-                .retrieve().toEntity(Map.class);
-        assertThat(ownersTerminate.getStatusCode().value()).isEqualTo(200);
-        assertThat(ownersTerminate.getBody()).containsEntry("state", "TERMINATED");
+        ResponseEntity<List> ownersView = alice().get()
+                .uri("/cases/{id}/plan-items", caseId).retrieve().toEntity(List.class);
+        assertThat(ownersView.getStatusCode().value()).isEqualTo(200);
+        assertThat((List<Map<String, Object>>) ownersView.getBody())
+                .allSatisfy(i -> assertThat((List<?>) i.get("availableActions")).isEmpty());
+        assertThat(activePlanItem(caseId)).containsEntry("id", item.get("id"));
     }
 
     /**
@@ -249,27 +234,11 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
     }
 
     @Test
-    void aNonParticipantCannotAchieveAMilestone() {
-        Map<String, Object> created = deployAndCreateCase();
-        String caseId = (String) created.get("id");
-        String planItemId = (String) planItems(caseId).stream()
-                .filter(i -> "MILESTONE".equals(i.get("type"))).findFirst().orElseThrow().get("id");
-        String milestoneId = "ms-" + UUID.randomUUID();
-        milestoneRepo.insert(milestoneId, caseId, planItemId, "Checkpoint");
-
-        ResponseEntity<Map> refused = client("carol").post()
-                .uri("/cases/{c}/milestones/{m}/achieve", caseId, milestoneId)
-                .header("If-Match", "\"0\"").retrieve().toEntity(Map.class);
-        assertThat(refused.getStatusCode().value()).isEqualTo(409);
-        assertThat(refused.getBody()).containsEntry("code", "action-not-available");
-
-        assertThat(milestone(caseId, milestoneId)).containsEntry("achieved", false);
-
-        ResponseEntity<Map> allowed = alice().post()
-                .uri("/cases/{c}/milestones/{m}/achieve", caseId, milestoneId)
-                .header("If-Match", "\"0\"").retrieve().toEntity(Map.class);
-        assertThat(allowed.getStatusCode().value()).isEqualTo(200);
-        assertThat(allowed.getBody()).containsEntry("achieved", true);
+    void manualMilestoneAchievementRouteIsAbsentForEveryCaller() {
+        ResponseEntity<Map> response = client("carol").post()
+                .uri("/cases/{c}/milestones/{m}/achieve", "case", "milestone")
+                .retrieve().toEntity(Map.class);
+        assertThat(response.getStatusCode().value()).isEqualTo(404);
     }
 
     @Test
@@ -277,6 +246,10 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");
         Map<String, Object> body = Map.of("processDefinitionKey", "some-process");
+        List<Map<String, Object>> before = (List<Map<String, Object>>) alice().get()
+                .uri("/cases/{id}/processes", caseId).retrieve().toEntity(List.class).getBody();
+        assertThat(before).singleElement()
+                .satisfies(p -> assertThat(p).containsEntry("processDefinitionKey", DEFINITION_KEY));
 
         ResponseEntity<Map> refused = client("carol").post().uri("/cases/{id}/processes", caseId)
                 .header("If-Match", "\"0\"")
@@ -285,14 +258,18 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         assertThat(refused.getStatusCode().value()).isEqualTo(409);
         assertThat(refused.getBody()).containsEntry("code", "action-not-available");
 
-        assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseId)
-                .retrieve().toEntity(List.class).getBody()).isEmpty();
+        assertThat((List<Map<String, Object>>) alice().get().uri("/cases/{id}/processes", caseId)
+                .retrieve().toEntity(List.class).getBody())
+                .extracting(p -> p.get("id")).containsExactlyElementsOf(
+                        before.stream().map(p -> p.get("id")).toList());
 
         ResponseEntity<Map> allowed = alice().post().uri("/cases/{id}/processes", caseId)
                 .header("If-Match", "\"0\"")
                 .contentType(MediaType.APPLICATION_JSON).body(body)
                 .retrieve().toEntity(Map.class);
         assertThat(allowed.getStatusCode().value()).isEqualTo(201);
+        assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseId)
+                .retrieve().toEntity(List.class).getBody()).hasSize(2);
     }
 
     @Test
@@ -341,7 +318,7 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         deployDefinition();
 
         ResponseEntity<Map> deploy = client("carol").post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON).body(definitionJson())
+                .contentType(MediaType.valueOf("application/zip")).body(definitionArchive())
                 .retrieve().toEntity(Map.class);
         assertThat(deploy.getStatusCode().value()).isEqualTo(409);
         assertThat(deploy.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
@@ -367,7 +344,7 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
 
         // alice, who is admin, does both on the same URLs with the same bodies.
         assertThat(alice().post().uri("/case-definitions")
-                .contentType(MediaType.APPLICATION_JSON).body(definitionJson())
+                .contentType(MediaType.valueOf("application/zip")).body(definitionArchive())
                 .retrieve().toEntity(Map.class).getStatusCode().value()).isEqualTo(201);
         assertThat(alice().post().uri("/webhooks").contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("url", "https://alice.test/hook", "eventTypes", List.of("case.created")))
@@ -525,6 +502,12 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
 
         String foreignPlanItemId = (String) planItems(caseB).get(0).get("id");
         String ownPlanItemId = (String) planItems(caseA).get(0).get("id");
+        List<?> caseAProcessesBefore = alice().get().uri("/cases/{id}/processes", caseA)
+                .retrieve().toEntity(List.class).getBody();
+        List<?> caseBProcessesBefore = alice().get().uri("/cases/{id}/processes", caseB)
+                .retrieve().toEntity(List.class).getBody();
+        assertThat(caseAProcessesBefore).hasSize(1);
+        assertThat(caseBProcessesBefore).hasSize(1);
 
         ResponseEntity<Map> refused = alice().post().uri("/cases/{id}/processes", caseA)
                 .header("If-Match", "\"0\"")
@@ -537,11 +520,11 @@ class CaseApiAuthorizationTest extends CaseApiHttpTestBase {
         assertThat(refused.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
         assertThat(refused.getBody()).containsEntry("code", "wrong-case");
 
-        // No row was written to either case.
+        // No child row was written to either case; each still has only its BPMN root process.
         assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseA)
-                .retrieve().toEntity(List.class).getBody()).isEmpty();
+                .retrieve().toEntity(List.class).getBody()).hasSize(1);
         assertThat((List<?>) alice().get().uri("/cases/{id}/processes", caseB)
-                .retrieve().toEntity(List.class).getBody()).isEmpty();
+                .retrieve().toEntity(List.class).getBody()).hasSize(1);
 
         // An id that names no plan item at all gets the identical answer — no existence oracle.
         ResponseEntity<Map> unknown = alice().post().uri("/cases/{id}/processes", caseA)

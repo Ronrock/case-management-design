@@ -405,7 +405,8 @@ public class CaseController {
         CaseSnapshot snapshot = cases.snapshot(c);
         List<AvailableAction> actions = filterCaseActions(c, actor,
                 policy.listForCase(snapshot, roles));
-        return CaseResponse.of(c, actions, policy.listForCollaboration(snapshot, roles));
+        return CaseResponse.of(c, actions, policy.listForCollaboration(snapshot, roles),
+                caseReadDecision(actor, c));
     }
 
     /**
@@ -420,6 +421,11 @@ public class CaseController {
         Map<String, Set<String>> rolesByCase = callers.roles(ids, actor);
         Map<String, List<PlanItem>> itemsByCase = planItemRepo.findByCases(ids);
         Map<String, CaseDefinition> definitions = new HashMap<>();
+        Map<String, PermissionDecision> fieldDecisions = rows.isEmpty() ? Map.of()
+                : permissions.evaluate(actor, rows.getFirst().tenantId(), PermissionActions.CASE_READ,
+                        ResourceTypes.CASE, rows.stream()
+                                .map(c -> new WorkerPermissionResource(c.id(), caseContext(c)))
+                                .toList());
 
         return rows.stream().map(c -> {
             CaseDefinition definition =
@@ -429,7 +435,8 @@ public class CaseController {
             Set<String> roles = rolesByCase.get(c.id());
             return CaseResponse.of(c, filterCaseActions(c, actor,
                     policy.listForCase(snapshot, roles)),
-                    policy.listForCollaboration(snapshot, roles));
+                    policy.listForCollaboration(snapshot, roles),
+                    fieldDecisions.getOrDefault(c.id(), PermissionDecision.deny(c.id())));
         }).toList();
     }
 
@@ -484,6 +491,13 @@ public class CaseController {
     private void assertCasePermission(Actor actor, CaseInstance c, String action) {
         permissions.assertAllowed(actor, c.tenantId(), action, ResourceTypes.CASE, c.id(),
                 caseContext(c));
+    }
+
+    private PermissionDecision caseReadDecision(Actor actor, CaseInstance c) {
+        return permissions.evaluate(actor, c.tenantId(), PermissionActions.CASE_READ,
+                        ResourceTypes.CASE,
+                        List.of(new WorkerPermissionResource(c.id(), caseContext(c))))
+                .getOrDefault(c.id(), PermissionDecision.deny(c.id()));
     }
 
     private List<AvailableAction> filterCaseActions(CaseInstance c, Actor actor,

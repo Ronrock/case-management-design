@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:operaton="http://operaton.org/schema/1.0/bpmn"
+                  xmlns:casemgmt="https://casemgmt.org/bpmn"
+                  id="complaint-bpmn-definitions" targetNamespace="https://casemgmt.org/poc">
+  <bpmn:process id="complaint" name="Complaint handling (BPMN)" isExecutable="true"
+                operaton:historyTimeToLive="180" casemgmt:slaTargetId="resolution">
+    <bpmn:startEvent id="start"/>
+    <bpmn:sequenceFlow id="to-intake" sourceRef="start" targetRef="intake"/>
+    <bpmn:subProcess id="intake" name="Intake" casemgmt:stage="true">
+      <bpmn:startEvent id="intake-start"/>
+      <bpmn:sequenceFlow id="intake-to-register" sourceRef="intake-start" targetRef="register"/>
+      <bpmn:userTask id="register" name="Register complaint" operaton:formKey="registerForm"
+                     operaton:candidateGroups="intake"/>
+      <bpmn:sequenceFlow id="register-to-intake-end" sourceRef="register" targetRef="intake-end"/>
+      <bpmn:endEvent id="intake-end"/>
+    </bpmn:subProcess>
+    <bpmn:sequenceFlow id="to-acknowledged" sourceRef="intake" targetRef="acknowledged"/>
+    <bpmn:intermediateThrowEvent id="acknowledged" name="Acknowledged"
+                                casemgmt:milestoneId="acknowledged"/>
+    <bpmn:sequenceFlow id="to-assessment" sourceRef="acknowledged" targetRef="assessment"/>
+    <bpmn:subProcess id="assessment" name="Assessment" casemgmt:stage="true">
+      <bpmn:startEvent id="assessment-start"/>
+      <bpmn:sequenceFlow id="assessment-to-task" sourceRef="assessment-start" targetRef="assess"/>
+      <bpmn:userTask id="assess" name="Assess complaint" operaton:formKey="assessForm"
+                     operaton:candidateGroups="handlers"/>
+      <bpmn:sequenceFlow id="assessment-to-end" sourceRef="assess" targetRef="assessment-end"/>
+      <bpmn:endEvent id="assessment-end"/>
+    </bpmn:subProcess>
+    <bpmn:sequenceFlow id="to-decided" sourceRef="assessment" targetRef="decided"/>
+    <bpmn:intermediateThrowEvent id="decided" name="Decided" casemgmt:milestoneId="decided"/>
+    <bpmn:sequenceFlow id="to-close" sourceRef="decided" targetRef="close-complaint"/>
+    <bpmn:userTask id="close-complaint" name="Close complaint" operaton:formKey="closeForm"
+                   operaton:candidateGroups="handlers"/>
+    <bpmn:sequenceFlow id="to-end" sourceRef="close-complaint" targetRef="end"/>
+    <bpmn:endEvent id="end"/>
+  </bpmn:process>
+</bpmn:definitions>

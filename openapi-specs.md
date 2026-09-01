@@ -52,18 +52,28 @@ paths:
                 items: {$ref: '#/components/schemas/CaseDefinition'}
     post:
       tags: [Case Definitions]
-      summary: Deploy a new case definition (new key or new version)
+      summary: Publish a combined BPMN definition
+      description: >
+        Requires the administrator identity group. `application/zip` publishes orchestration,
+        contract, and presentation artifacts and returns the resulting
+        BPMN binding lifecycle. A combined 201 response does not mean the binding is runnable:
+        embedded deployment is normally ACTIVE, while remote deployment can return
+        deploymentStatus DEPLOYING with bindingStatus DRAFT until its verified report arrives.
       requestBody:
         required: true
         content:
-          application/json:
-            schema: {$ref: '#/components/schemas/CaseDefinition'}
+          application/zip:
+            schema:
+              type: string
+              format: binary
       responses:
         '201':
-          description: Deployed
+          description: >
+            Combined BPMN binding created. Inspect the response lifecycle fields before starting
+            cases; only an ACTIVE binding is runnable.
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/CaseDefinition'}
+              schema: {$ref: '#/components/schemas/CaseDefinitionBindingResponse'}
         '400': {$ref: '#/components/responses/BadRequest'}
 
   /case-definitions/{key}:
@@ -94,6 +104,129 @@ paths:
               schema:
                 type: array
                 items: {$ref: '#/components/schemas/CaseDefinition'}
+    post:
+      tags: [Case Definitions]
+      summary: Bind exact immutable releases as a new case-definition version
+      description: >
+        Requires the administrator identity group. The supplied release IDs are immutable and
+        must belong to this definition key and tenant. Independent binding accepts only ACTIVE
+        constituent releases, so a successful 201 response has bindingStatus ACTIVE and is
+        runnable. A non-active release is rejected rather than silently bound.
+      parameters: [{$ref: '#/components/parameters/definitionKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CaseDefinitionBindingRequest'}
+      responses:
+        '201':
+          description: Exact release binding created
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionBindingResponse'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /case-definitions/{key}/orchestration-releases:
+    post:
+      tags: [Case Definitions]
+      summary: Publish an immutable orchestration release
+      description: >
+        Requires the administrator identity group. A 201 response means the immutable release
+        was persisted, not necessarily activated. Status is ACTIVE after verified synchronous
+        deployment, DEPLOYING while remote verification is pending, or FAILED with a bounded
+        failureDetail after definitive validation/deployment failure. Only ACTIVE is usable.
+      parameters: [{$ref: '#/components/parameters/definitionKey'}]
+      requestBody:
+        required: true
+        content:
+          application/zip:
+            schema: {type: string, format: binary}
+          application/xml:
+            schema: {type: string, format: binary}
+          application/bpmn+xml:
+            schema: {type: string, format: binary}
+      responses:
+        '201':
+          description: Immutable orchestration release persisted
+          headers:
+            Location: {$ref: '#/components/headers/ReleaseLocation'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionRelease'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /case-definitions/{key}/contract-releases:
+    post:
+      tags: [Case Definitions]
+      summary: Publish an immutable contract release
+      description: >
+        Requires the administrator identity group. A 201 response means the immutable release
+        was persisted. Status is ACTIVE after successful validation or FAILED with a bounded
+        failureDetail; only ACTIVE may be bound.
+      parameters: [{$ref: '#/components/parameters/definitionKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+          application/schema+json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        '201':
+          description: Immutable contract release persisted
+          headers:
+            Location: {$ref: '#/components/headers/ReleaseLocation'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionRelease'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /case-definitions/{key}/presentation-releases:
+    post:
+      tags: [Case Definitions]
+      summary: Publish an immutable presentation release
+      description: >
+        Requires the administrator identity group. A 201 response means the immutable release
+        was persisted. Status is ACTIVE after successful validation or FAILED with a bounded
+        failureDetail; only ACTIVE may be bound.
+      parameters: [{$ref: '#/components/parameters/definitionKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        '201':
+          description: Immutable presentation release persisted
+          headers:
+            Location: {$ref: '#/components/headers/ReleaseLocation'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionRelease'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+
+  /case-definitions/{key}/releases/{releaseId}:
+    get:
+      tags: [Case Definitions]
+      summary: Get immutable release lifecycle metadata (administrator only)
+      description: >
+        Returns lifecycle metadata for orchestration, contract, or presentation releases.
+        Publication Location headers point here. A FAILED release remains retrievable with a
+        bounded diagnostic; kind-specific contract and presentation content downloads are
+        unchanged.
+      parameters:
+        - {$ref: '#/components/parameters/definitionKey'}
+        - name: releaseId
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Release metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CaseDefinitionRelease'}
+        '404': {$ref: '#/components/responses/NotFound'}
 
   /case-definitions/{key}/forms/{formKey}:
     get:
@@ -234,7 +367,10 @@ paths:
               schema: {$ref: '#/components/schemas/Case'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '409':
-          description: Idempotency-Key reused with a different payload
+          description: >
+            Conflict. Includes idempotency-key reuse and a case definition or exact BPMN
+            binding that is not active. Clients branch on the problem code, including
+            `case-definition-not-active` and `case-definition-binding-not-active`.
 
   /cases/{caseId}:
     parameters: [{$ref: '#/components/parameters/caseId'}]
@@ -772,6 +908,40 @@ paths:
         '400': {description: Payload fails form schema validation}
         '412': {$ref: '#/components/responses/PreconditionFailed'}
 
+  /cases/{caseId}/ad-hoc-actions/{actionId}:
+    post:
+      tags: [Cases]
+      summary: Request a declared discretionary BPMN action
+      description: >
+        Resolves the action from the immutable contract pinned to the case. Remote execution
+        returns a durable operation receipt; a task, process, or message is not confirmed until
+        normal engine command and observation evidence arrives.
+      parameters:
+        - {$ref: '#/components/parameters/caseId'}
+        - {$ref: '#/components/parameters/ifMatch'}
+        - {$ref: '#/components/parameters/idempotencyKey'}
+        - name: actionId
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: true}
+      responses:
+        '201':
+          description: Embedded engine confirmation
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AdHocActionOperation'}}
+        '202':
+          description: Durable remote action request; repeat the same Idempotency-Key to retrieve it
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AdHocActionOperation'}}
+        '403': {description: Caller cannot access this case or action}
+        '409': {description: Action is unavailable or case is not active}
+        '412': {$ref: '#/components/responses/PreconditionFailed'}
+
   # ---------- Processes ----------
   /cases/{caseId}/processes:
     parameters: [{$ref: '#/components/parameters/caseId'}]
@@ -824,25 +994,6 @@ paths:
               schema:
                 type: array
                 items: {$ref: '#/components/schemas/Milestone'}
-
-  /cases/{caseId}/milestones/{milestoneId}/achieve:
-    post:
-      tags: [Milestones]
-      summary: Manually achieve a milestone (emits milestone.achieved event)
-      parameters:
-        - {$ref: '#/components/parameters/caseId'}
-        - name: milestoneId
-          in: path
-          required: true
-          schema: {type: string}
-        - {$ref: '#/components/parameters/ifMatch'}
-      responses:
-        '200':
-          description: Achieved
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/Milestone'}
-        '409': {description: Already achieved}
 
   # ---------- SLA ----------
   /sla-policies:
@@ -1572,6 +1723,13 @@ components:
     ETag:
       description: Current entity version for optimistic concurrency
       schema: {type: string}
+    ReleaseLocation:
+      description: >
+        Administrator metadata URL for the persisted release:
+        `/case-api/v2/case-definitions/{key}/releases/{releaseId}`.
+      schema:
+        type: string
+        format: uri-reference
 
   responses:
     BadRequest:
@@ -1602,7 +1760,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Case'}
     PlanItemResponse:
-      description: Updated plan item (plan model re-evaluated)
+      description: Updated BPMN-derived plan-item projection
       content:
         application/json:
           schema: {$ref: '#/components/schemas/PlanItem'}
@@ -1810,12 +1968,18 @@ components:
       type: string
       enum: [CREATED, ACTIVE, SUSPENDED, CLOSED, CANCELLED]
 
+    ProjectionStatus:
+      type: string
+      description: Currency of the case-management projection relative to the BPMN engine
+      enum: [PENDING, CURRENT, STALE, FAILED]
+
     Case:
       type: object
       properties:
         id: {type: string, description: 'Globally unique: {engineId}:{uuid}'}
         engineId: {type: string}
         tenantId: {type: string}
+        caseDefinitionId: {type: string}
         caseDefinitionKey: {type: string}
         caseDefinitionVersion: {type: integer}
         businessKey: {type: string, nullable: true}
@@ -1826,15 +1990,21 @@ components:
         queueId: {type: string, nullable: true}
         initiator: {type: string, nullable: true}
         slaStatus: {type: string, enum: [ON_TRACK, WARNING, BREACHED, NONE]}
-        # Added in Task 27: both are emitted on every case response and were undeclared.
+        # These fields are emitted on every case response and must remain declared because the
+        # response schema is closed by the conformance validator.
         # `version` is not decoration — it is the value of the ETag, so a client written from this
         # document could not have found the number it needs for the next If-Match.
         outcome: {type: string, nullable: true}
+        cancelReason: {type: string, nullable: true}
         version: {type: integer, format: int64}
         variables: {$ref: '#/components/schemas/Variables'}
         createdAt: {type: string, format: date-time}
         updatedAt: {type: string, format: date-time}
         closedAt: {type: string, format: date-time, nullable: true}
+        rootProcessInstanceId: {type: string, nullable: true}
+        projectionStatus: {$ref: '#/components/schemas/ProjectionStatus'}
+        lastEngineUpdateAt: {type: string, format: date-time, nullable: true}
+        lastProjectedAt: {type: string, format: date-time, nullable: true}
         availableActions:
           type: array
           items: {$ref: '#/components/schemas/AvailableAction'}
@@ -1915,6 +2085,118 @@ components:
               condition: {type: string, description: FEEL/JUEL expression}
               queueId: {type: string}
         deployedAt: {type: string, format: date-time, readOnly: true}
+        orchestrationMode:
+          type: string
+          enum: [BPMN]
+          readOnly: true
+        orchestrationReleaseId: {type: string, readOnly: true}
+        orchestrationSha256: {type: string, readOnly: true}
+        contractReleaseId: {type: string, readOnly: true}
+        contractSha256: {type: string, readOnly: true}
+        presentationReleaseId: {type: string, readOnly: true}
+        presentationSha256: {type: string, readOnly: true}
+        deploymentStatus:
+          type: string
+          enum: [DRAFT, VALIDATED, DEPLOYING, ACTIVE, FAILED, RETIRED]
+          readOnly: true
+        bindingStatus:
+          type: string
+          enum: [DRAFT, ACTIVE, RETIRED, FAILED]
+          readOnly: true
+        boundAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        activatedAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        retiredAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        engineProcessDefinitionKey:
+          type: string
+          nullable: true
+          readOnly: true
+          description: Descriptive engine key; never used as the exact runtime selector.
+        engineProcessDefinitionVersion:
+          type: integer
+          nullable: true
+          readOnly: true
+        engineTenantId: {type: string, nullable: true, readOnly: true}
+
+    CaseDefinitionRelease:
+      type: object
+      required: [id, definitionKey, kind, sha256, mediaType, status, publishedAt]
+      additionalProperties: false
+      properties:
+        id: {type: string, readOnly: true}
+        definitionKey: {type: string, readOnly: true}
+        kind:
+          type: string
+          enum: [ORCHESTRATION, CONTRACT, PRESENTATION]
+          readOnly: true
+        sha256: {type: string, readOnly: true}
+        mediaType: {type: string, readOnly: true}
+        status:
+          type: string
+          enum: [DRAFT, VALIDATED, DEPLOYING, ACTIVE, FAILED, RETIRED]
+          readOnly: true
+        failureDetail:
+          type: string
+          nullable: true
+          maxLength: 2000
+          readOnly: true
+          description: Bounded operator diagnostic; present when publication or deployment failed.
+        publishedAt: {type: string, format: date-time, readOnly: true}
+
+    CaseDefinitionBindingRequest:
+      type: object
+      required: [orchestrationReleaseId, contractReleaseId, presentationReleaseId]
+      additionalProperties: false
+      properties:
+        orchestrationReleaseId: {type: string}
+        contractReleaseId: {type: string}
+        presentationReleaseId: {type: string}
+
+    CaseDefinitionBindingResponse:
+      type: object
+      required:
+        - caseDefinitionId
+        - orchestrationMode
+        - orchestrationReleaseId
+        - orchestrationSha256
+        - contractReleaseId
+        - contractSha256
+        - presentationReleaseId
+        - presentationSha256
+        - deploymentStatus
+        - bindingStatus
+        - boundAt
+      additionalProperties: false
+      properties:
+        caseDefinitionId: {type: string, readOnly: true}
+        orchestrationMode:
+          type: string
+          enum: [BPMN]
+          readOnly: true
+        orchestrationReleaseId: {type: string, readOnly: true}
+        orchestrationSha256: {type: string, readOnly: true}
+        contractReleaseId: {type: string, readOnly: true}
+        contractSha256: {type: string, readOnly: true}
+        presentationReleaseId: {type: string, readOnly: true}
+        presentationSha256: {type: string, readOnly: true}
+        deploymentStatus:
+          type: string
+          enum: [DRAFT, VALIDATED, DEPLOYING, ACTIVE, FAILED, RETIRED]
+          readOnly: true
+        bindingStatus:
+          type: string
+          enum: [DRAFT, ACTIVE, RETIRED, FAILED]
+          readOnly: true
+        boundAt: {type: string, format: date-time, readOnly: true}
+        activatedAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        retiredAt: {type: string, format: date-time, nullable: true, readOnly: true}
+        engineDeploymentId: {type: string, nullable: true, readOnly: true}
+        engineProcessDefinitionId: {type: string, nullable: true, readOnly: true}
+        engineProcessDefinitionKey: {type: string, nullable: true, readOnly: true}
+        engineProcessDefinitionVersion:
+          type: integer
+          nullable: true
+          readOnly: true
+        engineTenantId: {type: string, nullable: true, readOnly: true}
 
     PlanItemDefinition:
       type: object
@@ -1961,6 +2243,10 @@ components:
         adHoc: {type: boolean}
         taskId: {type: string, nullable: true}
         processInstanceId: {type: string, nullable: true}
+        engineActivityId: {type: string, nullable: true}
+        projectionStatus: {$ref: '#/components/schemas/ProjectionStatus'}
+        lastEngineUpdateAt: {type: string, format: date-time, nullable: true}
+        lastProjectedAt: {type: string, format: date-time, nullable: true}
         availableActions:
           type: array
           items: {$ref: '#/components/schemas/AvailableAction'}
@@ -2003,10 +2289,25 @@ components:
         # difference — availableActions is empty until it reads SYNCED.
         state: {type: string, enum: [OPEN, CLAIMED, COMPLETED, TERMINATED]}
         engineSync: {type: string, enum: [PENDING, SYNCED, FAILED]}
+        projectionStatus: {$ref: '#/components/schemas/ProjectionStatus'}
+        lastEngineUpdateAt: {type: string, format: date-time, nullable: true}
+        lastProjectedAt: {type: string, format: date-time, nullable: true}
         version: {type: integer, format: int64}
         availableActions:
           type: array
           items: {$ref: '#/components/schemas/AvailableAction'}
+
+    AdHocActionOperation:
+      type: object
+      required: [actionId, type, status, engineSync]
+      properties:
+        actionId: {type: string}
+        type: {type: string, enum: [TASK, PROCESS, MESSAGE]}
+        operationId: {type: string, nullable: true}
+        status: {type: string, enum: [PENDING, CONFIRMED, FAILED, RETRYABLE, AWAITING_CONFIRMATION]}
+        engineSync: {type: string, enum: [PENDING, SYNCED, FAILED]}
+        taskId: {type: string, nullable: true}
+        linkedProcessId: {type: string, nullable: true}
 
     LinkedProcess:
       type: object

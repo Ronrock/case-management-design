@@ -40,7 +40,7 @@ class EngineCommandClaimSafetyTest extends OracleTestBase {
     @BeforeEach
     void setUp() {
         jdbc().sql("DELETE FROM CM_ENGINE_COMMAND").update();
-        commands = new EngineCommandRepository(jdbc());
+        commands = new EngineCommandRepository(dataSource());
     }
 
     @Test
@@ -86,21 +86,24 @@ class EngineCommandClaimSafetyTest extends OracleTestBase {
         start.await();
         // A fresh repository over the SAME pooled DataSource: each claimDue call borrows its
         // own physical connection, exactly like two independent dispatcher instances would.
-        return new EngineCommandRepository(jdbc()).claimDue(limit);
+        return new EngineCommandRepository(dataSource()).claimDue(limit);
     }
 
     @Test
-    void staleClaimsBecomeReclaimableOnceTheLeaseExpires() {
+    void staleClaimsAreQuarantinedInsteadOfBlindlyReclaimedOnceTheLeaseExpires() {
         enqueue(1);
         assertThat(commands.claimDue(10)).hasSize(1);
 
-        // Simulate a dispatcher that claimed the row and then died before finishing: back-date
-        // CLAIMED_AT_ past the lease instead of calling markDone/markRetry/markDead — nothing
-        // else ever un-claims a row otherwise.
-        jdbc().sql("UPDATE CM_ENGINE_COMMAND SET CLAIMED_AT_ = SYSTIMESTAMP - INTERVAL '10' MINUTE")
+        // Simulate a dispatcher that claimed the row and then died before finishing. Keep the
+        // persisted lease strictly after its decision (the exact temporal contract) while making
+        // it due before the next repository clock read. A possibly-sent crash is quarantined.
+        jdbc().sql("UPDATE CM_ENGINE_COMMAND SET LEASE_EXPIRES_AT_ = "
+                        + "DECIDED_AT_ + INTERVAL '0.000001' SECOND")
                 .update();
 
-        assertThat(commands.claimDue(10)).hasSize(1);
+        assertThat(commands.claimDue(10)).isEmpty();
+        assertThat(jdbc().sql("SELECT STATUS_ FROM CM_ENGINE_COMMAND")
+                .query(String.class).single()).isEqualTo("AWAITING_CONFIRMATION");
     }
 
     @Test
@@ -115,7 +118,11 @@ class EngineCommandClaimSafetyTest extends OracleTestBase {
     private void enqueue(int n) {
         for (int i = 0; i < n; i++) {
             commands.enqueue(new EngineCommand("cmd-" + UUID.randomUUID(), "eng-a:1",
-                    EngineCommand.Type.CREATE_TASK, Map.of("planItemId", "pi-" + i, "name", "T"),
+                    EngineCommand.Type.CREATE_TASK, Map.of(
+                            "planItemId", "pi-" + i,
+                            "name", "T",
+                            "candidateGroups", List.of(),
+                            "variables", Map.of()),
                     "PENDING", 0, OffsetDateTime.now(), null));
         }
     }

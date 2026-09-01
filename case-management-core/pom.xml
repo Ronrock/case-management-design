@@ -47,6 +47,11 @@
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
     </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+      <scope>test</scope>
+    </dependency>
     <!-- JUEL: pulled in on its own, NOT via operaton-engine, so core stays engine-free.
          org.operaton.bpm.impl.juel is an expression library, not the process engine. -->
     <dependency>
@@ -81,9 +86,8 @@
 
   <build>
     <plugins>
-      <!-- Publishes only EngineGatewayContract so case-management-engine-embedded and
-           case-management-engine-remote can subclass the shared contract without receiving
-           every core test class in their dependency graph. -->
+      <!-- Publishes only the shared fixture classes and definition consumed by downstream
+           reactor tests, rather than exposing every core test class and resource. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
@@ -93,7 +97,9 @@
             <goals><goal>test-jar</goal></goals>
             <configuration>
               <includes>
-                <include>org/casemgmt/engine/EngineGatewayContract.class</include>
+                <include>org/casemgmt/engine/EngineGatewayContract*</include>
+                <include>org/casemgmt/OracleTestBase.class</include>
+                <include>definitions/test-definition.json</include>
               </includes>
             </configuration>
           </execution>

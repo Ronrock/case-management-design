@@ -11,7 +11,6 @@ import org.casemgmt.event.EventTypes;
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
-import org.casemgmt.repo.PlanItemRepository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
@@ -21,9 +20,8 @@ import java.util.Map;
 /**
  * Worklist, claim and complete for {@code CM_TASK} rows — the human side of the case (spec
  * §4.5/§4.6). Completing a task validates its payload against the declared form schema, tells
- * the engine, marks the row COMPLETED, and completes the plan item behind it so the model
- * re-evaluates (a task never outlives its plan item, and the plan item is what {@code
- * PlanModelEvaluator} actually reasons about).
+ * the engine, and marks the row COMPLETED. Engine observations remain the sole authority for
+ * the associated plan-item projection.
  *
  * <p><b>Claim/complete legality must agree with {@code ActionPolicy.listForTask}</b>
  * (case-management-rest, Task 23) — checked directly against it while writing this class:
@@ -37,15 +35,14 @@ import java.util.Map;
  *   ever advertises {@code complete} for a {@code CLAIMED} task assigned to the calling user —
  *   this class enforces the state half of that (the identity half — "assigned to the calling
  *   user" — is authorization, which is {@code ActionPolicy}'s job at the REST boundary, the same
- *   division {@code PlanItemService} uses for its own actions). Requiring {@code CLAIMED} here
+ *   division used by the REST authorization boundary). Requiring {@code CLAIMED} here
  *   (not merely "not already ended") keeps the service exactly as permissive as the policy that
  *   gates it: the policy never offers {@code complete} on an {@code OPEN} task, so the service
  *   must not silently accept one either.</li>
  * </ul>
  *
  * <p><b>Completion order (brief, spec §4.6):</b> validate the payload -&gt; complete the engine
- * task -&gt; mark {@code CM_TASK} completed -&gt; complete the backing plan item -&gt; re-evaluate
- * (the last two happen inside {@link PlanItemService#complete}). If the engine call fails, the
+ * task -&gt; mark {@code CM_TASK} completed. If the engine call fails, the
  * whole transaction rolls back in embedded mode; in remote mode the command outbox retries it,
  * and the task stays {@code CLAIMED} until it succeeds.
  */
@@ -56,22 +53,26 @@ public class CaseTaskService {
     private final CaseDefinitionRepository definitions;
     private final EngineGateway engine;
     private final FormValidator formValidator;
-    private final PlanItemService planItems;
-    private final PlanItemRepository planItemRepo;
     private final EventPublisher publisher;
+    private final EngineOperationService operations;
 
     public CaseTaskService(CaseTaskRepository tasks, CaseRepository cases,
                            CaseDefinitionRepository definitions, EngineGateway engine,
-                           FormValidator formValidator, PlanItemService planItems,
-                           PlanItemRepository planItemRepo, EventPublisher publisher) {
+                           FormValidator formValidator, EventPublisher publisher) {
+        this(tasks, cases, definitions, engine, formValidator, publisher, null);
+    }
+
+    public CaseTaskService(CaseTaskRepository tasks, CaseRepository cases,
+                           CaseDefinitionRepository definitions, EngineGateway engine,
+                           FormValidator formValidator, EventPublisher publisher,
+                           EngineOperationService operations) {
         this.tasks = tasks;
         this.cases = cases;
         this.definitions = definitions;
         this.engine = engine;
         this.formValidator = formValidator;
-        this.planItems = planItems;
-        this.planItemRepo = planItemRepo;
         this.publisher = publisher;
+        this.operations = operations;
     }
 
     /**
@@ -96,6 +97,10 @@ public class CaseTaskService {
 
     @Transactional
     public CaseTask claim(String taskId, long expectedVersion, Actor actor) {
+        if (engine.defersTaskMutations()) {
+            throw new IllegalStateException(
+                    "Remote task claims must use claimOperation so confirmation remains truthful");
+        }
         CaseTask task = tasks.require(taskId);
         if (task.state() != TaskState.OPEN) {
             throw new CaseConflictException("task-not-open",
@@ -121,9 +126,27 @@ public class CaseTaskService {
         return saved;
     }
 
+    /** Remote requests keep the task projection confirmed until engine evidence arrives. */
+    @Transactional
+    public TaskOperation claimOperation(String taskId, long expectedVersion, Actor actor,
+                                        String idempotencyKey) {
+        if (!engine.defersTaskMutations()) {
+            return new TaskOperation(claim(taskId, expectedVersion, actor), null);
+        }
+        CaseTask task = lockForOperation(taskId, expectedVersion);
+        validateClaimable(task);
+        CaseInstance instance = cases.require(task.caseId());
+        return new TaskOperation(task, requiredOperations().submitClaim(
+                instance, task, expectedVersion, actor, idempotencyKey));
+    }
+
     @Transactional
     public CaseTask complete(String taskId, long expectedVersion,
                              Map<String, Object> variables, Actor actor) {
+        if (engine.defersTaskMutations()) {
+            throw new IllegalStateException(
+                    "Remote task completions must use completeOperation so confirmation remains truthful");
+        }
         CaseTask task = tasks.require(taskId);
         if (task.state() != TaskState.CLAIMED) {
             throw new CaseConflictException("task-not-claimed",
@@ -179,13 +202,70 @@ public class CaseTaskService {
         publisher.audit(task.caseId(), c.tenantId(), actor.userId(), "task.complete", "Task", taskId,
                 Map.of("state", task.state().name()), Map.of("state", "COMPLETED"));
 
-        // Completing the task completes the plan item behind it, which re-evaluates the model
-        // (PlanItemService.complete already handles persistence, side effects and re-evaluation).
-        PlanItem planItem = planItemRepo.require(task.planItemId());
-        planItems.complete(task.caseId(), planItem.id(), planItem.version(), actor);
-
         return saved;
     }
+
+    /** Remote completion records validated intent but does not mark the task completed. */
+    @Transactional
+    public TaskOperation completeOperation(String taskId, long expectedVersion,
+                                           Map<String, Object> variables, Actor actor,
+                                           String idempotencyKey) {
+        Map<String, Object> safeVariables = variables == null ? Map.of() : variables;
+        if (!engine.defersTaskMutations()) {
+            return new TaskOperation(complete(taskId, expectedVersion, safeVariables, actor), null);
+        }
+        CaseTask task = lockForOperation(taskId, expectedVersion);
+        CaseInstance instance = validateCompletable(task, safeVariables);
+        return new TaskOperation(task, requiredOperations().submitComplete(instance, task,
+                expectedVersion, safeVariables, actor, idempotencyKey));
+    }
+
+    private void validateClaimable(CaseTask task) {
+        if (task.state() != TaskState.OPEN) {
+            throw new CaseConflictException("task-not-open",
+                    "Task is " + task.state() + (task.assignee() == null ? "" : " (assignee " + task.assignee() + ")"),
+                    task.state() == TaskState.CLAIMED ? List.of("complete") : List.of());
+        }
+        if (task.engineSync() != CaseTask.EngineSync.SYNCED) {
+            throw new CaseConflictException("engine-sync-pending",
+                    "Task is not yet created on the engine (sync state " + task.engineSync() + ")",
+                    List.of());
+        }
+    }
+
+    private CaseInstance validateCompletable(CaseTask task, Map<String, Object> variables) {
+        if (task.state() != TaskState.CLAIMED) {
+            throw new CaseConflictException("task-not-claimed",
+                    "Task is " + task.state() + "; only a claimed task can be completed", List.of());
+        }
+        CaseInstance c = cases.require(task.caseId());
+        if (task.formKey() != null) {
+            Map<String, Object> schema = definitions.formSchemaOfDefinition(c.caseDefId(), task.formKey())
+                    .orElseThrow(() -> new InvalidCaseDefinitionException(c.caseDefKey(),
+                            "Task " + task.id() + " declares formKey '" + task.formKey()
+                                    + "' but case definition '" + c.caseDefKey() + "' (version "
+                                    + c.caseDefVersion() + ") has no matching form schema"));
+            formValidator.validate(schema, variables);
+        }
+        return c;
+    }
+
+    private EngineOperationService requiredOperations() {
+        if (operations == null) {
+            throw new IllegalStateException("Remote task operations require an EngineOperationService");
+        }
+        return operations;
+    }
+
+    private CaseTask lockForOperation(String taskId, long expectedVersion) {
+        try {
+            return tasks.lockForOperation(taskId, expectedVersion);
+        } catch (OptimisticLockException exception) {
+            throw new CaseConflictException("version-conflict", exception.getMessage(), List.of());
+        }
+    }
+
+    public record TaskOperation(CaseTask confirmedTask, EngineOperationService.Operation operation) { }
 
     /**
      * Review fix: {@code variables.get("outcome")} returns Java {@code null} when the key is

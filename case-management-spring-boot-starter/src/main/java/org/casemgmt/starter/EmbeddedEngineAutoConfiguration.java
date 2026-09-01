@@ -2,8 +2,25 @@ package org.casemgmt.starter;
 
 import org.casemgmt.engine.EngineGateway;
 import org.casemgmt.engine.embedded.EmbeddedEngineGateway;
+import org.casemgmt.engine.embedded.EmbeddedEngineEventBridge;
+import org.casemgmt.engine.embedded.OperatonProcessAuthorityLookup;
+import org.casemgmt.engine.embedded.ProcessCaseCorrelation;
+import org.casemgmt.engine.embedded.PersistedProcessCaseCorrelation;
+import org.casemgmt.engine.embedded.EmbeddedOrchestrationDeploymentPort;
+import org.casemgmt.engine.embedded.ProcessActivityClassifier;
+import org.casemgmt.engine.embedded.RepositoryProcessActivityClassifier;
+import org.casemgmt.orchestration.OrchestrationDeploymentPort;
+import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.EngineProcessAuthorityLookup;
+import org.casemgmt.observation.PersistedProcessCaseAuthority;
+import org.casemgmt.observation.ProcessCaseAuthority;
+import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
+import org.casemgmt.repo.CaseRepository;
+import org.casemgmt.repo.LinkedProcessRepository;
 import org.operaton.bpm.engine.ProcessEngine;
+import org.operaton.bpm.engine.impl.cfg.ProcessEngineConfigurationImpl;
 import org.operaton.bpm.engine.RuntimeService;
+import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.TaskService;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
@@ -15,6 +32,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.util.ClassUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+
+import javax.sql.DataSource;
 
 @AutoConfiguration(before = CaseManagementAutoConfiguration.class)
 @ConditionalOnProperty(prefix = "casemgmt", name = "enabled", havingValue = "true", matchIfMissing = true)
@@ -74,14 +94,77 @@ public class EmbeddedEngineAutoConfiguration {
      */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnClass(ProcessEngine.class)
+    @ConditionalOnProperty(prefix = "casemgmt.engine", name = "mode", havingValue = "embedded",
+            matchIfMissing = true)
     static class EmbeddedEngineGatewayConfiguration {
 
         @Bean
         @ConditionalOnMissingBean(EngineGateway.class)
         @ConditionalOnProperty(prefix = "casemgmt.engine", name = "mode", havingValue = "embedded",
                 matchIfMissing = true)
-        EngineGateway embeddedEngineGateway(TaskService taskService, RuntimeService runtimeService) {
-            return new EmbeddedEngineGateway(taskService, runtimeService);
+        EngineGateway embeddedEngineGateway(TaskService taskService, RuntimeService runtimeService,
+                                            org.operaton.bpm.engine.RepositoryService repositoryService) {
+            return new EmbeddedEngineGateway(taskService, runtimeService, repositoryService);
+        }
+
+        @Bean
+        @ConditionalOnMissingBean({EngineProcessAuthorityLookup.class, ProcessCaseAuthority.class})
+        EngineProcessAuthorityLookup engineProcessAuthorityLookup(
+                RuntimeService runtimeService, RepositoryService repositoryService) {
+            return new OperatonProcessAuthorityLookup(runtimeService, repositoryService);
+        }
+
+        @Bean
+        @ConditionalOnMissingBean(ProcessCaseAuthority.class)
+        ProcessCaseCorrelation processCaseCorrelation(
+                EngineProcessAuthorityLookup engineLookup,
+                LinkedProcessRepository linkedProcesses,
+                CaseRepository cases,
+                CaseDefinitionVersionBindingRepository bindings) {
+            return new PersistedProcessCaseCorrelation(new PersistedProcessCaseAuthority(
+                    engineLookup, linkedProcesses, cases, bindings));
+        }
+
+        @Bean
+        @ConditionalOnMissingBean(EmbeddedEngineEventBridge.class)
+        EmbeddedEngineEventBridge embeddedEngineEventBridge(
+                EngineObservationHandler observations,
+                ProcessCaseAuthority correlation,
+                ProcessActivityClassifier classifier, RepositoryService repositoryService,
+                TaskService taskService, CaseManagementProperties properties) {
+            // Do not guard this with @ConditionalOnBean(EngineObservationHandler.class).
+            // This auto-configuration deliberately runs before CaseManagementAutoConfiguration,
+            // which imports the service configuration that declares that handler. Evaluating
+            // the condition here therefore skips the bridge even though the dependency exists
+            // by bean-instantiation time. Required method parameters provide the correct
+            // fail-fast behaviour without making registration order observable.
+            return new EmbeddedEngineEventBridge(observations, correlation, classifier,
+                    repositoryService, taskService,
+                    properties.getEngineId());
+        }
+
+        @Bean
+        @ConditionalOnMissingBean(ProcessActivityClassifier.class)
+        ProcessActivityClassifier processActivityClassifier(RepositoryService repositoryService) {
+            return new RepositoryProcessActivityClassifier(repositoryService);
+        }
+
+        @Bean
+        EmbeddedTransactionResourceValidator embeddedTransactionResourceValidator(
+                DataSource dataSource,
+                PlatformTransactionManager transactionManager,
+                ProcessEngineConfigurationImpl engineConfiguration,
+                ProcessEngine initializedProcessEngine) {
+            // Depending on ProcessEngine guarantees Operaton's configuration plugins have
+            // populated the effective DataSource and transaction manager before validation.
+            return new EmbeddedTransactionResourceValidator(
+                    dataSource, transactionManager, engineConfiguration);
+        }
+
+        @Bean
+        OrchestrationDeploymentPort embeddedOrchestrationDeploymentPort(
+                RepositoryService repositoryService) {
+            return new EmbeddedOrchestrationDeploymentPort(repositoryService);
         }
     }
 

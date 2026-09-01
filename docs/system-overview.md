@@ -20,9 +20,12 @@ release lifecycle. The platform supplies the common lifecycle, task, event, SLA,
 webhook and UI-integration mechanics; it is not a centrally operated case-management service.
 
 **What exists today:** a backend case-management service built on the Operaton process engine.
-It manages *cases* (long-running, human-driven work items) whose structure is described by a
-declarative **case definition** rather than by code. The engine is used for human tasks and BPMN
-sub-processes; the case lifecycle itself is owned by this service.
+It manages *cases* (long-running, human-driven work items) whose behavior is defined by BPMN.
+Operaton owns token flow, gateways, stage/activity lifecycle, task activation, process timers,
+call activities, subprocesses, and compensation. The service owns the shared case API, canonical
+data, authorization, audit, typed SLA bindings, search, presentation contracts, and the projections
+derived from engine observations. Those projections are read models, never a second transition
+authority.
 
 **UI scope:** the backend remains the main implemented surface, but a Lit Web Components package
 now provides the standalone shell and a generic enterprise portal-adapter contract.
@@ -96,12 +99,8 @@ All endpoints are under `/case-api/v2`. The authoritative contract is
 | Method | Path |
 |---|---|
 | `GET` | `/cases/{caseId}/plan-items` |
-| `POST` | `/cases/{caseId}/plan-items/{itemId}/enable` |
-| `POST` | `/cases/{caseId}/plan-items/{itemId}/start` |
-| `POST` | `/cases/{caseId}/plan-items/{itemId}/complete` |
-| `POST` | `/cases/{caseId}/plan-items/{itemId}/terminate` |
 
-All four actions funnel through a single `act` method — the only route to `PlanItemService`.
+The rows are read-only BPMN engine projections; the API exposes no manual transition endpoint.
 
 ### 3.3 Tasks — `TaskController`
 
@@ -120,7 +119,6 @@ All four actions funnel through a single `act` method — the only route to `Pla
 | `GET` / `POST` | `/cases/{caseId}/documents` | Document metadata references; binary content remains in DMS/S3 |
 | `DELETE` | `/cases/{caseId}/documents/{documentId}` | Removes the case document reference |
 | `GET` | `/cases/{caseId}/milestones` | |
-| `POST` | `/cases/{caseId}/milestones/{milestoneId}/achieve` | Requires `If-Match` |
 | `GET` / `POST` | `/cases/{caseId}/processes` | `POST` accepts `planItemId`; requires `If-Match` |
 
 ### 3.5 SLA — `SlaController`
@@ -235,78 +233,39 @@ with reserved participant role names, so a global group cannot accidentally beco
 
 ### 5.1 Model
 
-`CaseDefinition` (+ `PlanItemDefinition`) is the declarative template. `CaseInstance` is a running
-case; `PlanItem` is a running element within it; `CaseTask` is a human task mirrored from the engine.
-
-Enums: `CaseState`, `CasePriority`, `PlanItemState`, `PlanItemType` (`STAGE`, `HUMAN_TASK`,
-`PROCESS_TASK`, `MILESTONE`), `TaskState`.
-
-```mermaid
-stateDiagram-v2
-    [*] --> AVAILABLE: "definition materialised"
-    AVAILABLE --> ACTIVE: "entry criteria met"
-    ACTIVE --> COMPLETED: "task complete, milestone achieved, or stage complete"
-    ACTIVE --> TERMINATED: "case closed/cancelled or parent terminated"
-    AVAILABLE --> TERMINATED: "case closed/cancelled or parent terminated"
-    COMPLETED --> AVAILABLE: "repeatable item re-enters"
-    COMPLETED --> [*]
-    TERMINATED --> [*]
-```
-
-### 5.2 The plan model engine — `rules/`
-
-| Component | Responsibility |
-|---|---|
-| `PlanModelInstantiator` | Materialises plan items from a definition; handles repetition |
-| `PlanModelEvaluator` | One evaluation pass: entry criteria, stage completion, cascade termination |
-| `StageCompletion` | Containment, blocking items, cascade-to-subtree, cycle guard |
-| `JuelCriterionEvaluator` | Sandboxed JUEL expression evaluation for sentries |
-| `CaseSnapshot` | The read model an evaluation pass and the policy both operate on |
-| `Transition` | A state change the service layer persists and publishes |
-
-The evaluator defers autocomplete for a stage that just became active, giving contained children
-one evaluation round to materialise before leftover-child termination is considered.
-
-One evaluation pass is intentionally deterministic:
-
-1. The service loads one `CaseSnapshot` containing the case, plan items, tasks, milestones and
-   relevant variables.
-2. `PlanModelEvaluator` evaluates entry criteria against inactive items and emits transitions for
-   items that may become active.
-3. `StageCompletion` evaluates active stages only after their children have had a chance to
-   materialise in a previous pass.
-4. The service persists emitted transitions through `TransitionApplier`, which creates mirrored human
-   tasks, starts process commands, achieves milestones and publishes events as needed.
-5. Repetition is bounded by `MAX_REPETITIONS_PER_ITEM`; hitting the cap is treated as a model-design
-   warning, not as unbounded runtime work.
+`CaseDefinition` is the pinned binding of BPMN orchestration, contract, and presentation releases.
+`CaseInstance` is a running case. `CM_PLAN_ITEM`, `CM_TASK`, `CM_MILESTONE`, and
+`CM_LINKED_PROCESS` are BPMN-observation projections used for API reads, worklists, and audit
+context. Their `STAGE`, `HUMAN_TASK`, `PROCESS_TASK`, and `MILESTONE` classifications do not grant
+them authority to activate, complete, or route work.
 
 ```mermaid
-flowchart TD
-    A["Load case snapshot"] --> B["Evaluate entry criteria"]
-    B --> C["Evaluate stage completion"]
-    C --> D["Create transition list"]
-    D --> E["Persist rows"]
-    E --> F["Publish events and audit"]
-    F --> G["Return updated case view"]
+flowchart LR
+  bpmn["BPMN engine facts"] --> observations["Engine observations"]
+  observations --> projections["task / stage / milestone / linked-process projections"]
+  projections --> reads["case API and worklists"]
+  bpmn --> lifecycle["sequencing and lifecycle authority"]
 ```
 
 ### 5.3 Services
 
-`CaseService`, `PlanItemService`, `CaseTaskService`, `CommentService`, `DocumentService`,
+`CaseService`, `CaseTaskService`, `CommentService`, `DocumentService`,
 `MilestoneService`, `LinkedProcessService`, `WebhookService`, `CaseDefinitionService`,
 `SlaService`.
 
-The module pattern for a mutation is **row + event + audit in one transaction**, applied via
-`TransitionApplier`. `case-management-core` has a real `DataSourceTransactionManager`, so
+The module pattern for a platform mutation is **row + event + audit in one transaction**. Engine
+observation handling applies the associated projection effects atomically; it does not replay a
+separate case lifecycle. `case-management-core` has a real `DataSourceTransactionManager`, so
 `@Transactional` genuinely works — **but only through a Spring proxy**.
 
 ---
 
 ## 6. Engine integration
 
-`EngineGateway` is the only seam. Two implementations pass one shared contract suite
-(`EngineGatewayContract`), which is what makes two-mode equivalence a tested property rather than
-an assertion.
+Engine commands cross the `EngineGateway` seam. Engine facts enter separately through the
+observation ingress/handler seam, which validates ownership and updates read-model projections.
+The two command implementations pass one shared gateway contract suite (`EngineGatewayContract`);
+observation handling has its own neutral contracts.
 
 | Mode | Gateway | Transaction semantics |
 |---|---|---|
@@ -325,11 +284,11 @@ sequenceDiagram
     participant Dispatcher as "Engine command dispatcher"
     participant Remote as "Remote Operaton REST"
 
-    API->>Core: "Create or activate plan item"
+    API->>Core: "Create case / request engine operation"
     alt "embedded mode"
-        Core->>Engine: "Start process / create task in same transaction"
-        Engine-->>Core: "Engine ids"
-        Core-->>API: "Committed case view"
+        Core->>Engine: "Start process / complete engine task in same transaction"
+        Engine-->>Core: "Lifecycle observations"
+        Core-->>API: "Committed case and projections"
     else "remote mode"
         Core->>Outbox: "Insert command with claim metadata"
         Core-->>API: "Committed case view with ENGINE_SYNC_=PENDING"
@@ -337,7 +296,7 @@ sequenceDiagram
         Dispatcher->>Remote: "Execute engine call"
         Remote-->>Dispatcher: "Engine ids"
         Dispatcher->>Outbox: "Mark completed"
-        Dispatcher->>Core: "Mark linked row SYNCED"
+        Dispatcher->>Core: "Observation confirms projections"
     end
 ```
 
@@ -391,8 +350,11 @@ dates, which is the dangerous direction for a breach calculation.
 
 Resume re-derives the deadline through the calendar rather than adding wall-clock time.
 
-SLA targets may whitelist pause reasons. The legacy database column is named
-`PAUSED_STATES_JSON_`, but it is interpreted as pause reasons, not lifecycle states.
+SLA targets use the contract vocabulary `CASE`, `STAGE`, `TASK`, `MILESTONE`, and `OCCURRENCE`.
+An `OCCURRENCE` binding is keyed by the native BPMN loop/activity occurrence observed from the
+engine; it is not inferred from a separate case lifecycle. SLA targets may whitelist pause reasons.
+The legacy database column is named `PAUSED_STATES_JSON_`, but it is interpreted as pause reasons,
+not lifecycle states.
 
 ---
 

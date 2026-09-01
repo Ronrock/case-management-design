@@ -36,6 +36,11 @@ public class OutboxEngineGateway implements EngineGateway {
     }
 
     @Override
+    public boolean defersTaskMutations() {
+        return true;
+    }
+
+    @Override
     public EngineTaskRef createHumanTask(HumanTaskRequest request) {
         String commandId = CaseIds.newId();
         commands.enqueue(new EngineCommand(commandId, request.caseId(),
@@ -73,8 +78,25 @@ public class OutboxEngineGateway implements EngineGateway {
         // instead of planItemId, which for an ad hoc process would have nothing to correlate on.
         enqueue(EngineCommand.Type.START_PROCESS, request.caseId(),
                 Map.of("planItemId", request.planItemId() == null ? "" : request.planItemId(),
-                        "processDefinitionKey", request.processDefinitionKey(),
+                        "selectionType", "ID",
+                        "processDefinitionId", request.processDefinitionId(),
+                        "processDefinitionKey", request.processDefinitionKey() == null
+                                ? "" : request.processDefinitionKey(),
+                        "tenantId", request.tenantId() == null ? "" : request.tenantId(),
                         "variables", request.variables() == null ? Map.of() : request.variables(),
+                        "correlationId", request.correlationId() == null ? "" : request.correlationId()));
+        return new EngineProcessRef(null, request.processDefinitionId(),
+                request.processDefinitionKey(), request.caseId());
+    }
+
+    @Override
+    public EngineProcessRef startProcessByKey(StartProcessByKeyRequest request) {
+        enqueue(EngineCommand.Type.START_PROCESS, request.caseId(),
+                Map.of("planItemId", request.planItemId() == null ? "" : request.planItemId(),
+                        "selectionType", "KEY",
+                        "processDefinitionKey", request.processDefinitionKey(),
+                        "tenantId", request.tenantId() == null ? "" : request.tenantId(),
+                        "variables", request.variables(),
                         "correlationId", request.correlationId() == null ? "" : request.correlationId()));
         return new EngineProcessRef(null, request.processDefinitionKey(), request.caseId());
     }
@@ -83,6 +105,13 @@ public class OutboxEngineGateway implements EngineGateway {
     public void cancelProcess(String processInstanceId, String reason) {
         enqueue(EngineCommand.Type.CANCEL_PROCESS, null,
                 Map.of("processInstanceId", processInstanceId, "reason", reason == null ? "" : reason));
+    }
+
+    @Override
+    public void correlateMessage(MessageCorrelationRequest request) {
+        enqueue(EngineCommand.Type.CORRELATE_MESSAGE, request.caseId(),
+                Map.of("messageName", request.messageName(), "variables",
+                        request.variables() == null ? Map.of() : request.variables()));
     }
 
     /**

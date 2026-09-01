@@ -1,3 +1,6 @@
 spring:
   profiles:
     active: test
+operaton:
+  bpm:
+    auto-deployment-enabled: false

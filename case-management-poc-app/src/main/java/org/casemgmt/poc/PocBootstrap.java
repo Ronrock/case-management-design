@@ -2,7 +2,9 @@ package org.casemgmt.poc;
 
 import org.casemgmt.repo.CaseDefinitionRepository;
 import org.casemgmt.repo.SlaRepository;
-import org.casemgmt.service.CaseDefinitionService;
+import org.casemgmt.service.CaseDefinitionReleaseService;
+import org.casemgmt.service.CaseDefinitionVersionService;
+import org.casemgmt.release.ReleaseKind;
 import org.operaton.bpm.engine.IdentityService;
 import org.operaton.bpm.engine.RepositoryService;
 import org.operaton.bpm.engine.identity.Group;
@@ -11,7 +13,6 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.ClassPathResource;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -33,13 +34,14 @@ public class PocBootstrap {
 
     @Bean
     public ApplicationRunner seed(IdentityService identity, RepositoryService repository,
-                                  CaseDefinitionService definitions, CaseDefinitionRepository defRepo,
-                                  SlaRepository sla) {
+                                  CaseDefinitionRepository defRepo,
+                                  CaseDefinitionReleaseService releases,
+                                  CaseDefinitionVersionService versions, SlaRepository sla) {
         return args -> {
             seedUsers(identity);
             seedProcesses(repository);
             seedSla(sla);
-            seedDefinition(definitions, defRepo);
+            seedBpmnDefinition(defRepo, releases, versions);
         };
     }
 
@@ -112,26 +114,29 @@ public class PocBootstrap {
      * Fix round 1, Minor (review): this method used to guard its ENTIRE body on one check
      * ({@code calendarIdOf("sla-complaint") != null}, i.e. "does the policy row already exist").
      * A crash between {@code insertCalendar} and {@code insertPolicy} — plausible on any real
-     * restart, not a contrived scenario — left {@code cal-nl} inserted but {@code sla-complaint}
+     * restart, not a contrived scenario — left {@code nl-business} inserted but {@code sla-complaint}
      * not, and on the NEXT startup that single guard read as "not seeded yet", so it tried {@code
-     * insertCalendar("cal-nl", ...)} again and hit {@code CM_BUSINESS_CALENDAR}'s primary key.
+     * insertCalendar("nl-business", ...)} again and hit {@code CM_BUSINESS_CALENDAR}'s primary key.
      * Each of the four rows is now guarded independently, so seeding can resume from wherever a
      * previous run actually stopped rather than only ever from "nothing" or "everything".
      */
     private void seedSla(SlaRepository sla) {
-        if (sla.calendarDefinition("cal-nl").isEmpty()) {
-            Map<String, Object> workday = Map.of("from", "09:00", "to", "17:00");
-            sla.insertCalendar("cal-nl", Map.of(
-                    "timezone", "Europe/Amsterdam",
-                    "workingHours", Map.of(
-                            "MONDAY", List.of(workday), "TUESDAY", List.of(workday),
-                            "WEDNESDAY", List.of(workday), "THURSDAY", List.of(workday),
-                            "FRIDAY", List.of(workday)),
-                    "holidays", List.of("2026-12-25", "2026-12-26")));
+        Map<String, Object> workday = Map.of("from", "09:00", "to", "17:00");
+        Map<String, Object> calendarDefinition = Map.of(
+                "timezone", "Europe/Amsterdam",
+                "workingHours", Map.of(
+                        "MONDAY", List.of(workday), "TUESDAY", List.of(workday),
+                        "WEDNESDAY", List.of(workday), "THURSDAY", List.of(workday),
+                        "FRIDAY", List.of(workday)),
+                "holidays", List.of("2026-12-25", "2026-12-26"));
+        if (sla.calendarDefinition("nl-business").isEmpty()) {
+            sla.insertCalendar("nl-business", calendarDefinition);
         }
+        sla.insertCalendarRevision(TENANT_ID, "nl-business", 1,
+                "NL business", calendarDefinition);
 
         if (sla.calendarIdOf("sla-complaint") == null) {
-            sla.insertPolicy("sla-complaint", "Complaint SLA", null, "cal-nl");
+            sla.insertPolicy("sla-complaint", "Complaint SLA", null, "nl-business");
         }
 
         Set<String> existingTargets = sla.targetsFor("sla-complaint").stream()
@@ -148,19 +153,28 @@ public class PocBootstrap {
         }
     }
 
-    /**
-     * Deviation D2: {@code CaseDefinitionService.deploy} takes a {@code tenantId} as its third
-     * argument (Task 24 fix round 2 moved it out of the document body — see that class's
-     * Javadoc), which the brief's own two-argument call does not compile against. The document's
-     * own {@code "tenantId": "t1"} field is harmless but now ignored by the service; passed
-     * {@link #TENANT_ID} explicitly instead so the two can never silently disagree.
-     */
-    private void seedDefinition(CaseDefinitionService definitions, CaseDefinitionRepository repo) throws Exception {
-        if (repo.findLatest("complaint", TENANT_ID).isPresent()) {
+    /** Seeds the PoC's sole runnable complaint type through the BPMN release-binding path. */
+    private void seedBpmnDefinition(CaseDefinitionRepository definitions,
+                                    CaseDefinitionReleaseService releases,
+                                    CaseDefinitionVersionService versions) throws Exception {
+        String key = "complaint";
+        if (definitions.findLatest(key, TENANT_ID).isPresent()) {
             return;
         }
-        String json = new String(new ClassPathResource("definitions/complaint-v1.json")
-                .getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        definitions.deploy(json, "system", TENANT_ID);
+        byte[] bpmn = resource("processes/complaint-bpmn.bpmn");
+        byte[] contract = resource("definitions/complaint-bpmn-contract.json");
+        byte[] presentation = resource("definitions/complaint-bpmn-presentation.json");
+        var orchestrationRelease = releases.publish(key, TENANT_ID, ReleaseKind.ORCHESTRATION,
+                "application/bpmn+xml", bpmn, "system");
+        var contractRelease = releases.publish(key, TENANT_ID, ReleaseKind.CONTRACT,
+                "application/json", contract, "system");
+        var presentationRelease = releases.publish(key, TENANT_ID, ReleaseKind.PRESENTATION,
+                "application/json", presentation, "system");
+        versions.bind(key, TENANT_ID, orchestrationRelease.id(), contractRelease.id(),
+                presentationRelease.id(), "system");
+    }
+
+    private static byte[] resource(String path) throws Exception {
+        return new ClassPathResource(path).getInputStream().readAllBytes();
     }
 }

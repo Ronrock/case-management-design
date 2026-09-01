@@ -94,6 +94,8 @@ public class CaseManagementProperties {
         private boolean enabled = true;
         private long webhookIntervalMs = 5_000;
         private long engineCommandIntervalMs = 5_000;
+        private long enginePollIntervalMs = 5_000;
+        private long engineReconcileIntervalMs = 300_000;
         private long slaSweepIntervalMs = 60_000;
 
         /**
@@ -117,6 +119,10 @@ public class CaseManagementProperties {
         public void setWebhookIntervalMs(long v) { this.webhookIntervalMs = v; }
         public long getEngineCommandIntervalMs() { return engineCommandIntervalMs; }
         public void setEngineCommandIntervalMs(long v) { this.engineCommandIntervalMs = v; }
+        public long getEnginePollIntervalMs() { return enginePollIntervalMs; }
+        public void setEnginePollIntervalMs(long v) { this.enginePollIntervalMs = v; }
+        public long getEngineReconcileIntervalMs() { return engineReconcileIntervalMs; }
+        public void setEngineReconcileIntervalMs(long v) { this.engineReconcileIntervalMs = v; }
         public long getSlaSweepIntervalMs() { return slaSweepIntervalMs; }
         public void setSlaSweepIntervalMs(long v) { this.slaSweepIntervalMs = v; }
         public long getIdempotencyPurgeIntervalMs() { return idempotencyPurgeIntervalMs; }

@@ -3,12 +3,23 @@ package org.casemgmt.repo;
 import org.casemgmt.domain.*;
 import org.casemgmt.error.NotFoundException;
 import org.casemgmt.error.OptimisticLockException;
+import org.casemgmt.service.CanonicalPatch;
+import org.casemgmt.service.CaseDataMappingService;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import javax.sql.DataSource;
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 
 public class CaseRepository {
@@ -17,12 +28,29 @@ public class CaseRepository {
             ID_, ENGINE_ID_, TENANT_ID_, CASE_DEF_ID_, CASE_DEF_KEY_, CASE_DEF_VER_,
             BUSINESS_KEY_, TITLE_, STATE_, PRIORITY_, ASSIGNEE_, QUEUE_ID_, INITIATOR_,
             SLA_STATUS_, OUTCOME_, CANCEL_REASON_, VARIABLES_JSON_, VERSION_,
-            CREATED_AT_, UPDATED_AT_, CLOSED_AT_""";
+            CREATED_AT_, UPDATED_AT_, CLOSED_AT_, ROOT_PROC_INST_ID_, PROJECTION_STATUS_,
+            LAST_ENGINE_UPDATE_AT_, LAST_PROJECTED_AT_""";
 
     private final JdbcClient jdbc;
+    private final TransactionTemplate mandatoryCanonicalTransaction;
 
+    /**
+     * Compatibility constructor for ordinary repository operations. Canonical compare-and-apply
+     * is unavailable because this form cannot verify which {@link DataSource} owns the caller's
+     * transaction; use {@link #CaseRepository(DataSource)} for mapping support.
+     */
     public CaseRepository(JdbcClient jdbc) {
+        this(jdbc, null);
+    }
+
+    /** Creates the {@link JdbcClient} and mandatory transaction participant from one DataSource. */
+    public CaseRepository(DataSource transactionDataSource) {
+        this(JdbcClient.create(transactionDataSource), mandatoryTransaction(transactionDataSource));
+    }
+
+    private CaseRepository(JdbcClient jdbc, TransactionTemplate mandatoryCanonicalTransaction) {
         this.jdbc = jdbc;
+        this.mandatoryCanonicalTransaction = mandatoryCanonicalTransaction;
     }
 
     public void insert(CaseInstance c) {
@@ -59,6 +87,76 @@ public class CaseRepository {
 
     public CaseInstance require(String id) {
         return findById(id).orElseThrow(() -> new NotFoundException("Case", id));
+    }
+
+    /**
+     * Serializes lifecycle observations for one case inside the caller's transaction.
+     *
+     * <p>The mandatory template is a participation guard only: it cannot start or independently
+     * commit a transaction. Holding this row lock through the handler's watermark read and
+     * effects prevents two distinct fingerprints for the same entity from both observing an
+     * obsolete watermark.
+     */
+    public void lockForObservation(String caseId) {
+        if (caseId == null || caseId.isBlank()) {
+            throw new IllegalArgumentException("caseId must not be blank");
+        }
+        if (mandatoryCanonicalTransaction == null) {
+            throw new IllegalStateException("Observation locking requires an active caller "
+                    + "transaction and a transaction-verifiable repository DataSource");
+        }
+        try {
+            mandatoryCanonicalTransaction.executeWithoutResult(status -> {
+                boolean exists = jdbc.sql("SELECT ID_ FROM CM_CASE WHERE ID_ = :id FOR UPDATE")
+                        .param("id", caseId)
+                        .query(String.class)
+                        .optional()
+                        .isPresent();
+                if (!exists) {
+                    throw new NotFoundException("Case", caseId);
+                }
+            });
+        } catch (IllegalTransactionStateException missingTransaction) {
+            throw new IllegalStateException("Observation locking requires an active caller "
+                    + "transaction bound to the repository DataSource", missingTransaction);
+        }
+    }
+
+    /**
+     * Serializes discretionary-action submission for one case.  The caller keeps this lock while
+     * it first checks a same-key replay, re-evaluates availability, and creates the durable
+     * command/link.  That makes a distinct key a conflict rather than a second live action.
+     */
+    public void lockForAdHocAction(String caseId) {
+        if (caseId == null || caseId.isBlank()) {
+            throw new IllegalArgumentException("caseId must not be blank");
+        }
+        if (mandatoryCanonicalTransaction == null) {
+            throw new IllegalStateException("Ad-hoc action locking requires an active caller "
+                    + "transaction and a transaction-verifiable repository DataSource");
+        }
+        try {
+            mandatoryCanonicalTransaction.executeWithoutResult(status -> {
+                boolean exists = jdbc.sql("SELECT ID_ FROM CM_CASE WHERE ID_ = :id FOR UPDATE")
+                        .param("id", caseId).query(String.class).optional().isPresent();
+                if (!exists) throw new NotFoundException("Case", caseId);
+            });
+        } catch (IllegalTransactionStateException missingTransaction) {
+            throw new IllegalStateException("Ad-hoc action locking requires an active caller "
+                    + "transaction bound to the repository DataSource", missingTransaction);
+        }
+    }
+
+    /**
+     * Locks the case before an SLA row is claimed.  SLA root terminalisation is called from the
+     * observation path which already holds this same lock, so this establishes one global order
+     * (case then SLA) and prevents an SLA sweeper from breaching a case while its completion is
+     * waiting to terminalise its clocks.  The caller must own the surrounding transaction.
+     */
+    public void lockForSlaLifecycle(String caseId) {
+        boolean exists = jdbc.sql("SELECT ID_ FROM CM_CASE WHERE ID_ = :id FOR UPDATE")
+                .param("id", caseId).query(String.class).optional().isPresent();
+        if (!exists) throw new NotFoundException("Case", caseId);
     }
 
     /**
@@ -141,7 +239,172 @@ public class CaseRepository {
         return new CaseInstance(c.id(), c.engineId(), c.tenantId(), c.caseDefId(), c.caseDefKey(),
                 c.caseDefVersion(), c.businessKey(), c.title(), c.state(), c.priority(),
                 c.assignee(), c.queueId(), c.initiator(), slaStatus, c.outcome(), c.cancelReason(),
-                c.variables(), expectedVersion + 1, c.createdAt(), updatedAt, c.closedAt());
+                c.variables(), expectedVersion + 1, c.createdAt(), updatedAt, c.closedAt(),
+                c.rootProcessInstanceId(), c.projectionStatus(), c.lastEngineUpdateAt(),
+                c.lastProjectedAt());
+    }
+
+    /**
+     * Persists the user-supplied cancellation reason after a synchronous embedded engine
+     * callback has already made the authoritative ACTIVE-to-CANCELLED transition.
+     *
+     * <p>This deliberately owns only cancellation metadata. Reusing {@link #update} here would
+     * rewrite every mutable case column from a callback-era snapshot and would obscure that the
+     * engine observation, not the API service, owns the state transition and cancellation event.
+     */
+    public CaseInstance updateCancellationReason(
+            CaseInstance cancelled, String reason, long expectedVersion) {
+        if (cancelled.state() != CaseState.CANCELLED) {
+            throw new IllegalArgumentException("Cancellation metadata requires a CANCELLED case");
+        }
+        OffsetDateTime updatedAt = OffsetDateTime.now();
+        int rows = jdbc.sql("""
+                UPDATE CM_CASE SET CANCEL_REASON_ = :reason, UPDATED_AT_ = :updatedAt,
+                    VERSION_ = VERSION_ + 1
+                WHERE ID_ = :id AND STATE_ = 'CANCELLED' AND VERSION_ = :expected""")
+                .param("reason", reason)
+                .param("updatedAt", updatedAt)
+                .param("id", cancelled.id())
+                .param("expected", expectedVersion)
+                .update();
+        if (rows == 0) {
+            throw new OptimisticLockException("Case", cancelled.id(), expectedVersion);
+        }
+        return require(cancelled.id());
+    }
+
+    /**
+     * Atomically applies canonical fields only when both their captured values and the case
+     * version still match.
+     *
+     * <p>The row is selected {@code FOR UPDATE}, then compared and updated while that lock is
+     * held. This method deliberately opens no transaction of its own: callers must already be
+     * inside a Spring-managed transaction using the repository's {@code DataSource}. A naked or
+     * auto-commit invocation is rejected because its row lock would otherwise be released after
+     * the SELECT, reopening the compare/write race this method exists to close. Its internal
+     * {@code PROPAGATION_MANDATORY} template is only a manager-specific participation guard: it
+     * cannot start, suspend, or independently commit a transaction.
+     */
+    public CaseDataMappingService.PatchResult applyCanonicalPatch(CanonicalPatch patch) {
+        if (patch == null) {
+            throw new IllegalArgumentException("patch must not be null");
+        }
+        if (mandatoryCanonicalTransaction == null) {
+            throw new IllegalStateException("Canonical compare-and-apply requires an active caller "
+                    + "transaction and a transaction-verifiable repository DataSource");
+        }
+        try {
+            return mandatoryCanonicalTransaction.execute(
+                    status -> applyCanonicalPatchInCallerTransaction(patch));
+        } catch (IllegalTransactionStateException missingTransaction) {
+            throw new IllegalStateException("Canonical compare-and-apply requires an active caller "
+                    + "transaction bound to the repository DataSource", missingTransaction);
+        }
+    }
+
+    private CaseDataMappingService.PatchResult applyCanonicalPatchInCallerTransaction(
+            CanonicalPatch patch) {
+        CaseInstance current = requireForCanonicalUpdate(patch.caseId());
+        if (patch.changes().isEmpty()) {
+            return CaseDataMappingService.PatchResult.noChanges(current.version());
+        }
+
+        List<CaseDataMappingService.FieldConflict> valueConflicts = conflicts(patch, current);
+        if (current.version() != patch.expectedCaseVersion() || !valueConflicts.isEmpty()) {
+            return conflict(patch, current, valueConflicts);
+        }
+
+        Map<String, Object> variables = new LinkedHashMap<>(current.variables());
+        for (CanonicalPatch.FieldChange change : patch.changes()) {
+            variables.put(change.fieldId(), change.value());
+        }
+        OffsetDateTime updatedAt = OffsetDateTime.now();
+        int rows = jdbc.sql("""
+                UPDATE CM_CASE
+                SET VARIABLES_JSON_ = :variables, UPDATED_AT_ = :updatedAt,
+                    VERSION_ = VERSION_ + 1
+                WHERE ID_ = :id AND VERSION_ = :expectedVersion""")
+                .param("variables", JsonCodec.toJson(variables))
+                .param("updatedAt", updatedAt)
+                .param("id", patch.caseId())
+                .param("expectedVersion", patch.expectedCaseVersion())
+                .update();
+        if (rows == 1) {
+            return CaseDataMappingService.PatchResult.applied(patch.expectedCaseVersion() + 1);
+        }
+        throw new IllegalStateException("Locked canonical update unexpectedly affected no rows for case "
+                + patch.caseId());
+    }
+
+    private CaseInstance requireForCanonicalUpdate(String id) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM CM_CASE WHERE ID_ = :id FOR UPDATE")
+                .param("id", id)
+                .query(CaseRepository::map)
+                .optional()
+                .orElseThrow(() -> new NotFoundException("Case", id));
+    }
+
+    private static TransactionTemplate mandatoryTransaction(DataSource repositoryDataSource) {
+        DataSource transactionResource = repositoryDataSource;
+        while (transactionResource instanceof TransactionAwareDataSourceProxy proxy) {
+            transactionResource = proxy.getTargetDataSource();
+            if (transactionResource == null) {
+                throw new IllegalArgumentException(
+                        "TransactionAwareDataSourceProxy must have a target DataSource");
+            }
+        }
+        TransactionTemplate mandatory = new TransactionTemplate(
+                new DataSourceTransactionManager(transactionResource));
+        mandatory.setPropagationBehavior(TransactionDefinition.PROPAGATION_MANDATORY);
+        return mandatory;
+    }
+
+    private static List<CaseDataMappingService.FieldConflict> conflicts(
+            CanonicalPatch patch, CaseInstance current) {
+        List<CaseDataMappingService.FieldConflict> conflicts = new ArrayList<>();
+        for (CanonicalPatch.FieldChange change : patch.changes()) {
+            boolean present = current.variables().containsKey(change.fieldId());
+            Object actual = current.variables().get(change.fieldId());
+            if (present != change.expectedPresent() || !jsonEquals(actual, change.expectedValue())) {
+                conflicts.add(new CaseDataMappingService.FieldConflict(change.fieldId(),
+                        change.sensitive() ? CanonicalPatch.REDACTED : change.expectedValue(),
+                        change.sensitive() ? CanonicalPatch.REDACTED : actual,
+                        change.sensitive()));
+            }
+        }
+        return List.copyOf(conflicts);
+    }
+
+    private static boolean jsonEquals(Object left, Object right) {
+        if (left instanceof Number leftNumber && right instanceof Number rightNumber) {
+            try {
+                return new BigDecimal(leftNumber.toString())
+                        .compareTo(new BigDecimal(rightNumber.toString())) == 0;
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+        if (left instanceof Map<?, ?> leftMap && right instanceof Map<?, ?> rightMap) {
+            if (!leftMap.keySet().equals(rightMap.keySet())) return false;
+            return leftMap.entrySet().stream().allMatch(entry ->
+                    jsonEquals(entry.getValue(), rightMap.get(entry.getKey())));
+        }
+        if (left instanceof List<?> leftList && right instanceof List<?> rightList) {
+            if (leftList.size() != rightList.size()) return false;
+            for (int index = 0; index < leftList.size(); index++) {
+                if (!jsonEquals(leftList.get(index), rightList.get(index))) return false;
+            }
+            return true;
+        }
+        return java.util.Objects.equals(left, right);
+    }
+
+    private static CaseDataMappingService.PatchResult conflict(
+            CanonicalPatch patch, CaseInstance current,
+            List<CaseDataMappingService.FieldConflict> valueConflicts) {
+        return CaseDataMappingService.PatchResult.conflict(current.version(),
+                new CaseDataMappingService.ConflictMetadata(patch.expectedCaseVersion(),
+                        current.version(), valueConflicts));
     }
 
     /**
@@ -392,6 +655,10 @@ public class CaseRepository {
                 rs.getLong("VERSION_"),
                 rs.getObject("CREATED_AT_", OffsetDateTime.class),
                 rs.getObject("UPDATED_AT_", OffsetDateTime.class),
-                rs.getObject("CLOSED_AT_", OffsetDateTime.class));
+                rs.getObject("CLOSED_AT_", OffsetDateTime.class),
+                rs.getString("ROOT_PROC_INST_ID_"),
+                org.casemgmt.projection.ProjectionStatus.valueOf(rs.getString("PROJECTION_STATUS_")),
+                rs.getObject("LAST_ENGINE_UPDATE_AT_", OffsetDateTime.class),
+                rs.getObject("LAST_PROJECTED_AT_", OffsetDateTime.class));
     }
 }

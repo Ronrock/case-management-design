@@ -5,9 +5,6 @@ import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.rules.CriterionEvaluator;
 import org.casemgmt.rules.JuelCriterionEvaluator;
-import org.casemgmt.rules.PlanModelEvaluator;
-import org.casemgmt.rules.PlanModelInstantiator;
-import org.casemgmt.rules.StageCompletion;
 import org.casemgmt.service.FormValidator;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
@@ -21,10 +18,6 @@ public class CaseManagementPolicyConfiguration {
     public CriterionEvaluator criterionEvaluator() {
         return new JuelCriterionEvaluator();
     }
-
-    @Bean public PlanModelEvaluator planModelEvaluator(CriterionEvaluator c) { return new PlanModelEvaluator(c); }
-    @Bean public PlanModelInstantiator planModelInstantiator() { return new PlanModelInstantiator(); }
-    @Bean public StageCompletion stageCompletion() { return new StageCompletion(); }
 
     @Bean
     @ConditionalOnMissingBean(FormValidator.class)

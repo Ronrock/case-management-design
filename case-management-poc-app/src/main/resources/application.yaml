@@ -33,6 +33,10 @@ casemgmt:
 
 operaton:
   bpm:
+    eventing:
+      execution: true
+      task: true
+      history: true
     database:
       schema-update: true
     admin-user:

@@ -8,12 +8,15 @@ import org.casemgmt.event.WebhookSecretCodec;
 import org.casemgmt.event.WebhookSecretStore;
 import org.casemgmt.repo.AuditRepository;
 import org.casemgmt.repo.CaseDefinitionRepository;
+import org.casemgmt.repo.CaseDefinitionReleaseRepository;
+import org.casemgmt.repo.CaseDefinitionVersionBindingRepository;
 import org.casemgmt.repo.CaseRepository;
 import org.casemgmt.repo.CaseTaskRepository;
 import org.casemgmt.repo.CommentRepository;
 import org.casemgmt.repo.DocumentRepository;
 import org.casemgmt.repo.DatabaseWebhookSecretStore;
 import org.casemgmt.repo.EventRepository;
+import org.casemgmt.repo.EngineCommandRepository;
 import org.casemgmt.repo.IdempotencyRepository;
 import org.casemgmt.repo.LinkedProcessRepository;
 import org.casemgmt.repo.MilestoneRepository;
@@ -24,9 +27,6 @@ import org.casemgmt.repo.WebhookRepository;
 import org.casemgmt.rest.CallerResolver;
 import org.casemgmt.rest.policy.ActionPolicy;
 import org.casemgmt.rules.JuelCriterionEvaluator;
-import org.casemgmt.rules.PlanModelEvaluator;
-import org.casemgmt.rules.PlanModelInstantiator;
-import org.casemgmt.rules.StageCompletion;
 import org.casemgmt.search.CaseProjectionSearchProvider;
 import org.casemgmt.search.DocumentMetadataSearchProvider;
 import org.casemgmt.search.SearchOrchestrator;
@@ -34,17 +34,28 @@ import org.casemgmt.search.SearchProvider;
 import org.casemgmt.permissions.PermissionDecision;
 import org.casemgmt.permissions.WorkerPermissionEvaluator;
 import org.casemgmt.permissions.WorkerPermissionsClient;
+import org.casemgmt.projection.ActiveBpmnCaseRepository;
+import org.casemgmt.projection.RemotePollingCheckpointRepository;
+import org.casemgmt.orchestration.BpmnOrchestration;
+import org.casemgmt.orchestration.CaseOrchestration;
+import org.casemgmt.orchestration.CaseOrchestrationRegistry;
+import org.casemgmt.orchestration.EngineDeploymentIdentity;
+import org.casemgmt.orchestration.OrchestrationDeploymentPort;
+import org.casemgmt.release.ReleaseStatus;
 import org.casemgmt.service.CaseDefinitionService;
+import org.casemgmt.service.CaseDefinitionReleaseService;
+import org.casemgmt.service.CaseDefinitionVersionService;
+import org.casemgmt.service.AdHocActionService;
 import org.casemgmt.service.CaseService;
 import org.casemgmt.service.CaseTaskService;
+import org.casemgmt.service.EngineOperationService;
 import org.casemgmt.service.CommentService;
 import org.casemgmt.service.DocumentService;
 import org.casemgmt.service.FormValidator;
 import org.casemgmt.service.LinkedProcessService;
 import org.casemgmt.service.MilestoneService;
-import org.casemgmt.service.PlanItemService;
-import org.casemgmt.service.TransitionApplier;
 import org.casemgmt.service.WebhookService;
+import org.casemgmt.service.CombinedCaseDefinitionDeploymentService;
 import org.casemgmt.sla.SlaService;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
@@ -53,6 +64,7 @@ import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Import;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetailsService;
@@ -107,7 +119,10 @@ public class CaseApiTestConfig {
         return JdbcClient.create(dataSource);
     }
 
-    @Bean public CaseRepository caseRepository(JdbcClient j) { return new CaseRepository(j); }
+    @Bean
+    public CaseRepository caseRepository(DataSource dataSource) {
+        return new CaseRepository(dataSource);
+    }
     @Bean public PlanItemRepository planItemRepository(JdbcClient j) { return new PlanItemRepository(j); }
     @Bean public CaseTaskRepository caseTaskRepository(JdbcClient j) { return new CaseTaskRepository(j); }
     @Bean public MilestoneRepository milestoneRepository(JdbcClient j) { return new MilestoneRepository(j); }
@@ -120,6 +135,15 @@ public class CaseApiTestConfig {
     @Bean public WebhookRepository webhookRepository(JdbcClient j) { return new WebhookRepository(j); }
     @Bean public SlaRepository slaRepository(JdbcClient j) { return new SlaRepository(j); }
     @Bean public IdempotencyRepository idempotencyRepository(JdbcClient j) { return new IdempotencyRepository(j); }
+    @Bean public EngineCommandRepository engineCommandRepository(JdbcClient j) {
+        return new EngineCommandRepository(j);
+    }
+    @Bean public ActiveBpmnCaseRepository activeBpmnCaseRepository(JdbcClient j) {
+        return new ActiveBpmnCaseRepository(j);
+    }
+    @Bean public RemotePollingCheckpointRepository remotePollingCheckpointRepository(JdbcClient j) {
+        return new RemotePollingCheckpointRepository(j);
+    }
     @Bean public CaseProjectionSearchProvider caseProjectionSearchProvider(CaseRepository cases,
                                                                            WorkerPermissionsClient permissions) { return new CaseProjectionSearchProvider(cases, permissions); }
     @Bean public DocumentMetadataSearchProvider documentMetadataSearchProvider(DocumentRepository documents,
@@ -146,54 +170,62 @@ public class CaseApiTestConfig {
     }
 
     @Bean
+    public CaseDefinitionReleaseRepository caseDefinitionReleaseRepository(DataSource dataSource) {
+        return new CaseDefinitionReleaseRepository(dataSource);
+    }
+
+    @Bean
+    public CaseDefinitionVersionBindingRepository caseDefinitionVersionBindingRepository(
+            DataSource dataSource) {
+        return new CaseDefinitionVersionBindingRepository(dataSource);
+    }
+
+    @Bean
     public EventPublisher eventPublisher(EventRepository events, AuditRepository audit,
                                          WebhookRepository webhooks) {
         return new EventPublisher(events, audit, webhooks, EVENT_TYPE_PREFIX, ENGINE_ID);
     }
 
-    @Bean public EngineGateway engineGateway() { return new RecordingEngineGateway(); }
-    @Bean public FormValidator formValidator() { return new FormValidator(); }
-    @Bean public StageCompletion stageCompletion() { return new StageCompletion(); }
-    @Bean public PlanModelInstantiator planModelInstantiator() { return new PlanModelInstantiator(); }
+    @Bean
+    @ConditionalOnProperty(prefix = "casemgmt.test", name = "remote", havingValue = "false", matchIfMissing = true)
+    public EngineGateway embeddedEngineGateway() { return new RecordingEngineGateway(); }
 
     @Bean
-    public PlanModelEvaluator planModelEvaluator() {
-        return new PlanModelEvaluator(new JuelCriterionEvaluator());
+    @ConditionalOnProperty(prefix = "casemgmt.test", name = "remote", havingValue = "true")
+    public EngineGateway remoteEngineGateway() { return new DeferredRecordingEngineGateway(); }
+    @Bean public EngineOperationService engineOperationService(EngineCommandRepository commands,
+                                                               EventPublisher publisher) {
+        return new EngineOperationService(commands, publisher);
+    }
+    @Bean public FormValidator formValidator() { return new FormValidator(); }
+    @Bean
+    public BpmnOrchestration bpmnOrchestration(
+            EngineGateway engine, LinkedProcessRepository processes,
+            CaseDefinitionVersionBindingRepository bindings) {
+        return new BpmnOrchestration(engine, processes, bindings);
     }
 
     @Bean
-    public TransitionApplier transitionApplier(PlanItemRepository planItems, CaseTaskRepository tasks,
-                                               LinkedProcessRepository linkedProcesses,
-                                               MilestoneRepository milestones,
-                                               EngineGateway engine, EventPublisher publisher) {
-        return new TransitionApplier(planItems, tasks, linkedProcesses, milestones, engine,
-                publisher);
+    public CaseOrchestrationRegistry caseOrchestrationRegistry(
+            java.util.List<CaseOrchestration> orchestrations) {
+        return new CaseOrchestrationRegistry(orchestrations);
     }
 
     @Bean
     public CaseService caseService(CaseRepository cases, CaseDefinitionRepository definitions,
-                                   PlanItemRepository planItems, MilestoneRepository milestones,
-                                   ParticipantRepository participants, PlanModelEvaluator evaluator,
-                                   PlanModelInstantiator instantiator, StageCompletion stageCompletion,
-                                   TransitionApplier applier, EventPublisher publisher) {
-        return new CaseService(cases, definitions, planItems, milestones, participants, evaluator,
-                instantiator, stageCompletion, applier, publisher, ENGINE_ID);
-    }
-
-    @Bean
-    public PlanItemService planItemService(PlanItemRepository planItems, CaseService cases,
-                                           TransitionApplier applier, EventPublisher publisher,
-                                           StageCompletion stageCompletion) {
-        return new PlanItemService(planItems, cases, applier, publisher, stageCompletion);
+                                   PlanItemRepository planItems, ParticipantRepository participants,
+                                   CaseOrchestrationRegistry orchestrations,
+                                   EventPublisher publisher) {
+        return new CaseService(cases, definitions, planItems, participants,
+                orchestrations, publisher, ENGINE_ID);
     }
 
     @Bean
     public CaseTaskService caseTaskService(CaseTaskRepository tasks, CaseRepository cases,
                                             CaseDefinitionRepository definitions, EngineGateway engine,
-                                            FormValidator formValidator, PlanItemService planItems,
-                                            PlanItemRepository planItemRepo, EventPublisher publisher) {
-        return new CaseTaskService(tasks, cases, definitions, engine, formValidator, planItems,
-                planItemRepo, publisher);
+                                            FormValidator formValidator, EventPublisher publisher,
+                                            EngineOperationService operations) {
+        return new CaseTaskService(tasks, cases, definitions, engine, formValidator, publisher, operations);
     }
 
     @Bean
@@ -209,9 +241,8 @@ public class CaseApiTestConfig {
     }
 
     @Bean
-    public MilestoneService milestoneService(MilestoneRepository milestones, CaseRepository cases,
-                                              EventPublisher publisher) {
-        return new MilestoneService(milestones, cases, publisher);
+    public MilestoneService milestoneService(MilestoneRepository milestones) {
+        return new MilestoneService(milestones);
     }
 
     @Bean
@@ -242,6 +273,49 @@ public class CaseApiTestConfig {
     @Bean
     public CaseDefinitionService caseDefinitionService(CaseDefinitionRepository repo) {
         return new CaseDefinitionService(repo);
+    }
+
+    @Bean
+    public OrchestrationDeploymentPort orchestrationDeployments() {
+        return (releaseId, definitionKey, tenantId, content, mediaType) ->
+                new OrchestrationDeploymentPort.DeploymentResult(ReleaseStatus.ACTIVE,
+                        new EngineDeploymentIdentity("test-deployment-" + releaseId,
+                                definitionKey + ":1:exact", definitionKey, 1, tenantId), null);
+    }
+
+    @Bean
+    public CaseDefinitionReleaseService caseDefinitionReleaseService(
+            CaseDefinitionReleaseRepository repo,
+            OrchestrationDeploymentPort orchestrationDeployments,
+            SlaRepository calendars) {
+        return new CaseDefinitionReleaseService(repo, orchestrationDeployments,
+                new org.casemgmt.release.JsonSchemaCaseContractValidator(), calendars);
+    }
+
+    @Bean
+    public CaseDefinitionVersionService caseDefinitionVersionService(
+            CaseDefinitionReleaseRepository releases,
+            CaseDefinitionVersionBindingRepository bindings,
+            CaseDefinitionService definitions,
+            SlaRepository calendars) {
+        return new CaseDefinitionVersionService(releases, bindings, definitions, calendars);
+    }
+
+    @Bean
+    public CombinedCaseDefinitionDeploymentService combinedCaseDefinitionDeploymentService(
+            CaseDefinitionReleaseService releases, CaseDefinitionVersionService versions) {
+        return new CombinedCaseDefinitionDeploymentService(releases, versions);
+    }
+
+    @Bean
+    public AdHocActionService adHocActionService(
+            CaseRepository cases, CaseDefinitionVersionBindingRepository bindings,
+            CaseDefinitionReleaseRepository releases, ParticipantRepository participants,
+            LinkedProcessService linkedProcesses, EngineGateway engine,
+            EventPublisher publisher, EngineOperationService operations) {
+        return new AdHocActionService(cases, bindings, releases, participants,
+                linkedProcesses, engine, new JuelCriterionEvaluator(), publisher, operations,
+                new org.casemgmt.release.JsonSchemaCaseContractValidator(), new org.casemgmt.service.FormValidator());
     }
 
     @Bean

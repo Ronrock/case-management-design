@@ -184,14 +184,12 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
 
     /**
      * The projection and the enforcement agree, and the refusal says what would work instead.
-     * {@code close} is absent from {@code availableActions[]} while the required review task is
-     * open ({@code ActionPolicy} defers to {@code StageCompletion.caseCanClose}), and calling it
-     * anyway is refused by the same rule table rather than by the service's own
-     * {@code required-items-open} check further down — which is exactly the point of having one
-     * table behind both.
+     * {@code close} is absent from {@code availableActions[]} because BPMN root completion owns
+     * closure. Calling it anyway is refused by the same rule table, so the advertised actions
+     * and enforcement remain aligned.
      */
     @Test
-    void closingACaseWithAnOpenRequiredItemIsRefusedWithTheActionsThatWouldWork() {
+    void explicitCloseOfABpmnCaseIsNotOfferedAndIsRefused() {
         Map<String, Object> created = deployAndCreateCase();
         String id = (String) created.get("id");
         assertThat((List<Map<String, Object>>) created.get("availableActions"))
@@ -226,6 +224,20 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
     }
 
     @Test
+    void cancellingACaseWithoutARequestBodyPreservesANullDomainReason() {
+        Map<String, Object> created = deployAndCreateCase();
+        String id = (String) created.get("id");
+
+        ResponseEntity<Map> cancelled = alice().post().uri("/cases/{id}/cancel", id)
+                .header("If-Match", "\"0\"")
+                .retrieve().toEntity(Map.class);
+
+        assertThat(cancelled.getStatusCode().value()).isEqualTo(200);
+        assertThat(cancelled.getBody()).containsEntry("state", "CANCELLED")
+                .containsEntry("cancelReason", null);
+    }
+
+    @Test
     void aConsumerDiscoversCaseTypesAndTheirFormsWithoutKnowingAnyOfThemUpFront() {
         deployDefinition();
 
@@ -245,7 +257,7 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
                 .uri("/case-definitions/{key}?tenantId={tenant}", key, tenant)
                 .retrieve().toEntity(Map.class);
         assertThat(detail.getStatusCode().value()).isEqualTo(200);
-        assertThat((List<?>) detail.getBody().get("planItems")).isNotEmpty();
+        assertThat((List<?>) detail.getBody().get("planItems")).isEmpty();
 
         String formKey = (String) ((List<?>) detail.getBody().get("formKeys")).get(0);
         ResponseEntity<Map> schema = alice().get()
@@ -280,7 +292,7 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
     }
 
     @Test
-    void planItemsAreListedWithTheActionsTheirStateAllows() {
+    void projectedBpmnActivitiesAreReadOnlyThroughThePlanItemEndpoint() {
         Map<String, Object> created = deployAndCreateCase();
 
         ResponseEntity<List> response = alice().get()
@@ -293,26 +305,10 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         assertThat(items).allSatisfy(i ->
                 assertThat(i).containsKeys("id", "caseId", "type", "state", "version", "availableActions"));
 
-        // An ACTIVE LEAF item offers complete and terminate.
-        Map<String, Object> activeLeaf = items.stream()
-                .filter(i -> "ACTIVE".equals(i.get("state")) && !"STAGE".equals(i.get("type")))
-                .findFirst().orElseThrow();
-        assertThat((List<Map<String, Object>>) activeLeaf.get("availableActions"))
-                .extracting(a -> a.get("action")).contains("complete", "terminate");
-
-        // ...and the ACTIVE STAGE that leaf is required by does NOT offer complete (final
-        // whole-branch review, Important 2). This assertion used to read "the first ACTIVE item
-        // offers complete", which the stage satisfied — that is precisely the defect: the API
-        // advertised force-completing a stage over its own live required child, and the generic
-        // consumer had to exclude STAGE by TYPE to work around it. terminate stays offered; it
-        // is the escape hatch, and the service cascades it down the subtree.
-        Map<String, Object> activeStage = items.stream()
-                .filter(i -> "ACTIVE".equals(i.get("state")) && "STAGE".equals(i.get("type")))
-                .findFirst().orElseThrow();
-        assertThat(activeLeaf.get("parentStageId")).isEqualTo(activeStage.get("id"));
-        assertThat((List<Map<String, Object>>) activeStage.get("availableActions"))
-                .extracting(a -> a.get("action"))
-                .containsExactly("terminate");
+        assertThat(items).extracting(i -> i.get("type"))
+                .containsExactlyInAnyOrder("HUMAN_TASK", "MILESTONE");
+        assertThat(items).allSatisfy(i ->
+                assertThat((List<?>) i.get("availableActions")).isEmpty());
     }
 
     @Test
@@ -355,11 +351,11 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
         assertThat(completed.getStatusCode().value()).isEqualTo(200);
         assertThat(completed.getBody()).containsEntry("state", "COMPLETED");
 
-        // Completing the task drove the plan model: its milestone entry criterion now holds.
+        // Completion is sent to Operaton. The REST layer must not manufacture a local
+        // milestone transition; a later engine observation owns that projection.
         ResponseEntity<List> milestones = alice().get().uri("/cases/{id}/milestones", caseId)
                 .retrieve().toEntity(List.class);
-        assertThat((List<Map<String, Object>>) milestones.getBody())
-                .anySatisfy(m -> assertThat(m).containsEntry("achieved", true));
+        assertThat((List<Map<String, Object>>) milestones.getBody()).isEmpty();
     }
 
     @Test
@@ -408,11 +404,10 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
      *
      * <p>The row is inserted through {@code MilestoneRepository} — the production writer — rather
      * than driven through the plan model, because this fixture's milestone completes the instant
-     * it enters ({@code PlanModelEvaluator.targetOnEntry}), so the model never leaves one
-     * unachieved for long enough to read.
+     * it enters, so the model never leaves one unachieved for long enough to read.
      */
     @Test
-    void anUnachievedMilestoneReportsNullRatherThanTheStringNullAndCanThenBeAchieved() {
+    void milestoneReadsRemainAvailableButManualAchievementIsNotARoute() {
         Map<String, Object> created = deployAndCreateCase();
         String caseId = (String) created.get("id");
         ResponseEntity<List> planItems = alice().get().uri("/cases/{id}/plan-items", caseId)
@@ -435,19 +430,21 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
                     assertThat(m.get("achievedAt")).isNull();
                 });
 
-        ResponseEntity<Map> achieved = alice().post()
+        ResponseEntity<Map> rejected = alice().post()
                 .uri("/cases/{c}/milestones/{m}/achieve", caseId, milestoneId)
                 .header("If-Match", "\"0\"")
                 .retrieve().toEntity(Map.class);
-        assertThat(achieved.getStatusCode().value()).isEqualTo(200);
-        assertThat(achieved.getBody()).containsEntry("achieved", true);
+        assertThat(rejected.getStatusCode().value()).isEqualTo(404);
 
         ResponseEntity<List> after = alice().get().uri("/cases/{id}/milestones", caseId)
                 .retrieve().toEntity(List.class);
         assertThat((List<Map<String, Object>>) after.getBody())
                 .filteredOn(m -> milestoneId.equals(m.get("id")))
                 .singleElement()
-                .satisfies(m -> assertThat((String) m.get("achievedAt")).contains("T"));
+                .satisfies(m -> {
+                    assertThat(m).containsEntry("achieved", false);
+                    assertThat(m.get("achievedAt")).isNull();
+                });
     }
 
     /**
@@ -478,7 +475,9 @@ class CaseApiHttpTest extends CaseApiHttpTestBase {
 
         ResponseEntity<List> listed = alice().get().uri("/cases/{id}/processes", caseId)
                 .retrieve().toEntity(List.class);
-        assertThat((List<Map<String, Object>>) listed.getBody()).singleElement()
+        assertThat((List<Map<String, Object>>) listed.getBody())
+                .filteredOn(p -> started.getBody().get("id").equals(p.get("id")))
+                .singleElement()
                 .satisfies(p -> {
                     assertThat(p).containsEntry("id", started.getBody().get("id"));
                     assertThat(p).containsEntry("processDefinitionKey", "some-process");

@@ -1,219 +1,287 @@
 # Operations
 
-Deploying, integrating and debugging.
+This chapter covers runtime configuration, engine modes, consistency, monitoring, and recovery.
+Use [Quick start](quickstart.md) first if you have not run the PoC.
 
-## Engine modes
+## Build and CI baseline
 
-One interface, `EngineGateway`, with two implementations that pass the same contract test suite.
-Switch with one property.
+The supported baseline is Java 21, Operaton 2.1.3, Spring Boot 4.0.7, and Oracle Free 23/23ai.
 
-| | `embedded` | `remote` |
-|---|---|---|
-| Engine location | In your JVM | Separate Operaton over HTTP |
-| Transaction | Engine call joins your transaction | Cannot — uses a command outbox |
-| Task visible | Immediately, `engineSync: SYNCED` | After the dispatcher drains; `PENDING` first |
-| Failure mode | Rolls back with everything else | Retried, then dead-lettered |
+Local compile/package:
 
-### Why remote mode needs an outbox
+```bash
+./mvnw -B -DskipTests package
+```
 
-A remote HTTP call cannot join a database transaction. If you called the engine directly and your
-transaction then rolled back, the engine would hold a task for a case that doesn't exist.
+Authoritative reactor gate:
 
-So in remote mode the intent is written to `CM_ENGINE_COMMAND` **in the same transaction**, and a
-dispatcher drains it afterwards, writing the real engine id back.
+```bash
+./mvnw -B clean install
+```
 
-The consequence you must design for: **a task is not immediately actionable in remote mode.** It
-appears with `engineSync: PENDING` and no available actions, and the worklist hides it until it
-syncs.
+Oracle integration tests use Testcontainers and therefore require a working Docker daemon. The
+checked-in CI workflow runs the full reactor on Temurin 21 and separately runs Node 22
+`npm ci`, `npm test`, and `npm run build` for the Lit package.
+
+The Java job has a bounded timeout and uploads Surefire reports even when a test fails. Treat a
+failed clean reactor as a release stop: a partial module build is useful diagnosis, not production
+evidence. Do not place database passwords, bearer tokens, request payloads, or webhook secrets in
+CI variables echoed by scripts or in uploaded reports.
+
+## Embedded mode
+
+Embedded mode runs Operaton in the application JVM:
+
+```yaml
+casemgmt:
+  engine:
+    mode: embedded
+
+operaton:
+  bpm:
+    eventing:
+      execution: true
+      task: true
+      history: true
+```
+
+The library consumes Operaton's built-in Spring event bridge. No custom `ProcessEnginePlugin` is
+required. Task, execution, and history events are translated into vendor-neutral observations;
+core imports no Operaton engine types.
+
+Because engine and library share the transaction, engine state, projections, audit, and domain
+events can roll back together. Definition deployment is immediately `ACTIVE` when it succeeds.
+
+Use embedded mode for the PoC, simple deployments, and environments where one transaction and
+immediate projection are more important than engine isolation.
+
+## Remote mode
+
+Remote mode talks to an existing stock Operaton REST API:
 
 ```yaml
 casemgmt:
   engine:
     mode: remote
     remote:
-      base-url: http://engine:8080/engine-rest
-      username: cm-service
-      password: ${ENGINE_PASSWORD}
+      base-url: https://operaton.example/engine-rest
+      auth-mode: bearer
+      bearer-token: ${OPERATON_TOKEN}
       connect-timeout-ms: 5000
       read-timeout-ms: 10000
+  schedulers:
+    engine-command-interval-ms: 5000
+    engine-poll-interval-ms: 5000
+    engine-reconcile-interval-ms: 300000
 ```
 
-> **Always set both timeouts.** An engine that is up but hung produces no exception at all. Without
-> a read timeout the calling thread blocks forever and the outbox can never make its
-> retry-or-dead-letter decision.
+Prefer a `RemoteEngineBearerTokenProvider` backed by the deployment's OIDC/client-credential
+integration instead of a static token. Basic auth is suitable only for controlled local setups.
 
----
+Always set finite connect and read timeouts. Without them, one hung engine call can block the
+dispatcher and every command behind it.
 
-## Events and webhooks
+### Command outbox
 
-### The transactional outbox
+A remote HTTP call cannot join the local Oracle transaction. The service therefore writes command
+intent to `CM_ENGINE_COMMAND` in the same transaction as the case change. A scheduler delivers the
+command later and retries with stable command identifiers.
 
-Every mutation writes the domain row, an event, an audit record and any webhook deliveries **in one
-local transaction**. Either all of it commits or none does. There's no window in which a case
-changed but its event didn't.
+Commands include deployment, root start, task operations, message correlation, cancellation, and
+other engine mutations implemented by the gateway. Exhausted commands become dead letters rather
+than remaining silently pending.
 
-### Event types
+### Remote observation and eventual consistency
 
-CloudEvents, `source` from your `engine-id`, type prefixed by your `type-prefix`.
+Remote mode uses no custom Operaton plugin and no Kafka dependency. It observes stock runtime and
+history REST resources using:
 
-| Group | Types |
+- A durable inbox in `CM_REMOTE_OBS_INBOX`, before a fact changes a case projection.
+- Separate, monotonic `(timestamp, id)` checkpoints per tenant and per history stream in
+  `CM_REMOTE_OBS_CHECKPOINT`. Tasks, completed tasks, activities, completed activities, and
+  processes never advance one another's checkpoint.
+- Fixed-window, stable-id pages of 500 rows. A checkpoint advances only after every page in that
+  window is durable; a failed page is read again on the next pass.
+- Stable engine IDs and idempotent lifecycle application.
+- A periodic authoritative reconciliation of every active BPMN root process.
+
+Overlap intentionally produces duplicates; deduplication makes them safe. It also catches records
+that become visible slightly after their engine timestamp.
+
+This is eventual consistency. A local projection can temporarily lag or receive observations out
+of order. Remote timelines describe reconciled observations, not a lossless append-only stream of
+every internal engine event.
+
+Require at least Operaton `AUDIT` history level. Lower history levels do not provide enough data to
+reconstruct task/activity completion reliably.
+
+## Projection health
+
+Derived resources expose:
+
+- `projectionStatus`: `PENDING`, `CURRENT`, `STALE`, or `FAILED`.
+- `lastEngineUpdateAt`.
+- `lastProjectedAt`.
+- `engineSync` on tasks for compatibility.
+
+The remote poller marks active BPMN projections stale after a polling failure. Applications should
+show a non-blocking freshness warning and avoid presenting stale data as confirmed engine state.
+
+Admin health endpoint:
+
+```http
+GET /case-api/v2/orchestration/remote-status
+```
+
+It reports the poller's high-level watermark, last success, error, seconds since success, and
+active BPMN case count. Alert on repeated failures, a growing inbox backlog, poisoned inbox rows,
+or an age greater than the operational freshness objective. The detailed per-stream checkpoint and
+inbox state is deliberately an internal diagnostic, not a customer-facing API.
+
+## Dead-letter recovery
+
+```http
+GET /case-api/v2/orchestration/commands/dead-letters?limit=50
+POST /case-api/v2/orchestration/commands/dead-letters/{commandId}/retry
+```
+
+Both require administration permission. The list intentionally omits payloads. Before retrying:
+
+1. Confirm Operaton is healthy and reachable.
+2. Confirm credentials and history level.
+3. Read the command type and last error.
+4. Determine whether the target effect already happened in Operaton.
+5. Retry only after the underlying cause is resolved.
+
+Stable identifiers and duplicate filtering make retries safer, but operators should still inspect
+partially applied multi-step effects.
+
+## BPMN-only upgrade preflight
+
+This release runs in BPMN-only mode. Liquibase stops before changing the schema when either
+`CM_CASE_DEF.ORCHESTRATION_MODE_` or `CM_CASE_DEF_BINDING.ORCHESTRATION_MODE_` still contains
+`PLAN_MODEL`, with error code `CM-BPMN-ONLY-LEGACY-DATA`.
+
+The guard does not delete or convert legacy data. Before scheduling the upgrade, inventory retained
+legacy rows with a read-only query, decide whether to archive/remove them in an approved migration
+outside this release, and rehearse that decision on a restored copy. Do not bypass the guard or
+hand-edit the Liquibase changelog. A contract that declares `PLAN_MODEL` is rejected at publication
+as well; all newly published contracts must explicitly declare `BPMN`.
+
+## BPMN-first operational recovery
+
+Use the case API and supported operational endpoints; do not correct projections, commands,
+checkpoints, or SLA clocks by editing Oracle tables.
+
+| Situation | Safe response |
 |---|---|
-| Case | `case.created` `case.updated` `case.closed` `case.cancelled` |
-| Work | `case.planitem.transitioned` `case.milestone.achieved` `case.process.started` |
-| Tasks | `case.task.created` `case.task.claimed` `case.task.completed` |
-| Collaboration | `case.comment.added` |
-| SLA | `case.sla.started` `case.sla.paused` `case.sla.resumed` `case.sla.warning` `case.sla.breached` `case.sla.escalated` |
+| Pause outbound/remote work for an incident | Deploy the controlled setting `casemgmt.schedulers.enabled=false`. It pauses every library scheduler, including command delivery and SLA sweeping, so record the start time and restore it promptly after the underlying incident is contained. There is no per-poller pause endpoint. |
+| Projection is stale or root completion is missing | Check `/case-api/v2/orchestration/remote-status`, verify Operaton `AUDIT` history and credentials, then allow the scheduled reconciliation to ingest normal evidence. Do not directly mark a case complete. |
+| Remote command is dead | Inspect the redacted dead-letter entry, confirm whether Operaton already performed the effect, fix the cause, then use the supported dead-letter retry endpoint. A retry is not a substitute for deciding an ambiguous, partially applied effect. |
+| Remote inbox fact retries or becomes poison | Preserve the fingerprint, stream, attempts, and failure detail in the incident. The inbox retries recoverable failures automatically; there is intentionally no general-purpose public replay endpoint for poison evidence. Escalate through the approved support/change procedure so the cause is fixed and replay is witnessed rather than altering rows directly. |
+| Cancel a case | Use `POST /case-api/v2/cases/{caseId}/cancel` with the current ETag. It requests root-process cancellation and terminalizes remaining case work through the normal lifecycle path. |
+| Temporarily disable an SLA-triggered downstream message | Do this in the downstream event consumer or routing rule, not in BPMN and not by disabling SLA clocks. This library records SLA events; it does not send a BPMN message from the SLA lifecycle handler. Record the consumer change, keep clocks and audit enabled, and restore the consumer with a replay decision. |
 
-### Push — webhooks
+When restarting schedulers after an incident, first check command dead letters, remote freshness,
+and SLA backlog. The durable inbox and idempotent lifecycle handler make repeated polling safe;
+they do not make a wrong source configuration safe.
 
-```http
-POST /case-api/v2/webhooks
-{ "url": "https://you.example/hooks/cases",
-  "eventTypes": ["case.closed", "case.sla.breached"] }
-```
-→ `201` with the plaintext `secret`, **shown exactly once**. A SHA-256 hash is stored for
-verification and encrypted signing material is stored for delivery after restart.
+## Required application configuration
 
-Deliveries are signed HMAC-SHA256 in `X-Case-Signature: sha256=<hex>`. Verify before trusting the
-body. Failures retry on a backoff ladder, then land in a dead-letter queue:
+```yaml
+spring:
+  datasource:
+    url: jdbc:oracle:thin:@database:1521/FREEPDB1
+    username: cm
+    password: ${CASEMGMT_DB_PASSWORD}
+  liquibase:
+    change-log: classpath:db/changelog/db.changelog-master.xml
 
-```http
-GET /case-api/v2/webhooks/{id}/dead-letters?page=0&pageSize=25
-POST /case-api/v2/webhooks/{id}/dead-letters/redeliver
-```
-
-Dead-letter listing is pageable and capped at 200 rows per page. Redelivery resets all DEAD rows
-for the subscription to PENDING with a fresh retry budget.
-
-### Pull — the cursor feed
-
-```http
-GET /case-api/v2/events?after=1042&limit=100
+casemgmt:
+  enabled: true
+  engine-id: production-eu-1
+  events:
+    type-prefix: com.example.cases
+  webhooks:
+    secret-encryption-key: ${CASEMGMT_WEBHOOK_SECRET_ENCRYPTION_KEY}
 ```
 
-The pull feed is backed by serialized event sequence allocation. Consumers may still receive
-at-least-once duplicates across webhook and pull recovery, but a committed lower event sequence
-cannot appear after a consumer has advanced past a higher one.
+`type-prefix` and the webhook encryption key have no safe production placeholder. The encryption
+key must be Base64-encoded AES material, stored in a secret manager, and stable across restarts.
 
----
-
-## SLA clocks
-
-Attach a policy to a case type and clocks start with the case. A sweeper emits a warning when the
-threshold passes, a breach when the deadline does, and an escalation event when a target includes
-the `ESCALATE` breach action.
-
-### Business time, not wall time
-
-Deadlines are computed through a **business calendar** — a four-hour target started at 16:00 on a
-Friday lands Monday morning, not Friday evening.
-
-The calendar is deliberately strict and rejects at parse time:
-
-- Overnight or inverted intervals (`from` ≥ `to`).
-- Overlapping intervals on the same day. Abutting ones (09:00–13:00, 13:00–17:00) are fine.
-- Negative durations.
-
-> **Why so strict:** overlapping intervals used to double-count the overlap, which made deadlines
-> land *earlier* than the policy said. For a breach calculation that's the dangerous direction —
-> you'd report breaches that hadn't happened.
-
-### Pausing
-
-```http
-POST /case-api/v2/cases/{id}/slas/{slaId}/pause    { "reason": "waiting-on-customer" }
-POST /case-api/v2/cases/{id}/slas/{slaId}/resume
-```
-
-Resume re-derives the deadline through the calendar rather than adding elapsed wall-clock time, so
-a pause across a weekend costs the case only its working hours.
-
-Targets may configure `pauseReasons` as a whitelist of accepted pause reasons. The legacy database
-column is still named `PAUSED_STATES_JSON_`, but the runtime treats it as reasons, not lifecycle
-states.
-
----
-
-## Configuration
+## Configuration reference
 
 | Property | Default | Meaning |
 |---|---|---|
-| `casemgmt.enabled` | `true` | Master switch. `false` leaves a plain Operaton app untouched. |
-| `casemgmt.engine-id` | — | Stamped as the CloudEvents `source`. |
-| `casemgmt.engine.mode` | `embedded` | `embedded` or `remote`. |
-| `casemgmt.engine.remote.base-url` | — | `engine-rest` root. |
-| `casemgmt.engine.remote.auth-mode` | `auto` | `auto`, `none`, `basic`, or `bearer`. |
-| `casemgmt.engine.remote.username` / `.password` | — | Basic auth for the engine when `auth-mode=basic`. |
-| `casemgmt.engine.remote.bearer-token` | — | Static bearer token for controlled deployments; prefer a `RemoteEngineBearerTokenProvider` for OIDC/client credentials. |
-| `casemgmt.engine.remote.connect-timeout-ms` | `5000` | TCP connect bound. |
-| `casemgmt.engine.remote.read-timeout-ms` | `10000` | Bounds a hung engine. |
-| `casemgmt.events.type-prefix` | **none** | Startup fails if unset and webhooks are enabled. |
-| `casemgmt.webhooks.secret-encryption-key` | **none** | Base64 AES key required by the default database-backed webhook secret store. A custom `WebhookSecretStore` does not require it. |
-| `casemgmt.webhooks.secret-key-id` | `default` | Key id stored next to encrypted webhook secrets. |
-| `casemgmt.security.mode` | `basic` | Local PoC mode. Use `oidc` for JWT/OIDC bearer-token mode. |
-| `casemgmt.security.engine-integration-principal` | `admin` | Basic-mode integration principal allowed to write to Operaton REST. Ignored in OIDC mode. |
-| `casemgmt.security.oidc.engine-permissions-claim` | `engine_permissions` | Dedicated OIDC claim for engine integration permissions; `api` maps to `engine:api`. |
-| `casemgmt.schedulers.enabled` | `true` | Turns off all background workers. |
-| `casemgmt.schedulers.webhook-interval-ms` | `5000` | Webhook drain. |
-| `casemgmt.schedulers.engine-command-interval-ms` | `5000` | Remote-mode outbox drain. |
-| `casemgmt.schedulers.sla-sweep-interval-ms` | `60000` | SLA warning/breach sweep. |
-| `casemgmt.schedulers.idempotency-purge-interval-ms` | `3600000` | Retention purge. |
+| `casemgmt.enabled` | `true` | Master switch |
+| `casemgmt.engine-id` | none | Case ID/Event source namespace |
+| `casemgmt.engine.mode` | `embedded` | `embedded` or `remote` |
+| `casemgmt.engine.remote.base-url` | none | Operaton `engine-rest` root |
+| `casemgmt.engine.remote.auth-mode` | `auto` | `auto`, `none`, `basic`, or `bearer` |
+| `casemgmt.engine.remote.connect-timeout-ms` | `5000` | TCP connection bound |
+| `casemgmt.engine.remote.read-timeout-ms` | `10000` | Response wait bound |
+| `casemgmt.events.type-prefix` | none | CloudEvents type namespace |
+| `casemgmt.webhooks.secret-encryption-key` | none | Base64 AES key for signing-secret storage |
+| `casemgmt.schedulers.engine-command-interval-ms` | `5000` | Remote command dispatch interval |
+| `casemgmt.schedulers.engine-poll-interval-ms` | `5000` | Incremental observation interval |
+| `casemgmt.schedulers.engine-reconcile-interval-ms` | `300000` | Full active-case reconciliation interval |
+| `casemgmt.schedulers.sla-sweep-interval-ms` | `60000` | SLA sweep interval |
+| `casemgmt.schedulers.idempotency-purge-interval-ms` | `3600000` | Key-retention sweep interval |
+| `casemgmt.schedulers.idempotency-retention-hours` | `48` | Completed idempotency retention |
+| `casemgmt.worker-permissions.enabled` | `false` | Enable external Worker Permissions evaluation |
 
-> **Multi-instance schedulers.** Webhook dispatch, engine-command dispatch and SLA sweeping all
-> claim bounded batches before processing. This avoids duplicate scheduler work across application
-> instances; leases still mean long-running claimed work should be monitored.
+## Security model
 
----
+Production should use OIDC/JWT. The PoC basic-auth users exist only for local learning.
 
-## Extending
+The default OIDC mapping expects tenant, groups, Worker Permissions, and dedicated engine
+permissions claims. Direct writes to `/engine-rest/**` are reserved for the configured integration
+principal or `engine:api`; ordinary users must work through `/case-api/v2`.
 
-Five beans are declared `@ConditionalOnMissingBean`. Declare your own and it wins.
+Tenant isolation is fail-closed. A cross-tenant resource ID returns `404` so the API does not
+confirm that another tenant's resource exists.
 
-| Bean | Substitute it to… |
-|---|---|
-| `CallerResolver` | Map a custom principal or Worker Permissions model. |
-| `ActionPolicy` | Change the role model or the action vocabulary. |
-| `CriterionEvaluator` | Swap the expression language. |
-| `FormValidator` | Use a different schema dialect. |
-| `EventPublisher` | Change the event envelope or add a sink. |
+## Events and webhooks
 
-### Moving to OIDC
+Domain changes, audit, events, and local outbox rows commit together. CloudEvent types include case,
+task, plan-item, milestone, process, collaboration, and SLA events.
 
-Set `casemgmt.security.mode=oidc`, configure Spring's
-`spring.security.oauth2.resourceserver.jwt.*` issuer/JWKS settings, and map the configured OIDC
-claims to the authorities the platform expects.
+Webhook creation returns the signing secret once. Store it immediately. Verify
+`X-Case-Signature: sha256=<hex>` before processing a delivery. Failed deliveries retry and then use
+the webhook dead-letter endpoints documented in the [API cookbook](api-cookbook.md).
 
-The default OIDC converter maps `tenant` to `tenant:<id>`, maps `groups` directly, and maps
-`worker_permissions` directly by default. A bank deployment can still replace `CallerResolver` or
-`ActionPolicy` when Worker Permissions require a different vocabulary.
+## SLAs
 
-> **Controllers are not overridable.** They arrive via `@Import`. To change an endpoint's behaviour,
-> change the policy or the service behind it.
+SLA targets use a strict business calendar. It rejects inverted or overlapping working intervals
+instead of guessing. Pausing records an allowed reason; resuming recalculates through business time
+rather than adding raw wall-clock duration.
 
----
-
-## Known limits
-
-Documented gaps that change how you'd use this. The
-[issue tracker](https://github.com/Ronrock/case-management-design/issues) has all of them;
-[`FINDINGS.md`](../../FINDINGS.md) has the reasoning.
-
-| Limit | What it means for you |
-|---|---|
-| Remote engine OIDC token source | Use `casemgmt.engine.remote.auth-mode=bearer` and provide a `RemoteEngineBearerTokenProvider` backed by the bank's OIDC/client-credential integration. The local PoC may still use Basic Auth for convenience. |
-| Production UI completeness | The Lit package proves standalone and portal-adapter integration, but production form UX, accessibility, and bank design-system fit still require product work. |
-| Engine Tasklist writes | Ordinary users are blocked from direct `engine-rest` writes. If Tasklist writes must remain available, add engine-side reconciliation back into the case state machine. |
-
----
+Monitor the SLA sweeper like other scheduled workers. Multi-instance workers claim bounded batches
+to reduce duplicate work.
 
 ## Troubleshooting
 
-| Symptom | Likely cause |
+| Symptom | Check |
 |---|---|
-| Startup fails naming `type-prefix` | Set `casemgmt.events.type-prefix`. It has no default on purpose. |
-| Every request is `403` | The principal has no `tenant:<id>` authority, or has more than one. |
-| A task never appears in the worklist | Remote mode and it hasn't synced (`engineSync: PENDING`), or your groups don't match its `candidateGroups`. |
-| A criterion never fires | Check the `defKey` spelling. Unknown references are rejected when a definition is deployed. |
-| Close is refused | A `required` item is still open. The `409` body names it. |
-| Webhooks cannot be signed after startup | `casemgmt.webhooks.secret-encryption-key` is missing or changed since the subscription was created. |
-| A child item never opens | Check its parent stage's state before its criteria — containment is enforced. |
+| Application cannot connect to Oracle | `docker compose ps`, datasource URL, user/password, port 1521 |
+| Oracle container exits before ready | Docker memory/platform logs; exit 137/139 occurs before Liquibase |
+| Startup names `type-prefix` | Set `casemgmt.events.type-prefix` |
+| Startup names webhook encryption key | Supply the same valid Base64 key on every restart |
+| Every case request is `401` | Authentication configuration and credentials/token |
+| Every case request is `403` | Exactly one `tenant:<id>` authority and required group/permission |
+| BPMN definition stays `DEPLOYING` | Remote dispatcher health and deployment dead letters |
+| Task has `engineSync: PENDING` | Command dispatcher, remote credentials, engine availability |
+| Projection is `STALE` | `/orchestration/remote-status`, Operaton history, poller logs |
+| Milestone/stage does not project | BPMN case-management tag, eventing config, activity history |
+| Root process ended but case is active | Root ID correlation, history availability, reconciliation status |
+| Form returns `422` | Pinned contract schema and `violations[]` pointers |
+| Full Maven build has many setup errors | Look for one shared Oracle Testcontainer startup failure first |
+
+## Known boundaries
+
+- Legacy plan-model runtime is not supported. The upgrade preflight above fails closed when
+  retained legacy definitions or bindings exist; no automatic conversion exists.
+- Remote mode is reconciled eventual consistency, not an engine event-stream replica.
+- Presentation metadata is not secret; field values must be masked server-side.
+- Running-case contract/presentation upgrades, controlled process migration, and embedded Studio are
+  roadmap work and must not be represented operationally as already available.

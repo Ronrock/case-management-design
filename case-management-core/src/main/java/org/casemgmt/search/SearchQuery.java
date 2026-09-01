@@ -2,6 +2,7 @@ package org.casemgmt.search;
 
 import java.util.List;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 public record SearchQuery(String tenantId, String workerId, List<String> groups, String q,
@@ -39,7 +40,7 @@ public record SearchQuery(String tenantId, String workerId, List<String> groups,
         pageSize = Math.clamp(pageSize, 1, MAX_RESULT_WINDOW);
         if (((long) page + 1L) * pageSize > MAX_RESULT_WINDOW) {
             throw new IllegalArgumentException("Search result window exceeds "
-                    + String.format("%,d", MAX_RESULT_WINDOW) + " items");
+                    + String.format(Locale.ROOT, "%,d", MAX_RESULT_WINDOW) + " items");
         }
     }
 

@@ -1,7 +1,7 @@
 package org.casemgmt.service;
 
 import org.casemgmt.OracleTestBase;
-import org.casemgmt.domain.CasePriority;
+import org.casemgmt.domain.CaseDefinition;
 import org.casemgmt.event.CaseEvent;
 import org.casemgmt.event.EventPublisher;
 import org.casemgmt.repo.*;
@@ -17,7 +17,6 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
 import javax.sql.DataSource;
-import java.nio.charset.StandardCharsets;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -50,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
 
     private AnnotationConfigApplicationContext ctx;
-    private CaseService cases;
+    private CaseDefinition definition;
     private SlaService sla;
     private SlaSweeper sweeper;
     private SlaRepository slaRepo;
@@ -60,9 +59,7 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
 
     @BeforeEach
     void setUp() throws Exception {
-        String json = new String(getClass().getResourceAsStream("/definitions/test-definition.json")
-                .readAllBytes(), StandardCharsets.UTF_8);
-        new CaseDefinitionService(new CaseDefinitionRepository(dataSource())).deploy(json, "system", "t1");
+        definition = TestServices.deployBpmnDefinition(dataSource(), "widget-review", "t1");
 
         slaRepo = new SlaRepository(jdbc());
         slaRepo.insertCalendar("cal-nl", Map.of(
@@ -81,12 +78,11 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
                 "PT4H", "PT3H", List.of("WAITING_ON_CUSTOMER"), List.of("EMIT_EVENT"));
 
         ctx = springContext(SlaServiceTestConfig.class);
-        cases = ctx.getBean(CaseService.class);
         sla = ctx.getBean(SlaService.class);
         sweeper = ctx.getBean(SlaSweeper.class);
         publisher = ctx.getBean(FailingPublisher.class);
 
-        caseId = cases.create("widget-review", "t1", null, "T", CasePriority.MEDIUM, Map.of(), alice).id();
+        caseId = TestServices.insertBpmnCase(dataSource(), definition, "T", alice.userId()).id();
     }
 
     @AfterEach
@@ -171,8 +167,8 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
         List<String> caseIds = new ArrayList<>();
         caseIds.add(caseId);
         for (int i = 1; i < 6; i++) {
-            caseIds.add(cases.create("widget-review", "t1", null, "T" + i,
-                    CasePriority.MEDIUM, Map.of(), alice).id());
+            caseIds.add(TestServices.insertBpmnCase(
+                    dataSource(), definition, "T" + i, alice.userId()).id());
         }
         for (String id : caseIds) {
             sla.startClocks(id, "pol-1", alice);
@@ -216,9 +212,8 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
     }
 
     /**
-     * Registers the REAL {@link SlaService} and {@link SlaSweeper} beans (plus the {@link
-     * CaseService} fixture depends on) so {@code TransactionManagerConfig}'s auto-proxy creator
-     * wraps them.
+     * Registers the REAL {@link SlaService} and {@link SlaSweeper} beans so
+     * {@code TransactionManagerConfig}'s auto-proxy creator wraps them.
      */
     @Configuration
     static class SlaServiceTestConfig {
@@ -232,12 +227,6 @@ class SlaServiceTransactionalIntegrationTest extends OracleTestBase {
             JdbcClient jdbc = JdbcClient.create(dataSource);
             return new FailingPublisher(new EventRepository(jdbc), new AuditRepository(jdbc),
                     new WebhookRepository(jdbc), "org.example.cm", "eng-test");
-        }
-
-        @Bean
-        CaseService caseService(DataSource dataSource,
-                                CaseServiceTransactionalIntegrationTest.FailingGateway gateway) {
-            return TestServices.caseService(dataSource, gateway);
         }
 
         @Bean

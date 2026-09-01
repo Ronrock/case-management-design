@@ -1,93 +1,209 @@
 # Core concepts
 
-Read this before authoring your first case definition. Five ideas cover almost everything.
+This chapter explains the vocabulary used in the code and API. You do not need previous BPMN,
+Camunda, or Operaton experience.
 
-## Definition vs. instance
+## Case definition and case instance
 
-A **case definition** is the template — versioned, and immutable once deployed. A **case instance**
-is one running case, pinned to the definition version it started on.
+A **case definition** is a versioned template. A **case instance** is one real occurrence of that
+template—for example, complaint `CMP-1042`.
 
-Deploying v2 never disturbs cases running on v1. They keep their rules for life. The definition id
-is `{tenant}:{key}:{version}`, so two tenants can hold the same key independently.
+A case instance is pinned to the exact definition version used when it starts. Publishing a newer
+version changes future cases, not cases already running.
 
-## Plan items
+## What BPMN is
 
-A **plan item** is one element of work inside a case.
+BPMN stands for **Business Process Model and Notation**. It is a standard vocabulary for drawing
+executable processes. The saved `.bpmn` file is XML, but developers normally edit it as a diagram
+in a modeler.
 
-| Type | What it is |
+You need only a few symbols to understand the complaint example:
+
+| BPMN element | Diagram shape | Meaning |
+|---|---|---|
+| Start event | Thin circle | Where a process instance begins |
+| End event | Thick circle | Where a path ends |
+| Sequence flow | Arrow | Where the token moves next |
+| User task | Rounded rectangle with a person icon | Work that pauses until a person completes it |
+| Subprocess | Rounded rectangle containing other elements | A named section of flow; it can be projected as a case stage |
+| Intermediate event | Double circle | Something that occurs between start and end; tagged events can become milestones |
+| Gateway | Diamond | A decision, split, or join in the path |
+
+### The token mental model
+
+Imagine a token placed on the start event. Operaton moves it along arrows. Automatic elements run
+immediately. A user task holds the token until the task is completed. A gateway decides which
+arrow is taken. When no root-process token remains because the process reached an end event, the
+root process is complete.
+
+This simplified model is enough for ordinary sequential processes. Parallel and multi-instance
+models can have several active tokens and repeated activity instances; the projection uses engine
+activity-instance and task IDs so each occurrence remains distinct.
+
+## What Operaton is
+
+Operaton is the process engine used by this project. It parses BPMN, creates process instances,
+waits at user tasks, correlates messages, stores history, and completes or cancels processes.
+
+If you encounter older material using “Camunda 7” terminology, many engine concepts and BPMN
+extension names will look familiar. You do not need Camunda knowledge to use this project: use the
+Operaton 2.1 documentation and the case API described here.
+
+Normal application clients should call `/case-api/v2`, not `/engine-rest`. The case API adds the
+case contract, tenancy, Worker Permissions, optimistic locking, form validation, audit, events,
+and a stable projection that is independent of Operaton Java types.
+
+## Root process and linked processes
+
+Every BPMN-backed case has one **root process instance**. Its ID is stored on the case as
+`rootProcessInstanceId`.
+
+The root process owns the case lifecycle:
+
+- Creating the case starts the root process.
+- Root-process completion closes the case.
+- Cancelling the case cancels the root process.
+- Completion or cancellation terminalizes remaining projected and ad-hoc work.
+
+A case can also start linked or ad-hoc child processes. Completing a child process does **not**
+close the case. Only the process instance pinned as the root can do that.
+
+## Projection
+
+Operaton and the case API store different views of the same running work. A **projection** is the
+case-management representation derived from engine observations.
+
+The projection maps engine data into stable resources:
+
+| Engine observation | Case API projection |
 |---|---|
-| `HUMAN_TASK` | Work a person does. Mirrored into the engine as a real task with candidate groups and a form. |
-| `STAGE` | A container for other items. Completes when its required children are done. |
-| `MILESTONE` | A marker with no work attached. Achieved when its criteria hold. |
-| `PROCESS_TASK` | Names a BPMN process. When it becomes `ACTIVE`, the platform starts the configured process and links it to the case. |
+| Root process | Case lifecycle and `rootProcessInstanceId` |
+| Tagged subprocess activity | Stage plan item |
+| User-task occurrence | Human-task plan item plus task resource |
+| Tagged intermediate event | Milestone and milestone plan item |
+| Assignment change | Task assignee/state update |
+| Root completion | Closed or cancelled case |
 
-## The lifecycle
+Each derived resource reports freshness:
 
-Every plan item moves through the same states. Learn these five and the system stops being
-mysterious.
-
-| State | Meaning |
+| Field | Meaning |
 |---|---|
-| `AVAILABLE` | Exists, but its entry conditions aren't met yet. Nobody can act on it. |
-| `ENABLED` | Conditions met, but it needs a human to opt in (`manualActivation`). |
-| `ACTIVE` | Live and workable. A human task in this state is in somebody's worklist. |
-| `COMPLETED` | Finished normally. |
-| `TERMINATED` | Ended without completing — cancelled, or swept when its parent ended. |
+| `projectionStatus` | `PENDING`, `CURRENT`, `STALE`, or `FAILED` |
+| `lastEngineUpdateAt` | Timestamp reported by the engine |
+| `lastProjectedAt` | Timestamp when the local projection was updated |
+| `engineSync` | Compatibility field on task resources |
 
-`COMPLETED` and `TERMINATED` are both *ended*. An ended item is never reconsidered, except through
-repetition (below).
+Projection writes are idempotent. Observing the same engine task or activity twice updates the
+same row instead of creating duplicates.
 
-## Criteria (sentries)
+## Embedded and remote observation
 
-An **entry criterion** is a JUEL expression deciding when an item opens. Expressions read other
-items through an `items` map and case variables through `vars`:
+There are two deployment modes:
 
+### Embedded
+
+Operaton and the case library share one JVM and database transaction. The library consumes
+Operaton's built-in Spring task, execution, and history events. Engine changes, projections,
+domain events, and audit can commit or roll back together.
+
+### Remote
+
+Operaton runs elsewhere and is accessed through stock REST APIs—no custom engine plugin is
+required. Commands use a transactional outbox. Observations use overlapping runtime/history polls,
+stable fingerprints, idempotent upserts, and periodic full reconciliation.
+
+Remote mode is explicitly eventually consistent. A successful case API command may return `202`
+and `PENDING`; the projection becomes `CURRENT` only after REST observation confirms the engine
+state. A remote timeline is a history of reconciled observations, not a guaranteed lossless copy
+of every internal engine event.
+
+## The three releases and one binding
+
+A BPMN-backed definition version binds three immutable releases:
+
+```text
+orchestration release --\
+contract release -------> immutable case-definition version -> running case
+presentation release --/
 ```
-${items.register.state == 'COMPLETED'}
-${items.assess.state == 'COMPLETED' && vars.amount > 1000}
-```
 
-An **exit criterion** ends an item early when it becomes true.
+### Orchestration release
 
-> **Exit beats completion.** If both could fire in the same pass, the item is `TERMINATED`, not
-> `COMPLETED`. Exiting a stage cascades termination through its whole subtree.
+Contains BPMN and optional DMN. It answers “what flow does Operaton execute?”
 
-Multiple entries in `entryCriteria` are ANDed.
+### Contract release
 
-## The evaluation pass
+Contains canonical fields, JSON Schema forms, role and candidate-group vocabulary, SLA bindings,
+search profiles, and declarative ad-hoc actions. It answers “what data and actions are valid?”
 
-This is the heart of the system. After **every** mutation the service:
+### Presentation release
 
-1. Takes a snapshot of the case and all its plan items.
-2. Evaluates every criterion against that snapshot.
-3. Collects the resulting transitions and applies them together.
-4. Repeats until nothing more changes.
+Contains the Scenario A manifest interpreted by the Lit shell. It answers “how should already
+authorized resources be arranged?” It is not a security boundary; the server masks values first.
 
-Criteria are evaluated against a *consistent* view, so two items whose conditions depend on each
-other can't observe a half-applied world.
+### Case-definition version
 
-> The same property has a cost: an item admitted during a pass isn't visible to the rest of that
-> same pass. Stages that just became active are given one evaluation round before autocomplete can
-> terminate leftover children, so contained optional work has a chance to enter.
+Binds exact release IDs and SHA-256 hashes after cross-artifact validation. A release is immutable;
+publish a new release rather than editing an old one.
 
-## Required, optional and discretionary
+## Forms and canonical fields
 
-| Flag | Effect |
-|---|---|
-| `required: true` | The parent stage — and the case — cannot close until this is finished. |
-| `manualActivation: true` | *Discretionary.* Reaches `ENABLED` and waits for someone to `start` it. |
-| `repetition: true` | A fresh instance is created each time the criteria hold again. |
+A BPMN user task carries a symbolic `operaton:formKey`, such as `assessForm`. The contract contains
+the matching JSON Schema and an optional `uiSchema`.
 
-Discretionary items are how you model optional work a handler *may* choose to do — an investigation
-that isn't always warranted. Repetition is how you model "and they may do it several times".
+On completion:
 
-## Containment
+1. The API reauthorizes the action.
+2. Submitted variables are validated against the pinned form schema.
+3. A validation failure returns `422 form-invalid` with JSON Pointer violations.
+4. Valid variables are passed to Operaton and projected through the case API.
 
-A plan item with a `parentStageKey` is contained by that stage. Containment is enforced, not
-decorative:
+Canonical field IDs prevent each form or component from inventing a different JSON path. The Lit
+shell resolves field IDs through the pinned contract and receives only server-authorized values.
 
-- A child cannot become `ACTIVE` unless its parent stage is `ACTIVE`.
-- Ending a stage cascades to the entire subtree beneath it, at every depth.
-- A stage will not complete while a `required` child is unfinished, or while any child is `ACTIVE`.
+## Candidate groups, roles, and permissions
 
-If you find a child that never opens, check its parent's state before you check its criteria.
+These concepts are related but not interchangeable:
+
+| Concept | Example | Controls |
+|---|---|---|
+| Tenant authority | `tenant:t1` | Which tenant's resources can be seen |
+| Identity/candidate group | `handlers` | Who may discover and claim a BPMN task |
+| Case role | `handler` | What a participant may do on one case |
+| Worker Permission | `task:complete` plus allowed fields | Whether the API may return a value or execute an action |
+
+The contract declares the vocabulary. A BPMN task referencing an undeclared candidate group is
+rejected when a case-definition version is bound.
+
+Missing or empty permission decisions deny access. Rendering an action never authorizes its later
+execution; the server reauthorizes every request.
+
+## Stages, milestones, tasks, and discretionary work
+
+- A **stage** is a meaningful group of work. In BPMN, a subprocess tagged
+  `casemgmt:stage="true"` projects as a stage.
+- A **milestone** records that something important happened. A tagged intermediate event projects
+  as an achieved milestone.
+- A **task** is actionable work. BPMN user tasks and contract-declared ad-hoc tasks use the same
+  task projection.
+- **Discretionary work** is allowed by the contract but is outside the BPMN token flow. It can be
+  a task, child process, or message action. Root completion terminalizes discretionary work still
+  open.
+
+## `availableActions` is the client contract
+
+Case, task, and plan-item responses contain `availableActions[]`. Each action contains a name,
+HTTP method, URL, and sometimes a form reference.
+
+Clients should render only those actions. They should not decide that an active-looking task must
+be claimable or that an active case must be closable. The server uses the same policy vocabulary
+to advertise and enforce actions, and then rechecks authorization at execution time.
+
+## Optimistic locking and idempotency
+
+Mutable resources carry a version and return an ETag. Send that value in `If-Match` when changing
+the resource. On conflict, re-read the resource and ask the user to decide again; do not silently
+replay an old decision against new data.
+
+Case creation supports `Idempotency-Key`. The remote command outbox also uses stable command IDs
+internally so retryable delivery does not intentionally create duplicate effects.

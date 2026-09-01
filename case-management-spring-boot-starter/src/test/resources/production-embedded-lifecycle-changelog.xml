@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+  <changeSet id="production-lifecycle-base" author="test">
+    <sqlFile path="db/changelog/sql/db-design.sql"
+             splitStatements="true" endDelimiter=";" stripComments="true"/>
+  </changeSet>
+  <changeSet id="production-lifecycle-additions" author="test">
+    <sqlFile path="production-embedded-lifecycle-schema.sql"
+             splitStatements="true" endDelimiter=";" stripComments="true"/>
+  </changeSet>
+  <changeSet id="production-lifecycle-h2-runtime-mode" author="test">
+    <comment>Use Oracle mode to load production DDL, then restore H2 syntax for Operaton queries.</comment>
+    <sql>SET MODE LEGACY</sql>
+  </changeSet>
+</databaseChangeLog>

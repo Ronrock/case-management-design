@@ -1,0 +1,13 @@
+{
+  "name": "@casemgmt/modeler-templates",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Operaton element templates for the case-management BPMN vocabulary.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "bpmn-moddle": "9.0.1"
+  }
+}

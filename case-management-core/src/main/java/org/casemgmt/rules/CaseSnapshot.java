@@ -9,7 +9,7 @@ public record CaseSnapshot(CaseInstance caseInstance, CaseDefinition definition,
 
     /**
      * Orders instances of the same defKey by repetitionNo, the monotonic counter both
-     * PlanModelInstantiator.initialItems and .repeat() assign (starting at 1, incrementing
+     * The case runtime assigns repetition numbers (starting at 1, incrementing
      * by 1 per repeat) — never null, never clock-dependent. createdAt is kept only as a
      * tiebreaker for the case where repetitionNo is somehow equal; it must not be the
      * primary key, because two repeats created within the same clock tick can share a

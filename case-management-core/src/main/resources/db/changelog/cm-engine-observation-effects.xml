@@ -1,0 +1,408 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                       http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+
+  <!-- One durable row per tenant authority and deterministic engine fact. This is additive so
+       a rolling application deployment can introduce lifecycle effects without rewriting history. -->
+  <changeSet id="cm-applied-engine-observation-structure-guard" author="casemgmt"
+             runAlways="true">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="CM_APPLIED_ENGINE_OBSERVATION has an incompatible structure">
+      <or>
+        <not><tableExists tableName="CM_APPLIED_ENGINE_OBSERVATION"/></not>
+        <sqlCheck expectedResult="16"><![CDATA[
+          SELECT COUNT(*) FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
+            AND DATA_DEFAULT IS NULL AND (
+              (COLUMN_NAME = 'OBSERVATION_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'TENANT_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 64 AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'FINGERPRINT_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 64 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'CLAIM_TOKEN_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 43 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'STATUS_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 16 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'SOURCE_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'CASE_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'PROCESS_INSTANCE_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'ENTITY_ID_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 128 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'ENTITY_REVISION_' AND DATA_TYPE = 'NUMBER' AND DATA_PRECISION = 19 AND NVL(DATA_SCALE, 0) = 0 AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'EVENT_TYPE_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 64 AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'ENGINE_OCCURRED_AT_' AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'CLAIMED_AT_' AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'N') OR
+              (COLUMN_NAME = 'APPLIED_AT_' AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'FAILED_AT_' AND DATA_TYPE = 'TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE = 'Y') OR
+              (COLUMN_NAME = 'FAILURE_DETAIL_' AND DATA_TYPE = 'VARCHAR2' AND CHAR_LENGTH = 2000 AND NULLABLE = 'Y'))
+        ]]></sqlCheck>
+      </or>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-applied-engine-observation" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><tableExists tableName="CM_APPLIED_ENGINE_OBSERVATION"/></not>
+    </preConditions>
+    <createTable tableName="CM_APPLIED_ENGINE_OBSERVATION">
+      <column name="OBSERVATION_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="TENANT_ID_" type="VARCHAR2(64 BYTE)"/>
+      <column name="FINGERPRINT_" type="VARCHAR2(64 BYTE)"><constraints nullable="false"/></column>
+      <column name="CLAIM_TOKEN_" type="VARCHAR2(43 BYTE)"><constraints nullable="false"/></column>
+      <column name="STATUS_" type="VARCHAR2(16 BYTE)"><constraints nullable="false"/></column>
+      <column name="SOURCE_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="CASE_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="PROCESS_INSTANCE_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="ENTITY_ID_" type="VARCHAR2(128 BYTE)"><constraints nullable="false"/></column>
+      <column name="ENTITY_REVISION_" type="NUMBER(19)"/>
+      <column name="EVENT_TYPE_" type="VARCHAR2(64 BYTE)"><constraints nullable="false"/></column>
+      <column name="ENGINE_OCCURRED_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="CLAIMED_AT_" type="TIMESTAMP WITH TIME ZONE"><constraints nullable="false"/></column>
+      <column name="APPLIED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="FAILED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+      <column name="FAILURE_DETAIL_" type="VARCHAR2(2000 BYTE)"/>
+    </createTable>
+  </changeSet>
+
+  <changeSet id="cm-applied-engine-observation-status-constraint" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+          AND TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
+          AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS'
+          AND CONSTRAINT_TYPE = 'C'</sqlCheck>
+    </preConditions>
+    <sql>
+      ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS
+        CHECK (STATUS_ IN ('CLAIMED','APPLIED','FAILED'))
+    </sql>
+  </changeSet>
+
+  <changeSet id="cm-applied-engine-observation-status-timestamps-constraint" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+          AND TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION'
+          AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS_TS'
+          AND CONSTRAINT_TYPE = 'C'</sqlCheck>
+    </preConditions>
+    <sql>
+      ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS_TS
+        CHECK ((STATUS_ != 'APPLIED' OR APPLIED_AT_ IS NOT NULL)
+           AND (STATUS_ != 'FAILED' OR FAILED_AT_ IS NOT NULL))
+    </sql>
+  </changeSet>
+
+  <!-- Oracle's ordinary (TENANT_ID_, FINGERPRINT_) unique index accepts multiple NULL
+       tenants. The first expression is always 0 or 1, so tenant-less rows are indexed and
+       cannot collide with a named tenant; unlike a sentinel it cannot alias a legal tenant. -->
+  <changeSet id="cm-applied-engine-observation-authority-index-structure-guard" author="casemgmt"
+             runAlways="true">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="UQ_CM_AEO_AUTH_FINGERPRINT has an incompatible structure">
+      <customPrecondition className="org.casemgmt.migration.OracleOptionalIndexPrecondition">
+        <param name="name" value="UQ_CM_AEO_AUTH_FINGERPRINT"/>
+        <param name="table" value="CM_APPLIED_ENGINE_OBSERVATION"/>
+        <param name="unique" value="true"/>
+        <param name="entries"
+               value="CASEWHENTENANT_ID_ISNULLTHEN1ELSE0END|TENANT_ID_|FINGERPRINT_"/>
+      </customPrecondition>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-applied-engine-observation-authority-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_APPLIED_ENGINE_OBSERVATION"
+                        indexName="UQ_CM_AEO_AUTH_FINGERPRINT"/></not>
+    </preConditions>
+    <sql>
+      CREATE UNIQUE INDEX UQ_CM_AEO_AUTH_FINGERPRINT ON CM_APPLIED_ENGINE_OBSERVATION (
+        CASE WHEN TENANT_ID_ IS NULL THEN 1 ELSE 0 END,
+        TENANT_ID_,
+        FINGERPRINT_)
+    </sql>
+  </changeSet>
+
+  <changeSet id="cm-applied-engine-observation-status-index-structure-guard" author="casemgmt"
+             runAlways="true">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="IX_CM_AEO_STATUS has an incompatible structure">
+      <customPrecondition className="org.casemgmt.migration.OracleOptionalIndexPrecondition">
+        <param name="name" value="IX_CM_AEO_STATUS"/>
+        <param name="table" value="CM_APPLIED_ENGINE_OBSERVATION"/>
+        <param name="unique" value="false"/>
+        <param name="entries" value="STATUS_|SYS_EXTRACT_UTC(CLAIMED_AT_)"/>
+      </customPrecondition>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-applied-engine-observation-status-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN" onError="HALT">
+      <not><indexExists tableName="CM_APPLIED_ENGINE_OBSERVATION"
+                        indexName="IX_CM_AEO_STATUS"/></not>
+    </preConditions>
+    <createIndex tableName="CM_APPLIED_ENGINE_OBSERVATION" indexName="IX_CM_AEO_STATUS">
+      <column name="STATUS_"/>
+      <column name="CLAIMED_AT_"/>
+    </createIndex>
+  </changeSet>
+
+  <!-- These schema mutations are intentionally granular and guarded. Oracle DDL commits before a
+       later statement can fail, so each step must be independently resumable after a partially
+       attempted deployment. -->
+  <changeSet id="cm-engine-observation-hardening-structure-guard" author="casemgmt" runAlways="true">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="Engine observation hardening structure is incompatible">
+      <sqlCheck expectedResult="1"><![CDATA[
+        SELECT CASE WHEN
+          (NOT EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='OBSERVATION_KIND_') OR
+           EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='OBSERVATION_KIND_'
+             AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=32 AND NULLABLE='N'
+             AND REGEXP_REPLACE(UPPER(DATA_DEFAULT_VC),'[[:space:]'']','')='LEGACY'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='IGNORED_AT_') OR
+           EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='IGNORED_AT_'
+             AND DATA_TYPE='TIMESTAMP(6) WITH TIME ZONE' AND NULLABLE='Y' AND DATA_DEFAULT IS NULL))
+          AND EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_PLAN_ITEM' AND COLUMN_NAME='PROC_INST_ID_'
+             AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH IN (64,128) AND NULLABLE='Y' AND DATA_DEFAULT IS NULL)
+          AND (NOT EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_TASK' AND COLUMN_NAME='PROC_INST_ID_') OR
+           EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_TASK' AND COLUMN_NAME='PROC_INST_ID_'
+             AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128 AND NULLABLE='Y' AND DATA_DEFAULT IS NULL))
+          AND (NOT EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='ENGINE_ID_') OR
+           EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND COLUMN_NAME='ENGINE_ID_'
+             AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128 AND NULLABLE='Y' AND DATA_DEFAULT IS NULL))
+          AND (NOT EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_LINKED_PROCESS' AND COLUMN_NAME='PROC_DEF_ID_') OR
+           EXISTS (SELECT 1 FROM USER_TAB_COLUMNS WHERE TABLE_NAME='CM_LINKED_PROCESS' AND COLUMN_NAME='PROC_DEF_ID_'
+             AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128 AND NULLABLE='Y' AND DATA_DEFAULT IS NULL))
+          AND (NOT EXISTS (SELECT 1 FROM USER_CONSTRAINTS WHERE CONSTRAINT_NAME='CK_CM_AEO_STATUS') OR
+           EXISTS (SELECT 1 FROM USER_CONSTRAINTS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION'
+             AND CONSTRAINT_NAME='CK_CM_AEO_STATUS' AND CONSTRAINT_TYPE='C'
+             AND STATUS='ENABLED' AND VALIDATED='VALIDATED'
+             AND REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"]','') IN
+               ('STATUS_IN(''CLAIMED'',''APPLIED'',''FAILED'')',
+                'STATUS_IN(''CLAIMED'',''APPLIED'',''IGNORED_STALE'',''FAILED'')')))
+          AND (NOT EXISTS (SELECT 1 FROM USER_CONSTRAINTS WHERE CONSTRAINT_NAME='CK_CM_AEO_STATUS_TS') OR
+           EXISTS (SELECT 1 FROM USER_CONSTRAINTS WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION'
+             AND CONSTRAINT_NAME='CK_CM_AEO_STATUS_TS' AND CONSTRAINT_TYPE='C'
+             AND STATUS='ENABLED' AND VALIDATED='VALIDATED'
+             AND REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"''()]','') IN
+               ('STATUS_!=APPLIEDORAPPLIED_AT_ISNOTNULLANDSTATUS_!=FAILEDORFAILED_AT_ISNOTNULL',
+                'STATUS_!=APPLIEDORAPPLIED_AT_ISNOTNULLANDSTATUS_!=IGNORED_STALEORIGNORED_AT_ISNOTNULLANDSTATUS_!=FAILEDORFAILED_AT_ISNOTNULL')))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='IX_CM_PI_PROC_INST') OR
+           EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='IX_CM_PI_PROC_INST'
+             AND I.TABLE_NAME='CM_PLAN_ITEM' AND I.UNIQUENESS='NONUNIQUE'
+             AND I.STATUS='VALID' AND I.VISIBILITY='VISIBLE'
+             AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)=2
+             AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                  FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)='CASE_ID_,PROC_INST_ID_'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='IX_CM_TASK_PROC_INST') OR
+           EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='IX_CM_TASK_PROC_INST'
+             AND I.TABLE_NAME='CM_TASK' AND I.UNIQUENESS='NONUNIQUE'
+             AND I.STATUS='VALID' AND I.VISIBILITY='VISIBLE'
+             AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)=2
+             AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                  FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)='CASE_ID_,PROC_INST_ID_'))
+          AND (NOT EXISTS (SELECT 1 FROM USER_INDEXES WHERE INDEX_NAME='IX_CM_AEO_ENGINE_ENTITY') OR
+           EXISTS (SELECT 1 FROM USER_INDEXES I WHERE I.INDEX_NAME='IX_CM_AEO_ENGINE_ENTITY'
+             AND I.TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION' AND I.UNIQUENESS='NONUNIQUE'
+             AND I.STATUS='VALID' AND I.VISIBILITY='VISIBLE'
+             AND (SELECT COUNT(*) FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)=7
+             AND (SELECT LISTAGG(COLUMN_NAME, ',') WITHIN GROUP (ORDER BY COLUMN_POSITION)
+                  FROM USER_IND_COLUMNS C WHERE C.INDEX_NAME=I.INDEX_NAME)=
+                 'TENANT_ID_,ENGINE_ID_,CASE_ID_,PROCESS_INSTANCE_ID_,OBSERVATION_KIND_,ENTITY_ID_,STATUS_'))
+          THEN 1 ELSE 0 END FROM DUAL
+      ]]></sqlCheck>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-kind" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_APPLIED_ENGINE_OBSERVATION" columnName="OBSERVATION_KIND_"/></not>
+    </preConditions>
+    <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
+      <column name="OBSERVATION_KIND_" type="VARCHAR2(32 BYTE)" defaultValue="LEGACY">
+        <constraints nullable="false"/>
+      </column>
+    </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-ignored-at" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_APPLIED_ENGINE_OBSERVATION" columnName="IGNORED_AT_"/></not>
+    </preConditions>
+    <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
+      <column name="IGNORED_AT_" type="TIMESTAMP WITH TIME ZONE"/>
+    </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-drop-status" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <sqlCheck expectedResult="1">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION' AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS'</sqlCheck>
+    </preConditions>
+    <sql>ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-add-status" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION' AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS'</sqlCheck>
+    </preConditions>
+    <sql>
+      ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS
+        CHECK (STATUS_ IN ('CLAIMED','APPLIED','IGNORED_STALE','FAILED'))
+    </sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-drop-status-ts" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <sqlCheck expectedResult="1">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION' AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS_TS'</sqlCheck>
+    </preConditions>
+    <sql>ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION DROP CONSTRAINT CK_CM_AEO_STATUS_TS</sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-add-status-ts" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <sqlCheck expectedResult="0">SELECT COUNT(*) FROM USER_CONSTRAINTS
+        WHERE TABLE_NAME = 'CM_APPLIED_ENGINE_OBSERVATION' AND CONSTRAINT_NAME = 'CK_CM_AEO_STATUS_TS'</sqlCheck>
+    </preConditions>
+    <sql>
+      ALTER TABLE CM_APPLIED_ENGINE_OBSERVATION ADD CONSTRAINT CK_CM_AEO_STATUS_TS
+        CHECK ((STATUS_ != 'APPLIED' OR APPLIED_AT_ IS NOT NULL)
+           AND (STATUS_ != 'IGNORED_STALE' OR IGNORED_AT_ IS NOT NULL)
+           AND (STATUS_ != 'FAILED' OR FAILED_AT_ IS NOT NULL))
+    </sql>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-plan-process-width" author="casemgmt">
+    <preConditions onFail="HALT">
+      <columnExists tableName="CM_PLAN_ITEM" columnName="PROC_INST_ID_"/>
+    </preConditions>
+    <modifyDataType tableName="CM_PLAN_ITEM" columnName="PROC_INST_ID_"
+                    newDataType="VARCHAR2(128 BYTE)"/>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-task-process" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_TASK" columnName="PROC_INST_ID_"/></not>
+    </preConditions>
+    <addColumn tableName="CM_TASK">
+      <column name="PROC_INST_ID_" type="VARCHAR2(128 BYTE)"/>
+    </addColumn>
+  </changeSet>
+
+  <!-- Existing projections keep unknown provenance; no root-process backfill is guessed. -->
+  <changeSet id="cm-engine-observation-hardening-plan-process-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><indexExists indexName="IX_CM_PI_PROC_INST"/></not>
+    </preConditions>
+    <createIndex tableName="CM_PLAN_ITEM" indexName="IX_CM_PI_PROC_INST">
+      <column name="CASE_ID_"/><column name="PROC_INST_ID_"/>
+    </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-hardening-task-process-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><indexExists indexName="IX_CM_TASK_PROC_INST"/></not>
+    </preConditions>
+    <createIndex tableName="CM_TASK" indexName="IX_CM_TASK_PROC_INST">
+      <column name="CASE_ID_"/><column name="PROC_INST_ID_"/>
+    </createIndex>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-channel-engine-id" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_APPLIED_ENGINE_OBSERVATION" columnName="ENGINE_ID_"/></not>
+    </preConditions>
+    <addColumn tableName="CM_APPLIED_ENGINE_OBSERVATION">
+      <!-- Historical rows cannot be assigned an engine identity from SOURCE_: source names an
+           adapter channel. Null therefore remains a deliberate reconciliation barrier. -->
+      <column name="ENGINE_ID_" type="VARCHAR2(128 BYTE)"/>
+    </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-channel-child-definition" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><columnExists tableName="CM_LINKED_PROCESS" columnName="PROC_DEF_ID_"/></not>
+    </preConditions>
+    <addColumn tableName="CM_LINKED_PROCESS">
+      <!-- Exact deployed identity is unknown for historical links and must be reconciled. -->
+      <column name="PROC_DEF_ID_" type="VARCHAR2(128 BYTE)"/>
+    </addColumn>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-channel-engine-index" author="casemgmt">
+    <preConditions onFail="MARK_RAN">
+      <not><indexExists indexName="IX_CM_AEO_ENGINE_ENTITY"/></not>
+    </preConditions>
+    <createIndex tableName="CM_APPLIED_ENGINE_OBSERVATION" indexName="IX_CM_AEO_ENGINE_ENTITY">
+      <column name="TENANT_ID_"/><column name="ENGINE_ID_"/><column name="CASE_ID_"/>
+      <column name="PROCESS_INSTANCE_ID_"/><column name="OBSERVATION_KIND_"/>
+      <column name="ENTITY_ID_"/><column name="STATUS_"/>
+    </createIndex>
+  </changeSet>
+
+  <!-- Earlier guards accept absent objects so every Oracle auto-commit prefix can resume. This
+       final runAlways gate requires the complete post-migration contract on every later start. -->
+  <changeSet id="cm-engine-observation-byte-semantics" author="casemgmt">
+    <preConditions onFail="HALT" onError="HALT">
+      <dbms type="oracle"/>
+    </preConditions>
+    <customChange class="org.casemgmt.migration.OracleByteSemanticsMigration">
+      <param name="contract" value="engine-observation"/>
+    </customChange>
+  </changeSet>
+
+  <changeSet id="cm-engine-observation-final-state-guard" author="casemgmt" runAlways="true">
+    <preConditions onFail="HALT" onError="HALT"
+                   onFailMessage="Engine observation final structure is incompatible">
+      <and>
+        <customPrecondition className="org.casemgmt.migration.OracleFinalSchemaPrecondition">
+          <param name="contract" value="engine-observation"/>
+        </customPrecondition>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN
+            (SELECT COUNT(*) FROM USER_TAB_COLUMNS
+             WHERE TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION')=19
+            AND EXISTS (SELECT 1 FROM USER_TAB_COLUMNS
+              WHERE TABLE_NAME='CM_PLAN_ITEM' AND COLUMN_NAME='PROC_INST_ID_'
+                AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128
+                AND NULLABLE='Y' AND DATA_DEFAULT IS NULL)
+            AND EXISTS (SELECT 1 FROM USER_TAB_COLUMNS
+              WHERE TABLE_NAME='CM_TASK' AND COLUMN_NAME='PROC_INST_ID_'
+                AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128
+                AND NULLABLE='Y' AND DATA_DEFAULT IS NULL)
+            AND EXISTS (SELECT 1 FROM USER_TAB_COLUMNS
+              WHERE TABLE_NAME='CM_LINKED_PROCESS' AND COLUMN_NAME='PROC_DEF_ID_'
+                AND DATA_TYPE='VARCHAR2' AND CHAR_LENGTH=128
+                AND NULLABLE='Y' AND DATA_DEFAULT IS NULL)
+            THEN 1 ELSE 0 END FROM DUAL
+        ]]></sqlCheck>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN COUNT(*)=1 AND
+            MAX(CASE WHEN TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION'
+              AND CONSTRAINT_TYPE='C' AND STATUS='ENABLED' AND VALIDATED='VALIDATED' THEN
+              REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"]','') END)=
+              'STATUS_IN(''CLAIMED'',''APPLIED'',''IGNORED_STALE'',''FAILED'')'
+            THEN 1 ELSE 0 END FROM USER_CONSTRAINTS
+          WHERE CONSTRAINT_NAME='CK_CM_AEO_STATUS'
+        ]]></sqlCheck>
+        <sqlCheck expectedResult="1"><![CDATA[
+          SELECT CASE WHEN COUNT(*)=1 AND
+            MAX(CASE WHEN TABLE_NAME='CM_APPLIED_ENGINE_OBSERVATION'
+              AND CONSTRAINT_TYPE='C' AND STATUS='ENABLED' AND VALIDATED='VALIDATED' THEN
+              REGEXP_REPLACE(UPPER(SEARCH_CONDITION_VC),'[[:space:]"''()]','') END)=
+              'STATUS_!=APPLIEDORAPPLIED_AT_ISNOTNULLANDSTATUS_!=IGNORED_STALEORIGNORED_AT_ISNOTNULLANDSTATUS_!=FAILEDORFAILED_AT_ISNOTNULL'
+            THEN 1 ELSE 0 END FROM USER_CONSTRAINTS
+          WHERE CONSTRAINT_NAME='CK_CM_AEO_STATUS_TS'
+        ]]></sqlCheck>
+        <sqlCheck expectedResult="5"><![CDATA[
+          SELECT COUNT(*) FROM USER_INDEXES WHERE STATUS='VALID' AND VISIBILITY='VISIBLE'
+            AND INDEX_NAME IN ('UQ_CM_AEO_AUTH_FINGERPRINT','IX_CM_AEO_STATUS',
+              'IX_CM_PI_PROC_INST','IX_CM_TASK_PROC_INST','IX_CM_AEO_ENGINE_ENTITY')
+        ]]></sqlCheck>
+      </and>
+    </preConditions>
+    <sql splitStatements="false">BEGIN NULL; END;</sql>
+  </changeSet>
+</databaseChangeLog>

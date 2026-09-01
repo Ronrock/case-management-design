@@ -4,3 +4,8 @@ export * from "./portal/standalone-adapter";
 export * from "./portal/embedded-portal-adapter";
 export * from "./portal/detect-portal-adapter";
 export * from "./components/case-management-shell";
+export * from "./components/case-detail";
+export * from "./presentation/presentation-manifest";
+export * from "./presentation/case-presentation";
+export * from "./presentation/json-schema-form";
+export * from "./presentation/extension-registry";

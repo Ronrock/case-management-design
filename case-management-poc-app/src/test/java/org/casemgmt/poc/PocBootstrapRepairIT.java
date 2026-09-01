@@ -144,12 +144,17 @@ class PocBootstrapRepairIT {
     }
 
     private static void assertSeededSlaContract(SlaRepository sla) {
-        Map<String, Object> calendar = sla.calendarDefinition("cal-nl");
+        Map<String, Object> calendar = sla.calendarDefinition("nl-business");
         assertThat(calendar).containsEntry("timezone", "Europe/Amsterdam");
         List<String> holidays = ((List<?>) calendar.get("holidays")).stream()
                 .map(String::valueOf).toList();
         assertThat(holidays).contains("2026-12-25", "2026-12-26");
-        assertThat(sla.calendarIdOf("sla-complaint")).isEqualTo("cal-nl");
+        var revision = sla.require(PocBootstrap.TENANT_ID, "nl-business", 1);
+        assertThat(revision.tenantId()).isEqualTo(PocBootstrap.TENANT_ID);
+        assertThat(revision.calendarId()).isEqualTo("nl-business");
+        assertThat(revision.revision()).isEqualTo(1);
+        assertThat(revision.definition()).isEqualTo(calendar);
+        assertThat(sla.calendarIdOf("sla-complaint")).isEqualTo("nl-business");
         assertThat(sla.targetsFor("sla-complaint"))
                 .anySatisfy(t -> {
                     assertThat(t.id()).isEqualTo("sla-first-response");

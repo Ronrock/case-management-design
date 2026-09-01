@@ -1,0 +1,392 @@
+package org.casemgmt.engine.embedded;
+
+import org.casemgmt.observation.ActivityLifecycleObservation;
+import org.casemgmt.observation.EngineObservation;
+import org.casemgmt.observation.EngineObservationHandler;
+import org.casemgmt.observation.MilestoneObservation;
+import org.casemgmt.observation.ProcessObservation;
+import org.casemgmt.observation.UserTaskObservation;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.operaton.bpm.engine.RepositoryService;
+import org.operaton.bpm.engine.TaskService;
+import org.operaton.bpm.engine.impl.history.event.HistoricProcessInstanceEventEntity;
+import org.operaton.bpm.engine.impl.history.event.HistoricActivityInstanceEventEntity;
+import org.operaton.bpm.engine.impl.pvm.runtime.ActivityInstanceState;
+import org.operaton.bpm.engine.repository.ProcessDefinition;
+import org.operaton.bpm.spring.boot.starter.event.ExecutionEvent;
+import org.operaton.bpm.spring.boot.starter.event.TaskEvent;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class EmbeddedEngineEventBridgeTest {
+
+    private static final Instant RECEIVED_AT = Instant.parse("2026-08-28T10:15:30Z");
+    private static final Date ENGINE_AT = Date.from(Instant.parse("2026-08-28T10:15:00Z"));
+
+    private EngineObservationHandler handler;
+    private RepositoryService repository;
+    private TaskService tasks;
+    private ProcessActivityClassifier classifier;
+    private EmbeddedEngineEventBridge bridge;
+
+    @BeforeEach
+    void setUp() {
+        handler = mock(EngineObservationHandler.class);
+        repository = mock(RepositoryService.class);
+        tasks = mock(TaskService.class);
+        classifier = mock(ProcessActivityClassifier.class);
+        ProcessDefinition definition = mock(ProcessDefinition.class);
+        when(definition.getKey()).thenReturn("complaint-process");
+        when(repository.getProcessDefinition("definition-1")).thenReturn(definition);
+        when(classifier.taskMetadata(any(), any()))
+                .thenReturn(new ProcessActivityClassifier.TaskMetadata(
+                        List.of("handlers"), "reviewForm", "review-sla"));
+        bridge = new EmbeddedEngineEventBridge(handler, processInstanceId -> "case-1",
+                classifier, repository, tasks, "engine-a",
+                Clock.fixed(RECEIVED_AT, ZoneOffset.UTC));
+    }
+
+    @Test
+    void capturesCanonicalTaskCreateClaimAndCompleteFixtures() {
+        bridge.onTask(task("create", null));
+        bridge.onTask(task("assignment", "alice"));
+        when(tasks.getVariables("task-1"))
+                .thenReturn(Map.of("decision", "approved", "attempt", 3));
+        bridge.onTask(task("complete", "alice"));
+        bridge.onTask(task("delete", "alice"));
+
+        ArgumentCaptor<EngineObservation> observations =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler, org.mockito.Mockito.times(4)).apply(observations.capture());
+
+        assertThat(observations.getAllValues()).allSatisfy(observation -> {
+            assertThat(observation.source()).isEqualTo("operaton:embedded");
+            assertThat(observation.engineId()).isEqualTo("engine-a");
+            assertThat(observation.tenantId()).isEqualTo("tenant-a");
+            assertThat(observation.caseId()).isEqualTo("case-1");
+            assertThat(observation.processInstanceId()).isEqualTo("process-1");
+            assertThat(observation.entityId()).isEqualTo("task-1");
+            assertThat(observation.entityRevision()).isNull();
+            assertThat(observation.engineOccurredAt()).isEqualTo(ENGINE_AT.toInstant());
+            assertThat(observation.receivedAt()).isEqualTo(RECEIVED_AT);
+            assertThat(observation.attributes())
+                    .containsEntry("processDefinitionId", "definition-1")
+                    .containsEntry("processDefinitionKey", "complaint-process")
+                    .containsEntry("taskDefinitionKey", "review")
+                    .containsEntry("activityInstanceId", "task-1")
+                    .containsEntry("slaTargetId", "review-sla");
+        });
+        assertThat(observations.getAllValues())
+                .extracting(value -> ((UserTaskObservation) value).eventType())
+                .containsExactly(UserTaskObservation.EventType.CREATED,
+                        UserTaskObservation.EventType.CLAIMED,
+                        UserTaskObservation.EventType.COMPLETED,
+                        UserTaskObservation.EventType.DELETED);
+        assertThat(observations.getAllValues().get(2).attributes().get("variables"))
+                .isEqualTo(Map.of("decision", "approved",
+                        "attempt", new java.math.BigDecimal("3")));
+    }
+
+    @Test
+    void capturesProcessStartAndClassifiedActivityCancellationHistory() {
+        ExecutionEvent rootStart = execution(null, null, null, "start");
+        when(rootStart.getId()).thenReturn("process-1");
+        bridge.onExecution(rootStart);
+
+        ExecutionEvent rootExecutionEnteringActivity =
+                execution("assessment-stage", "Assessment", "stage-instance", "start");
+        when(rootExecutionEnteringActivity.getId()).thenReturn("process-1");
+        when(classifier.classify("definition-1", "assessment-stage"))
+                .thenReturn(Optional.empty());
+        bridge.onExecution(rootExecutionEnteringActivity);
+
+        HistoricProcessInstanceEventEntity started = new HistoricProcessInstanceEventEntity();
+        started.setProcessInstanceId("process-1");
+        started.setProcessDefinitionId("definition-1");
+        started.setProcessDefinitionKey("complaint-process");
+        started.setTenantId("tenant-a");
+        started.setStartTime(ENGINE_AT);
+        started.setEventType("start");
+        started.setSequenceCounter(39);
+        bridge.onHistory(started);
+
+        HistoricProcessInstanceEventEntity laterSnapshot = new HistoricProcessInstanceEventEntity();
+        laterSnapshot.setProcessInstanceId("process-1");
+        laterSnapshot.setProcessDefinitionId("definition-1");
+        laterSnapshot.setProcessDefinitionKey("complaint-process");
+        laterSnapshot.setTenantId("tenant-a");
+        laterSnapshot.setStartTime(ENGINE_AT);
+        laterSnapshot.setEventType("update");
+        laterSnapshot.setSequenceCounter(40);
+        bridge.onHistory(laterSnapshot);
+
+        when(classifier.classify("definition-1", "assessment-stage"))
+                .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
+                        ProcessActivityClassifier.Kind.STAGE, null, "assessment-sla")));
+        bridge.onHistory(cancelledActivity("assessment-stage", "Assessment", "stage-instance"));
+
+        when(classifier.classify("definition-1", "approval-milestone"))
+                .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
+                        ProcessActivityClassifier.Kind.MILESTONE, "approved", "approval-sla")));
+        bridge.onHistory(cancelledActivity(
+                "approval-milestone", "Approval", "milestone-instance"));
+
+        ArgumentCaptor<EngineObservation> observations =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler, org.mockito.Mockito.times(4)).apply(observations.capture());
+        assertThat(observations.getAllValues().get(0))
+                .isInstanceOfSatisfying(ProcessObservation.class, observation ->
+                        assertThat(observation.eventType())
+                                .isEqualTo(ProcessObservation.EventType.STARTED));
+        assertThat(observations.getAllValues().get(1))
+                .isInstanceOfSatisfying(ProcessObservation.class, observation ->
+                        assertThat(observation.eventType())
+                                .isEqualTo(ProcessObservation.EventType.STARTED));
+        assertThat(observations.getAllValues().get(2))
+                .isInstanceOfSatisfying(ActivityLifecycleObservation.class, observation -> {
+                        assertThat(observation.eventType())
+                                .isEqualTo(ActivityLifecycleObservation.EventType.CANCELLED);
+                        assertThat(observation.attributes())
+                                .containsEntry("slaTargetId", "assessment-sla");
+                });
+        assertThat(observations.getAllValues().get(3))
+                .isInstanceOfSatisfying(MilestoneObservation.class, observation -> {
+                        assertThat(observation.eventType())
+                                .isEqualTo(MilestoneObservation.EventType.CANCELLED);
+                        assertThat(observation.attributes())
+                                .containsEntry("slaTargetId", "approval-sla");
+                });
+    }
+
+    @Test
+    void capturesCanonicalStageAndMilestoneFixtures() {
+        when(classifier.classify("definition-1", "assessment-stage"))
+                .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
+                        ProcessActivityClassifier.Kind.STAGE, null, "assessment-sla")));
+        bridge.onExecution(execution("assessment-stage", "Assessment", "stage-instance", "start"));
+        bridge.onExecution(execution("assessment-stage", "Assessment", "stage-instance", "end"));
+
+        when(classifier.classify("definition-1", "approved-milestone"))
+                .thenReturn(Optional.of(new ProcessActivityClassifier.Classification(
+                        ProcessActivityClassifier.Kind.MILESTONE, "approved", "approved-sla")));
+        bridge.onExecution(execution("approved-milestone", "Approved", "milestone-instance", "end"));
+
+        ArgumentCaptor<EngineObservation> observations =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler, org.mockito.Mockito.times(3)).apply(observations.capture());
+        assertThat(observations.getAllValues().get(0))
+                .isInstanceOfSatisfying(ActivityLifecycleObservation.class, observation -> {
+                    assertThat(observation.eventType())
+                            .isEqualTo(ActivityLifecycleObservation.EventType.STARTED);
+                    assertThat(observation.attributes())
+                            .containsEntry("slaTargetId", "assessment-sla");
+                    assertCanonicalActivity(observation, "stage-instance", "assessment-stage");
+                });
+        assertThat(observations.getAllValues().get(1))
+                .isInstanceOfSatisfying(ActivityLifecycleObservation.class, observation ->
+                        assertThat(observation.eventType())
+                                .isEqualTo(ActivityLifecycleObservation.EventType.COMPLETED));
+        assertThat(observations.getAllValues().get(2))
+                .isInstanceOfSatisfying(MilestoneObservation.class, observation -> {
+                    assertThat(observation.eventType())
+                            .isEqualTo(MilestoneObservation.EventType.REACHED);
+                    assertThat(observation.attributes())
+                            .containsEntry("milestoneId", "approved")
+                            .containsEntry("slaTargetId", "approved-sla");
+                    assertCanonicalActivity(observation, "milestone-instance", "approved-milestone");
+                });
+    }
+
+    @Test
+    void capturesCanonicalSubprocessCompletionCancellationAndRootCompletionFixtures() {
+        bridge.onHistory(processHistory("child-1", "child-definition", "child-process",
+                "tenant-a", null, 41));
+        bridge.onHistory(processHistory("process-1", "definition-1", "complaint-process",
+                "tenant-a", "deleted by operator", 42));
+        bridge.onHistory(processHistory("process-2", "definition-1", "complaint-process",
+                "tenant-a", null, 43));
+
+        ArgumentCaptor<EngineObservation> observations =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler, org.mockito.Mockito.times(3)).apply(observations.capture());
+        assertThat(observations.getAllValues())
+                .extracting(value -> ((ProcessObservation) value).eventType())
+                .containsExactly(ProcessObservation.EventType.COMPLETED,
+                        ProcessObservation.EventType.TERMINATED,
+                        ProcessObservation.EventType.COMPLETED);
+        assertThat(observations.getAllValues())
+                .extracting(EngineObservation::entityRevision)
+                .containsExactly(41L, 42L, 43L);
+        assertThat(observations.getAllValues().get(0).attributes())
+                .containsEntry("processDefinitionId", "child-definition")
+                .containsEntry("processDefinitionKey", "child-process");
+        assertThat(observations.getAllValues().get(1).attributes())
+                .containsEntry("cancellationReason", "deleted by operator");
+        assertThat(observations.getAllValues().get(2).attributes())
+                .doesNotContainKey("cancellationReason");
+    }
+
+    @Test
+    void internalBodylessCancellationEnvelopeClassifiesTerminationWithoutBecomingUserData() {
+        bridge.onHistory(processHistory("process-1", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:N", 44));
+
+        ArgumentCaptor<EngineObservation> observation =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler).apply(observation.capture());
+        assertThat(observation.getValue())
+                .isInstanceOfSatisfying(ProcessObservation.class, process -> {
+                    assertThat(process.eventType()).isEqualTo(
+                            ProcessObservation.EventType.TERMINATED);
+                    assertThat(process.attributes()).doesNotContainKey("cancellationReason");
+                });
+    }
+
+    @Test
+    void internalReasonEnvelopeRestoresEmptyMarkerPrefixAndUnicodeReasonsExactly() {
+        bridge.onHistory(processHistory("process-1", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:S", 45));
+        bridge.onHistory(processHistory("process-2", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:SY2FzZS1tYW5hZ2VtZW50OmNhbmNlbGxlZC13aXRob3V0LXJlYXNvbg", 46));
+        bridge.onHistory(processHistory("process-3", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:SX19jYXNlbWdtdF9jYW5jZWxfdjFfXzo", 47));
+        bridge.onHistory(processHistory("process-4", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:ScmVkZW46IGtsYW50IGtvb3MgY2Fmw6kg4piV", 48));
+
+        ArgumentCaptor<EngineObservation> observations =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler, org.mockito.Mockito.times(4)).apply(observations.capture());
+        assertThat(observations.getAllValues())
+                .extracting(value -> value.attributes().get("cancellationReason"))
+                .containsExactly("", "case-management:cancelled-without-reason",
+                        "__casemgmt_cancel_v1__:", "reden: klant koos café ☕");
+    }
+
+    @Test
+    void externalLegacyMarkerAndReservedPrefixRemainUserReasons() {
+        bridge.onHistory(processHistory("process-1", "definition-1", "complaint-process",
+                "tenant-a", "case-management:cancelled-without-reason", 49));
+        bridge.onHistory(processHistory("process-2", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:", 50));
+        bridge.onHistory(processHistory("process-3", "definition-1", "complaint-process",
+                "tenant-a", "__casemgmt_cancel_v1__:S%%%external", 51));
+
+        ArgumentCaptor<EngineObservation> observations =
+                ArgumentCaptor.forClass(EngineObservation.class);
+        verify(handler, org.mockito.Mockito.times(3)).apply(observations.capture());
+        assertThat(observations.getAllValues())
+                .extracting(value -> value.attributes().get("cancellationReason"))
+                .containsExactly("case-management:cancelled-without-reason",
+                        "__casemgmt_cancel_v1__:",
+                        "__casemgmt_cancel_v1__:S%%%external");
+    }
+
+    @Test
+    void ignoresUncorrelatedAndUnknownEngineEvents() {
+        EmbeddedEngineEventBridge uncorrelated = new EmbeddedEngineEventBridge(handler,
+                processInstanceId -> null, classifier, repository, tasks, "engine-a",
+                Clock.fixed(RECEIVED_AT, ZoneOffset.UTC));
+        TaskEvent unknown = task("unexpected", null);
+
+        uncorrelated.onTask(unknown);
+        uncorrelated.onExecution(execution(
+                "assessment-stage", "Assessment", "stage-instance", "start"));
+        uncorrelated.onHistory(processHistory("process-1", "definition-1",
+                "complaint-process", "tenant-a", null, 42));
+        bridge.onTask(unknown);
+        bridge.onTask(task("update", "alice"));
+
+        verify(handler, never()).apply(any());
+    }
+
+    private HistoricActivityInstanceEventEntity cancelledActivity(
+            String activityId, String name, String activityInstanceId) {
+        HistoricActivityInstanceEventEntity event = new HistoricActivityInstanceEventEntity();
+        event.setProcessInstanceId("process-1");
+        event.setProcessDefinitionId("definition-1");
+        event.setProcessDefinitionKey("complaint-process");
+        event.setTenantId("tenant-a");
+        event.setActivityId(activityId);
+        event.setActivityName(name);
+        event.setActivityInstanceId(activityInstanceId);
+        event.setActivityInstanceState(ActivityInstanceState.CANCELED.getStateCode());
+        event.setEndTime(ENGINE_AT);
+        event.setSequenceCounter(40);
+        return event;
+    }
+
+    private TaskEvent task(String eventName, String assignee) {
+        TaskEvent event = mock(TaskEvent.class);
+        when(event.getProcessInstanceId()).thenReturn("process-1");
+        when(event.getProcessDefinitionId()).thenReturn("definition-1");
+        when(event.getTenantId()).thenReturn("tenant-a");
+        when(event.getId()).thenReturn("task-1");
+        when(event.getTaskDefinitionKey()).thenReturn("review");
+        when(event.getName()).thenReturn("Review complaint");
+        when(event.getEventName()).thenReturn(eventName);
+        when(event.getAssignee()).thenReturn(assignee);
+        when(event.getPriority()).thenReturn(70);
+        when(event.getCreateTime()).thenReturn(ENGINE_AT);
+        when(event.getLastUpdated()).thenReturn(ENGINE_AT);
+        return event;
+    }
+
+    private ExecutionEvent execution(String activityId, String name, String instanceId,
+                                     String eventName) {
+        ExecutionEvent event = mock(ExecutionEvent.class);
+        when(event.getProcessInstanceId()).thenReturn("process-1");
+        when(event.getProcessDefinitionId()).thenReturn("definition-1");
+        when(event.getTenantId()).thenReturn("tenant-a");
+        when(event.getProcessBusinessKey()).thenReturn("case-1");
+        when(event.getActivityInstanceId()).thenReturn(instanceId);
+        when(event.getCurrentActivityId()).thenReturn(activityId);
+        when(event.getCurrentActivityName()).thenReturn(name);
+        when(event.getEventName()).thenReturn(eventName);
+        return event;
+    }
+
+    private HistoricProcessInstanceEventEntity processHistory(
+            String processInstanceId, String processDefinitionId, String processDefinitionKey,
+            String tenantId, String deleteReason, long sequence) {
+        HistoricProcessInstanceEventEntity event = new HistoricProcessInstanceEventEntity();
+        event.setId(processInstanceId);
+        event.setProcessInstanceId(processInstanceId);
+        event.setProcessDefinitionId(processDefinitionId);
+        event.setProcessDefinitionKey(processDefinitionKey);
+        event.setTenantId(tenantId);
+        event.setBusinessKey("case-1");
+        event.setEndTime(ENGINE_AT);
+        event.setDeleteReason(deleteReason);
+        event.setSequenceCounter(sequence);
+        return event;
+    }
+
+    private static void assertCanonicalActivity(EngineObservation observation, String entityId,
+                                                String activityId) {
+        assertThat(observation.source()).isEqualTo("operaton:embedded");
+        assertThat(observation.engineId()).isEqualTo("engine-a");
+        assertThat(observation.tenantId()).isEqualTo("tenant-a");
+        assertThat(observation.caseId()).isEqualTo("case-1");
+        assertThat(observation.processInstanceId()).isEqualTo("process-1");
+        assertThat(observation.entityId()).isEqualTo(entityId);
+        assertThat(observation.attributes())
+                .containsEntry("processDefinitionId", "definition-1")
+                .containsEntry("processDefinitionKey", "complaint-process")
+                .containsEntry("activityId", activityId);
+    }
+}

@@ -1,210 +1,290 @@
 # API cookbook
 
-All paths sit under `/case-api/v2`. Every call needs authentication; most mutations need
-`If-Match`. The authoritative contract is [`openapi-specs.md`](../../openapi-specs.md).
+All paths are below `/case-api/v2`. Calls require authentication. Tenant scope comes from the
+authenticated principal, not from a request body. The authoritative HTTP reference remains
+[`openapi-specs.md`](../../openapi-specs.md).
 
-## The golden rule
+## Client rules
 
-> **Read `availableActions[]`. Don't hardcode.**
+1. Render only server-returned `availableActions[]`.
+2. Send the last ETag in `If-Match` when changing a mutable resource.
+3. On a version conflict, re-read and let the user reconsider the action.
+4. Use `Idempotency-Key` on case creation when a request may be retried.
+5. Branch on the stable problem `code`, never localized detail text.
+6. Treat `projectionStatus: STALE` as a possibly outdated view of Operaton.
 
-Every case, plan item and task response carries `availableActions[]`, each entry with `action`,
-`href`, `method` and `formKey`. A client that follows those needs no knowledge of your case types at
-all. A client that hardcodes `POST /close` breaks the first time somebody edits the definition.
+An available action contains everything a generic client needs:
 
-The same rule that produces that list also enforces it, so an offered action is a permitted one.
+```json
+{
+  "action": "claim",
+  "name": "Claim",
+  "href": "/case-api/v2/tasks/01.../claim",
+  "method": "POST",
+  "formKey": null
+}
+```
 
----
+The server reauthorizes execution. Rendering an action is not an authorization grant.
 
-## Cases
+## Discover case definitions
 
-### Create
+```http
+GET /case-api/v2/case-definitions
+GET /case-api/v2/case-definitions/{key}
+GET /case-api/v2/case-definitions/{key}/versions/{version}
+```
+
+BPMN definition responses include `orchestrationMode`, exact release IDs/hashes,
+`deploymentStatus`, `bindingStatus`, lifecycle timestamps, and the descriptive engine
+definition key, version, and tenant. `ACTIVE` is runnable; `DEPLOYING` is waiting for remote
+deployment; `FAILED` requires administrative investigation. General discovery never returns the
+raw engine deployment ID or process-definition ID. Those operational identifiers are returned
+only by the administrator-only bind and combined-publication responses.
+
+Creating a BPMN case without an active definition version returns `409` with
+`code: case-definition-not-active`. If the version was selected but its exact binding became
+unavailable before start, the code is `case-definition-binding-not-active`. An unknown key remains
+`404 not-found`.
+
+## Publish a BPMN case type
+
+Combined publication:
+
+```http
+POST /case-api/v2/case-definitions
+Content-Type: application/zip
+
+<contract.json + presentation.json + BPMN/DMN files>
+```
+
+Independent publication and binding:
+
+```http
+POST /case-api/v2/case-definitions/{key}/orchestration-releases
+POST /case-api/v2/case-definitions/{key}/contract-releases
+POST /case-api/v2/case-definitions/{key}/presentation-releases
+POST /case-api/v2/case-definitions/{key}/versions
+```
+
+Every independent publication response includes a `Location` pointing to the same
+administrator-only lifecycle resource, regardless of release kind:
+
+```http
+GET /case-api/v2/case-definitions/{key}/releases/{releaseId}
+```
+
+It returns `status` and a `failureDetail` limited to 2,000 characters. A definitive deployment
+failure remains stored as `FAILED` and can be inspected through this URL; it is not rolled back
+because a later combined-binding step failed. Existing contract and presentation content-download
+URLs keep returning their immutable content.
+
+The final request binds exact release IDs:
+
+```json
+{
+  "orchestrationReleaseId": "...",
+  "contractReleaseId": "...",
+  "presentationReleaseId": "..."
+}
+```
+
+Publication and binding require the `admin` group. The top-level publication endpoint accepts a
+combined BPMN ZIP; legacy plan-model JSON is rejected.
+
+## Create and read cases
 
 ```http
 POST /case-api/v2/cases
-Idempotency-Key: 7f3a…            (optional)
+Idempotency-Key: create-CMP-1042
+Content-Type: application/json
 ```
+
 ```json
-{ "caseDefinitionKey": "access-request", "title": "…",
-  "businessKey": "REQ-4471", "priority": "NORMAL",
-  "variables": { "amount": 250 } }
+{
+  "caseDefinitionKey": "complaint-bpmn",
+  "businessKey": "CMP-1042",
+  "title": "Delivery complaint",
+  "priority": "HIGH",
+  "variables": {"channel": "web"}
+}
 ```
-→ `201`, `ETag: "0"`, plus `availableActions[]`.
 
-### Read
+A BPMN create starts the pinned root process and returns `rootProcessInstanceId`. An explicit
+`close` action is not advertised. Root completion closes the case.
 
 ```http
-GET /case-api/v2/cases/{id}               # the case + current actions
-GET /case-api/v2/cases/{id}/plan-items    # every item and its state
+GET /case-api/v2/cases/{caseId}
+GET /case-api/v2/cases?state=ACTIVE&page=0&pageSize=50
 ```
 
-### List
+Case values are field-filtered. A missing property may mean the caller is not allowed to see it;
+clients must not interpret absence as an empty business value.
+
+## Update and cancel cases
 
 ```http
-GET /case-api/v2/cases?state=OPEN&state=SUSPENDED&page=0&pageSize=50
-```
-```json
-{ "items": [ … ], "page": 0, "pageSize": 50 }
-```
-
-`state` is repeatable. `pageSize` is capped at 200. There's no total count yet, so page until you
-get a short page.
-
-### Patch
-
-```http
-PATCH /case-api/v2/cases/{id}
+PATCH /case-api/v2/cases/{caseId}
 Content-Type: application/merge-patch+json
 If-Match: "7"
-```
-```json
-{ "title": "New title", "variables": { "amount": 900 } }
-```
 
-> **Null does not clear.** The media type is declared but null-clearing isn't implemented — an
-> explicit `null` is treated as absent
-> ([issue #9](https://github.com/Ronrock/case-management-design/issues/9)).
-
-### Close and cancel
+{"title":"Corrected title","variables":{"amount":900}}
+```
 
 ```http
-POST /case-api/v2/cases/{id}/close     If-Match: "…"   { "outcome": "granted" }
-POST /case-api/v2/cases/{id}/cancel    If-Match: "…"   { "reason": "withdrawn" }
+POST /case-api/v2/cases/{caseId}/cancel
+If-Match: "8"
+Content-Type: application/json
+
+{"reason":"withdrawn"}
 ```
 
-Close is refused while a `required` item is open. Cancel terminates everything still open.
+Cancellation cancels the BPMN root process. The explicit `/close` endpoint is not supported;
+authoritative root-process completion closes the case.
 
----
-
-## Tasks
+## Work with tasks
 
 ```http
-GET  /case-api/v2/tasks                      # your worklist, tenant-scoped
-GET  /case-api/v2/cases/{id}/tasks           # tasks on one case
-POST /case-api/v2/tasks/{taskId}/claim       If-Match: "3"
-POST /case-api/v2/tasks/{taskId}/complete    If-Match: "4"
-     { "variables": { "decision": "grant" } }
+GET /case-api/v2/tasks
+GET /case-api/v2/cases/{caseId}/tasks
+POST /case-api/v2/tasks/{taskId}/claim
+POST /case-api/v2/tasks/{taskId}/complete
 ```
 
-The worklist matches your identity groups against each task's `candidateGroups`, plus anything
-assigned to you. Tasks not yet synced to the engine are hidden — you can't claim what the engine
-doesn't have.
-
-Completing a task triggers a full re-evaluation, so the next read may show entirely new work.
-
----
-
-## Plan items
+Claim and complete require `If-Match`. Complete submits contract-validated variables:
 
 ```http
-POST /case-api/v2/cases/{id}/plan-items/{itemId}/enable      # AVAILABLE → ENABLED
-POST /case-api/v2/cases/{id}/plan-items/{itemId}/start       # ENABLED   → ACTIVE
-POST /case-api/v2/cases/{id}/plan-items/{itemId}/complete
-POST /case-api/v2/cases/{id}/plan-items/{itemId}/terminate   { "reason": "…" }
+POST /case-api/v2/tasks/{taskId}/complete
+If-Match: "4"
+Content-Type: application/json
+
+{"variables":{"decision":"approve","rationale":"Checks passed"}}
 ```
 
-- `start` is refused unless the parent stage is `ACTIVE`.
-- `complete` on a stage is refused while required children are open — the `409` names them.
-- `terminate` on a stage cascades to the whole subtree beneath it.
+`422 form-invalid` means the payload did not satisfy the pinned JSON Schema. Read
+`violations[].pointer` and `violations[].message`.
 
----
+The worklist contains tasks assigned to the caller or matching their candidate groups. A remote
+task may expose `engineSync: PENDING` and no actionable commands until engine synchronization.
 
-## Collaboration
+## Read BPMN projections
 
 ```http
-GET  /case-api/v2/cases/{id}/comments
-POST /case-api/v2/cases/{id}/comments      { "text": "…", "visibility": "internal" }
-
-GET  /case-api/v2/cases/{id}/milestones
-POST /case-api/v2/cases/{id}/milestones/{mid}/achieve      If-Match
-
-GET  /case-api/v2/cases/{id}/processes
-POST /case-api/v2/cases/{id}/processes                     If-Match
-     { "processDefinitionKey": "decision-letter", "planItemId": "…" }
+GET /case-api/v2/cases/{caseId}/plan-items
+GET /case-api/v2/cases/{caseId}/tasks
+GET /case-api/v2/cases/{caseId}/milestones
+GET /case-api/v2/cases/{caseId}/processes
 ```
 
-`planItemId` is optional and must belong to the case in the URL.
+Stages, milestones, repeated activity occurrences, assignments, and completion are projections of
+engine observations. Inspect `projectionStatus`, `lastEngineUpdateAt`, and `lastProjectedAt` before
+making freshness-sensitive decisions.
 
----
+Plan-item rows are read-only engine projections. BPMN transitions are requested through the BPMN
+process itself; this API never manually advances a projected plan item.
 
-## Concurrency: ETags
+## Execute an ad-hoc action
 
-Every mutable row carries a version. Reads return it as `ETag`; writes require it as `If-Match`.
+Contract-declared discretionary work uses:
 
-| You send | You get |
+```http
+POST /case-api/v2/cases/{caseId}/ad-hoc-actions/{actionId}
+If-Match: "5"
+Idempotency-Key: request-more-information-42
+Content-Type: application/json
+
+{"aspect":"shipping","finding":"Carrier scan missing"}
+```
+
+The response is an operation receipt. In remote mode it returns `202`, an `operationId`, and a
+`PENDING` status. Repeating the same idempotency key returns the same receipt, even if the first
+response was lost. The engine command and its later observation provide the authoritative
+`CONFIRMED` or `FAILED` outcome; the request does not create a local pending task or plan-item
+projection.
+
+Ad-hoc work stays outside BPMN token flow. Root completion terminalizes any still open.
+
+## Collaboration and SLAs
+
+```http
+GET  /case-api/v2/cases/{caseId}/comments
+POST /case-api/v2/cases/{caseId}/comments
+GET  /case-api/v2/cases/{caseId}/documents
+POST /case-api/v2/cases/{caseId}/documents
+DELETE /case-api/v2/cases/{caseId}/documents/{documentId}
+GET  /case-api/v2/cases/{caseId}/slas
+POST /case-api/v2/cases/{caseId}/slas/{slaId}/pause
+POST /case-api/v2/cases/{caseId}/slas/{slaId}/resume
+```
+
+Field projection applies here too: restricted values must not leak through documents, comments,
+search, or error details.
+
+## Search
+
+```http
+GET  /case-api/v2/search/cases?q=delivery
+POST /case-api/v2/search/query
+GET  /case-api/v2/search/providers
+GET  /case-api/v2/search/suggestions?q=del
+GET  /case-api/v2/search/facets
+```
+
+Manifest search profiles are permission-aware. The server decides which profiles/providers the
+caller may use and filters result fields. The maximum result window is 10,000; its problem detail
+is locale-stable, but clients should still branch on `code`.
+
+## Events and webhooks
+
+```http
+GET /case-api/v2/events?after=1042&limit=100
+GET /case-api/v2/cases/{caseId}/events
+POST /case-api/v2/webhooks
+GET /case-api/v2/webhooks/{webhookId}/dead-letters
+POST /case-api/v2/webhooks/{webhookId}/dead-letters/redeliver
+```
+
+Webhook secrets are returned once. Deliveries are HMAC-SHA256 signed and retried before entering
+the dead-letter queue.
+
+## Remote orchestration operations
+
+Admin-only endpoints:
+
+```http
+GET  /case-api/v2/orchestration/remote-status
+GET  /case-api/v2/orchestration/commands/dead-letters?limit=50
+POST /case-api/v2/orchestration/commands/dead-letters/{commandId}/retry
+```
+
+Dead-letter responses omit command payloads so business data is not exposed operationally.
+
+## ETags and conflicts
+
+| Request | Result |
 |---|---|
-| No `If-Match` | `428 if-match-required` |
-| Stale version | `409 version-conflict` |
-| `If-Match: *` | Proceeds if the resource exists, else `412` |
-| Garbage | `400 invalid-request` |
+| Missing required `If-Match` | `428 if-match-required` |
+| Stale exact version | `409 version-conflict` |
+| `If-Match: *` and resource exists | Proceed using current version |
+| Invalid header | `400 invalid-request` |
 
-On `409`, re-read, re-decide, retry. The service never silently retries for you — it can't know
-whether your decision still holds.
+The wildcard is useful for scripts and administration. User-facing clients should send the exact
+ETag they displayed to the user.
 
-> **Why the ETag is trustworthy:** after a successful update the returned version is computed
-> locally as `version + 1`, never re-read. A re-read is a second statement a concurrent writer can
-> commit in front of — you'd be handed *their* version and would send it as your next `If-Match`.
+## Error handling
 
----
+Errors use `application/problem+json` and a stable `code`:
 
-## Idempotency
+| Code | Meaning |
+|---|---|
+| `not-found` | Missing or deliberately hidden cross-tenant resource |
+| `forbidden` | Caller lacks tenant/administrative permission |
+| `version-conflict` | Resource changed; re-read before retrying |
+| `illegal-transition` | Action is not legal in current state |
+| `action-not-available` | Policy or permission denies the action |
+| `if-match-required` | Add the ETag from the last read |
+| `form-invalid` | Submitted variables violate the pinned form |
+| `case-definition-invalid` | Artifact or cross-artifact validation failed |
+| `idempotency-conflict` | Key is already claimed for different input |
 
-`POST /cases` accepts `Idempotency-Key`.
-
-- Same key + same body → replays the original response, status included.
-- Same key + different body → `409 idempotency-conflict`.
-- Keys are scoped per caller, so two users choosing `"key-1"` don't collide.
-
-An unfinished key returns `409 idempotency-conflict` to duplicates instead of letting a retry
-execute the work again. Client-side validation failures release their own claim; unknown server
-failures remain claimed until operational recovery or retention cleanup.
-
----
-
-## Identity, roles and tenancy
-
-Three separate things:
-
-| Concept | Comes from | Controls |
-|---|---|---|
-| **Tenant** | A `tenant:<id>` authority on the principal | Which data you see at all |
-| **Case role** | `CM_PARTICIPANT` rows per case | What you may do to *this* case |
-| **Identity group** | Authorities on the principal | Which tasks you may claim |
-
-> **Tenant comes from the principal, always** — never from a body or query parameter. If a body
-> names a tenant it must equal yours, or `403`. This is load-bearing: an earlier version read it
-> from the body, which made webhook subscription a cross-tenant exfiltration primitive.
-
-Rules:
-
-- **Case mutations** require a mutating role: `owner` or `handler`.
-- **Task actions** require a mutating role *or* membership of one of the task's `candidateGroups`.
-- **Administration** (deploy definitions, subscribe webhooks, read dead letters) requires `admin`.
-- `watcher` can read and nothing else.
-
-### 404 vs 403
-
-An id you supplied that belongs to another tenant answers `404`, identically to one that doesn't
-exist — a `403` there would confirm the resource is real. A `403` means you *named* a tenant that
-isn't yours, or you have none.
-
----
-
-## Error reference
-
-All errors are RFC 9457 `application/problem+json` with a stable `code`. **Branch on `code`, not on
-the message.**
-
-| Code | Status | Meaning & what to do |
-|---|---|---|
-| `not-found` | 404 | Doesn't exist — or belongs to another tenant. Deliberately indistinguishable. |
-| `version-conflict` | 409 | Somebody wrote first. Re-read, re-decide, retry. |
-| `illegal-transition` | 409 | Not legal now. The body lists what *is*. |
-| `action-not-available` | 409 | You lack the role or group. |
-| `if-match-required` | 428 | Add the `If-Match` header from your last read. |
-| `precondition-failed` | 412 | `If-Match: *` against something that doesn't exist. |
-| `form-invalid` | 422 | Payload failed the schema. `violations[]` has JSON Pointers. |
-| `case-definition-invalid` | 400 | Authoring error, e.g. a form key with no schema. |
-| `invalid-request` | 400 | Malformed input; the detail names the legal values. |
-| `idempotency-conflict` | 409 | Key reused with a different body, or claimed concurrently. |
-| `forbidden` | 403 | You named a tenant that isn't yours, or have none. |
-| `model-error` | 500 | The definition is structurally broken. Fix the model. |
+Messages are for humans and may evolve. Code against `status`, `code`, and structured fields.
