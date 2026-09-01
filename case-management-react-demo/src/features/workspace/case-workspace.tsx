@@ -9,6 +9,7 @@ import { Separator } from '@/components/ui/separator'
 import { Skeleton } from '@/components/ui/skeleton'
 import type { CaseWorkspaceSnapshot, SlaSummary } from '@/lib/api-types'
 import type { CaseApiClient } from '@/lib/case-api-client'
+import { CaseActionBar } from '@/features/cases/case-action-bar'
 import { humanize } from '@/lib/format'
 import { TaskActions } from '@/features/tasks/task-actions'
 import { CaseSpine } from './case-spine'
@@ -21,7 +22,7 @@ interface CaseWorkspaceProps {
   onDataChanged?(): void
 }
 
-export function CaseWorkspace({ client, caseId, refreshKey }: CaseWorkspaceProps) {
+export function CaseWorkspace({ client, caseId, refreshKey, onDataChanged }: CaseWorkspaceProps) {
   const [load, setLoad] = useState<{ key: string; snapshot?: CaseWorkspaceSnapshot; error?: string }>({ key: '' })
   const [retry, setRetry] = useState(0)
   const requestKey = `${caseId}:${refreshKey}:${retry}`
@@ -41,11 +42,12 @@ export function CaseWorkspace({ client, caseId, refreshKey }: CaseWorkspaceProps
 
   const snapshot = load.snapshot
   const nearestSla = chooseSla(snapshot.slas)
+  const changed = () => { if (onDataChanged) onDataChanged(); else setRetry((value) => value + 1) }
   return (
     <section className="workspace-panel">
       <div className="workspace-heading">
         <div><p className="eyebrow mono">{snapshot.case.businessKey || snapshot.case.id}</p><h2>{snapshot.case.title || 'Untitled case'}</h2></div>
-        <div className="flex flex-wrap gap-2"><Badge>{snapshot.case.state}</Badge>{snapshot.case.priority ? <Badge variant="outline">{snapshot.case.priority}</Badge> : null}{snapshot.case.projectionStatus ? <Badge variant="secondary">{snapshot.case.projectionStatus}</Badge> : null}</div>
+        <div className="workspace-heading-actions"><div className="flex flex-wrap gap-2"><Badge>{snapshot.case.state}</Badge>{snapshot.case.priority ? <Badge variant="outline">{snapshot.case.priority}</Badge> : null}{snapshot.case.projectionStatus ? <Badge variant="secondary">{snapshot.case.projectionStatus}</Badge> : null}</div><CaseActionBar client={client} caseItem={snapshot.case} onChanged={changed} /></div>
       </div>
 
       <div className="workspace-grid">
@@ -53,7 +55,7 @@ export function CaseWorkspace({ client, caseId, refreshKey }: CaseWorkspaceProps
         <Card><CardHeader><CardTitle>{nearestSla ? `${humanize(nearestSla.targetId)} SLA` : 'Service level'}</CardTitle></CardHeader><CardContent>{nearestSla ? <><Badge variant="outline">{nearestSla.status}</Badge><p className="mt-3 text-sm text-muted-foreground">Due <span className="mono">{nearestSla.dueAt ? new Date(nearestSla.dueAt).toLocaleString() : 'not set'}</span></p></> : <p className="text-sm text-muted-foreground">No active SLA.</p>}</CardContent></Card>
       </div>
 
-      <section className="workspace-section"><h3>Current tasks</h3><div className="task-grid">{snapshot.tasks.length ? snapshot.tasks.map((task) => <Card key={task.id}><CardHeader><CardTitle className="text-base">{task.name}</CardTitle></CardHeader><CardContent><div className="flex items-center justify-between"><Badge variant="secondary">{task.state}</Badge><span className="text-sm text-muted-foreground">{task.assignee || 'Unassigned'}</span></div><TaskActions client={client} caseItem={snapshot.case} task={task} onChanged={() => setRetry((value) => value + 1)} /></CardContent></Card>) : <p className="empty-copy">No current tasks.</p>}</div></section>
+      <section className="workspace-section"><h3>Current tasks</h3><div className="task-grid">{snapshot.tasks.length ? snapshot.tasks.map((task) => <Card key={task.id}><CardHeader><CardTitle className="text-base">{task.name}</CardTitle></CardHeader><CardContent><div className="flex items-center justify-between"><Badge variant="secondary">{task.state}</Badge><span className="text-sm text-muted-foreground">{task.assignee || 'Unassigned'}</span></div><TaskActions client={client} caseItem={snapshot.case} task={task} onChanged={changed} /></CardContent></Card>) : <p className="empty-copy">No current tasks.</p>}</div></section>
       <Separator />
       <section className="workspace-section"><h3>Case spine</h3><CaseSpine snapshot={snapshot} /></section>
       <Separator />

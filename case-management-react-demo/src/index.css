@@ -119,6 +119,8 @@
 .case-workspace-placeholder { display: grid; min-height: 60vh; place-items: center; padding: 2rem; text-align: center; background: var(--paper); }
 .workspace-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 2rem; padding-bottom: 1.4rem; border-bottom: 1px solid var(--border); }
 .workspace-heading h2 { margin: .3rem 0 0; color: var(--registry-blue); font-size: clamp(1.8rem, 4vw, 2.65rem); font-weight: 650; letter-spacing: -.035em; }
+.workspace-heading-actions { display: grid; justify-items: end; gap: .75rem; }
+.case-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
 .workspace-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(220px, .8fr); gap: 1rem; margin-block: 1.5rem; }
 .workspace-section { padding-block: 1.5rem; }
 .workspace-section h3 { margin: 0 0 1rem; color: var(--registry-blue); font-size: 1rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
@@ -168,6 +170,8 @@
   .app-header > p { max-width: 8rem; text-align: right; }
   .case-rail, .workspace-panel { padding: 1rem; }
   .workspace-heading, .event-list li { align-items: flex-start; flex-direction: column; gap: .55rem; }
+  .workspace-heading-actions { justify-items: start; }
+  .case-actions { justify-content: flex-start; }
   .facts-list > div { grid-template-columns: 1fr; gap: .25rem; }
   .work-inbox { width: 100%; padding: 1rem; }
   .work-inbox-heading, .work-row { align-items: stretch; flex-direction: column; }
