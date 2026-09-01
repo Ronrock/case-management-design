@@ -19,7 +19,9 @@ jobs:
   java-core:
     name: Java core
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Exhaustive Oracle migration rehearsals take 33-56 minutes locally and were still making
+    # forward Liquibase progress when the former 45-minute hosted limit cancelled the suite.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4

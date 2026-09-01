@@ -540,10 +540,10 @@ class SlaServiceTest extends OracleTestBase {
 
     @Test
     void insertRecordPersistsPauseAndVersionFieldsItWasGiven() {
-        OffsetDateTime started = OffsetDateTime.now().minusHours(3);
-        OffsetDateTime due = OffsetDateTime.now().plusHours(1);
-        OffsetDateTime warn = OffsetDateTime.now().minusHours(1);
-        OffsetDateTime pausedAt = OffsetDateTime.now().minusMinutes(30);
+        OffsetDateTime started = OffsetDateTime.parse("2026-08-28T09:00:00.123456Z");
+        OffsetDateTime due = OffsetDateTime.parse("2026-08-28T13:00:00.234567Z");
+        OffsetDateTime warn = OffsetDateTime.parse("2026-08-28T11:00:00.345678Z");
+        OffsetDateTime pausedAt = OffsetDateTime.parse("2026-08-28T11:30:00.456789Z");
 
         slaRepo.insertRecord(new SlaRecord("sla-custom", caseId, "tgt-first", "PAUSED",
                 started, due, warn, pausedAt, "WAITING_ON_CUSTOMER", 123L, 7L));

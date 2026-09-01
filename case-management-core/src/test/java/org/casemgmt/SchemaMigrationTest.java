@@ -23,14 +23,49 @@ class SchemaMigrationTest extends OracleTestBase {
 
     @Test
     void createsAllDesignAndPocInfrastructureTables() {
-        Integer tables = jdbc().sql("SELECT COUNT(*) FROM USER_TABLES WHERE TABLE_NAME LIKE 'CM!_%' ESCAPE '!'")
-                .query(Integer.class).single();
-        // 25 from db-design.sql + CM_ENGINE_COMMAND, CM_EVENT_APPEND_LOCK,
-        // CM_CASE_DEF_RELEASE, CM_CASE_DEF_BINDING, and CM_ENGINE_POLL_CHECKPOINT from changesets.
-        // CM_APPLIED_ENGINE_OBSERVATION is the WS3 lifecycle-effect claim ledger; the normalized
-        // command action and transition ledgers add the remaining two tables.
-        // DATABASECHANGELOG* do not match the CM_ prefix.
-        assertThat(tables).isEqualTo(36);
+        List<String> tables = jdbc().sql("""
+                SELECT TABLE_NAME FROM USER_TABLES
+                WHERE TABLE_NAME LIKE 'CM!_%' ESCAPE '!'
+                ORDER BY TABLE_NAME""")
+                .query(String.class).list();
+
+        assertThat(tables).containsExactly(
+                "CM_APPLIED_ENGINE_OBSERVATION",
+                "CM_AUDIT_LOG",
+                "CM_BULK_OPERATION",
+                "CM_BULK_OPERATION_ITEM",
+                "CM_BUSINESS_CALENDAR",
+                "CM_BUSINESS_CALENDAR_REVISION",
+                "CM_CASE",
+                "CM_CASE_DEF",
+                "CM_CASE_DEF_BINDING",
+                "CM_CASE_DEF_RELEASE",
+                "CM_CASE_LINK",
+                "CM_COMMENT",
+                "CM_DEF_IDENTITY_LINK",
+                "CM_DOCUMENT",
+                "CM_ENGINE_COMMAND",
+                "CM_ENGINE_COMMAND_ACTION",
+                "CM_ENGINE_COMMAND_TRANSITION",
+                "CM_ENGINE_POLL_CHECKPOINT",
+                "CM_EVENT",
+                "CM_EVENT_APPEND_LOCK",
+                "CM_IDEMPOTENCY_KEY",
+                "CM_LINKED_PROCESS",
+                "CM_MILESTONE",
+                "CM_PARTICIPANT",
+                "CM_PLAN_ITEM",
+                "CM_PLAN_ITEM_DEF",
+                "CM_QUEUE",
+                "CM_REMOTE_OBS_CHECKPOINT",
+                "CM_REMOTE_OBS_INBOX",
+                "CM_SAVED_FILTER",
+                "CM_SLA_POLICY",
+                "CM_SLA_RECORD",
+                "CM_SLA_TARGET",
+                "CM_TASK",
+                "CM_WEBHOOK_DELIVERY",
+                "CM_WEBHOOK_SUB");
     }
 
     @Test

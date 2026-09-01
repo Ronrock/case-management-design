@@ -81,7 +81,7 @@ class SlaLifecycleServiceTest extends OracleTestBase {
 
     @Test
     void rootCompletionTerminalizesEveryOpenClockAsMetAndPreventsLaterSweepBreach() {
-        OffsetDateTime terminalAt = OffsetDateTime.now();
+        OffsetDateTime terminalAt = OffsetDateTime.parse("2026-08-30T12:34:56.123456Z");
 
         lifecycle.terminalizeRoot(CASE_ID, SlaLifecyclePort.TerminalState.COMPLETED,
                 terminalAt.toInstant());

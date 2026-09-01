@@ -34,11 +34,11 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
                 NOW.plusSeconds(10).toInstant(), ZoneOffset.UTC));
         JdbcClient.create(dataSource()).sql("""
                 BEGIN
-                  EXECUTE IMMEDIATE 'CREATE TABLE CM_COMMAND_TX_PROBE (ID_ VARCHAR2(64) PRIMARY KEY)';
+                  EXECUTE IMMEDIATE 'CREATE TABLE TEST_COMMAND_TX_PROBE (ID_ VARCHAR2(64) PRIMARY KEY)';
                 EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF;
                 END;
                 """).update();
-        JdbcClient.create(dataSource()).sql("DELETE FROM CM_COMMAND_TX_PROBE").update();
+        JdbcClient.create(dataSource()).sql("DELETE FROM TEST_COMMAND_TX_PROBE").update();
     }
 
     @Test
@@ -450,27 +450,27 @@ class EngineCommandRepositoryProductionTest extends OracleTestBase {
         var transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource()));
 
         transaction.executeWithoutResult(status -> {
-            jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('before-replay')").update();
+            jdbc.sql("INSERT INTO TEST_COMMAND_TX_PROBE(ID_) VALUES ('before-replay')").update();
             assertThat(repository.submit(request(
                     "command-b", "operation-b", "key-a")).replayed()).isTrue();
-            jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('after-replay')").update();
+            jdbc.sql("INSERT INTO TEST_COMMAND_TX_PROBE(ID_) VALUES ('after-replay')").update();
         });
         transaction.executeWithoutResult(status -> {
-            jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('before-conflict')").update();
+            jdbc.sql("INSERT INTO TEST_COMMAND_TX_PROBE(ID_) VALUES ('before-conflict')").update();
             assertThatThrownBy(() -> repository.submit(request(
                     "command-c", "operation-c", "key-a", completionPayload(2))))
                     .isInstanceOf(EngineCommandRepository.IdempotencyConflictException.class);
-            jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('after-conflict')").update();
+            jdbc.sql("INSERT INTO TEST_COMMAND_TX_PROBE(ID_) VALUES ('after-conflict')").update();
         });
         transaction.executeWithoutResult(status -> {
-            jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('before-operation')").update();
+            jdbc.sql("INSERT INTO TEST_COMMAND_TX_PROBE(ID_) VALUES ('before-operation')").update();
             assertThatThrownBy(() -> repository.submit(request(
                     "command-d", "operation-a", "different-key")))
                     .isInstanceOf(EngineCommandRepository.OperationConflictException.class);
-            jdbc.sql("INSERT INTO CM_COMMAND_TX_PROBE(ID_) VALUES ('after-operation')").update();
+            jdbc.sql("INSERT INTO TEST_COMMAND_TX_PROBE(ID_) VALUES ('after-operation')").update();
         });
 
-        assertThat(jdbc.sql("SELECT ID_ FROM CM_COMMAND_TX_PROBE ORDER BY ID_")
+        assertThat(jdbc.sql("SELECT ID_ FROM TEST_COMMAND_TX_PROBE ORDER BY ID_")
                 .query(String.class).list()).containsExactly(
                 "after-conflict", "after-operation", "after-replay",
                 "before-conflict", "before-operation", "before-replay");
