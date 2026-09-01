@@ -10,6 +10,8 @@ import org.operaton.bpm.model.bpmn.Bpmn;
 import org.springframework.core.io.ClassPathResource;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -25,7 +27,8 @@ class BpmnComplaintResourcesTest {
         assertThat(index.formRefs()).contains("registerForm", "assessForm", "closeForm");
         assertThat(index.milestoneIds()).contains("acknowledged", "decided");
         assertThat(index.candidateGroups()).contains("intake", "handlers");
-        assertThat(index.slaRefs()).contains("resolution");
+        assertThat(index.slaRefs()).containsExactly(new BpmnReleaseValidator.SlaReference(
+                "resolution", "complaint", BpmnReleaseValidator.ElementKind.CASE));
         assertThat(Bpmn.readModelFromStream(new java.io.ByteArrayInputStream(process)))
                 .isNotNull();
 
@@ -33,6 +36,13 @@ class BpmnComplaintResourcesTest {
         var presentation = JsonCodec.toMap(text("definitions/complaint-bpmn-presentation.json"));
         assertThat(contract.get("key")).isEqualTo("complaint");
         assertThat(presentation.get("version")).isEqualTo("1.0");
+        @SuppressWarnings("unchecked")
+        var sections = (List<Map<String, Object>>) presentation.get("sections");
+        assertThat(sections)
+                .filteredOn(section -> "actions".equals(section.get("id")))
+                .singleElement()
+                .extracting(section -> section.get("actions"))
+                .isEqualTo(List.of("cancel"));
     }
 
     /**
@@ -48,13 +58,16 @@ class BpmnComplaintResourcesTest {
                 .validate("complaint", bytes("definitions/complaint-bpmn-contract.json"));
 
         assertThat(contract.orchestrationMode()).isEqualTo(OrchestrationMode.BPMN);
+        assertThat(contract.adHocActions()).isEmpty();
 
         var index = BpmnReleaseValidator.validate("complaint",
                 bytes("processes/complaint-bpmn.bpmn"), "application/bpmn+xml");
 
         assertThat(contract.forms().keySet()).containsAll(index.formRefs());
         assertThat(contract.candidateGroups()).containsAll(index.candidateGroups());
-        assertThat(contract.slaTargetIds()).containsAll(index.slaRefs());
+        assertThat(contract.slaTargetIds()).containsAll(index.slaRefs().stream()
+                .map(BpmnReleaseValidator.SlaReference::targetId)
+                .toList());
     }
 
     private static byte[] bytes(String path) throws Exception {

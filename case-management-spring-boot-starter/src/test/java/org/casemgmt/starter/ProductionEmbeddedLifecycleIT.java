@@ -67,9 +67,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * separate Docker-backed gate.
  */
 @SpringBootTest(classes = ProductionEmbeddedLifecycleIT.TestApp.class, properties = {
-        "spring.datasource.url=jdbc:h2:mem:production-lifecycle;MODE=LEGACY;DB_CLOSE_DELAY=-1;"
-                + "INIT=CREATE CONSTANT IF NOT EXISTS SYSTIMESTAMP VALUE "
-                + "'2026-08-28 12:00:00+00'",
+        "spring.datasource.url=jdbc:h2:mem:production-lifecycle;MODE=Oracle;DB_CLOSE_DELAY=-1",
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.liquibase.enabled=true",
         "spring.liquibase.change-log=classpath:production-embedded-lifecycle-changelog.xml",
@@ -99,9 +97,7 @@ class ProductionEmbeddedLifecycleIT {
             HikariDataSource dataSource = new HikariDataSource();
             dataSource.setDriverClassName("org.h2.Driver");
             dataSource.setJdbcUrl(
-                    "jdbc:h2:mem:production-lifecycle;MODE=LEGACY;DB_CLOSE_DELAY=-1;"
-                            + "INIT=CREATE CONSTANT IF NOT EXISTS SYSTIMESTAMP VALUE "
-                            + "'2026-08-28 12:00:00+00'");
+                    "jdbc:h2:mem:production-lifecycle;MODE=Oracle;DB_CLOSE_DELAY=-1");
             return dataSource;
         }
 

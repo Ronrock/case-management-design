@@ -155,21 +155,7 @@
       ]
     }
   },
-  "adHocActions": [
-    {
-      "id": "investigate-aspect",
-      "type": "TASK",
-      "name": "Investigate aspect",
-      "roles": [
-        "handler"
-      ],
-      "formRef": "investigateForm",
-      "candidateGroups": [
-        "handlers"
-      ],
-      "availabilityExpression": "${case.state == 'ACTIVE'}"
-    }
-  ],
+  "adHocActions": [],
   "slaBindings": {
     "resolution": {
       "name": "Complaint resolution",

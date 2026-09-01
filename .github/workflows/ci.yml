@@ -13,10 +13,11 @@ permissions:
   contents: read
 
 jobs:
-  # The full Java reactor. Integration tests start Oracle and Operaton through Testcontainers,
-  # so this job needs the Docker daemon that ubuntu-latest already provides.
-  java:
-    name: Java reactor
+  # Core starts Oracle through Testcontainers, so this job needs the Docker daemon that
+  # ubuntu-latest already provides. It is independent from the downstream module matrix so an
+  # Oracle infrastructure failure cannot hide every other module's result.
+  java-core:
+    name: Java core
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -26,15 +27,65 @@ jobs:
           java-version: '21'
           distribution: temurin
           cache: maven
-      - name: Build and test
-        run: ./mvnw --batch-mode clean install
-      - name: Upload Java test reports
+      - name: Test core
+        run: ./mvnw --batch-mode -pl case-management-core test
+      - name: Upload core test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: surefire-reports
-          path: '**/target/surefire-reports/**'
+          name: java-core-test-reports
+          path: |
+            case-management-core/target/surefire-reports/**
+            case-management-core/target/failsafe-reports/**
           if-no-files-found: error
+
+  java-module:
+    name: Java module (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - case-management-engine-embedded
+          - case-management-engine-remote
+          - case-management-rest
+          - case-management-spring-boot-starter
+          - case-management-poc-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+      - name: Install module prerequisites
+        run: ./mvnw --batch-mode -DskipTests install
+      - name: Test module
+        run: ./mvnw --batch-mode -pl "${{ matrix.module }}" test
+      - name: Upload module test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-${{ matrix.module }}-test-reports
+          path: |
+            ${{ matrix.module }}/target/surefire-reports/**
+            ${{ matrix.module }}/target/failsafe-reports/**
+          if-no-files-found: error
+
+  java:
+    name: Java reactor
+    if: always()
+    needs: [java-core, java-module]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Java job to succeed
+        env:
+          CORE_RESULT: ${{ needs.java-core.result }}
+          MODULE_RESULT: ${{ needs.java-module.result }}
+        run: |
+          test "$CORE_RESULT" = success
+          test "$MODULE_RESULT" = success
 
   # The published modeling vocabulary. This is a required check in its own right: a template
   # that binds the wrong namespace produces models the validator silently ignores, and nothing

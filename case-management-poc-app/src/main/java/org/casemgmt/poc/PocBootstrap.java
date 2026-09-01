@@ -121,16 +121,19 @@ public class PocBootstrap {
      * previous run actually stopped rather than only ever from "nothing" or "everything".
      */
     private void seedSla(SlaRepository sla) {
+        Map<String, Object> workday = Map.of("from", "09:00", "to", "17:00");
+        Map<String, Object> calendarDefinition = Map.of(
+                "timezone", "Europe/Amsterdam",
+                "workingHours", Map.of(
+                        "MONDAY", List.of(workday), "TUESDAY", List.of(workday),
+                        "WEDNESDAY", List.of(workday), "THURSDAY", List.of(workday),
+                        "FRIDAY", List.of(workday)),
+                "holidays", List.of("2026-12-25", "2026-12-26"));
         if (sla.calendarDefinition("nl-business").isEmpty()) {
-            Map<String, Object> workday = Map.of("from", "09:00", "to", "17:00");
-            sla.insertCalendar("nl-business", Map.of(
-                    "timezone", "Europe/Amsterdam",
-                    "workingHours", Map.of(
-                            "MONDAY", List.of(workday), "TUESDAY", List.of(workday),
-                            "WEDNESDAY", List.of(workday), "THURSDAY", List.of(workday),
-                            "FRIDAY", List.of(workday)),
-                    "holidays", List.of("2026-12-25", "2026-12-26")));
+            sla.insertCalendar("nl-business", calendarDefinition);
         }
+        sla.insertCalendarRevision(TENANT_ID, "nl-business", 1,
+                "NL business", calendarDefinition);
 
         if (sla.calendarIdOf("sla-complaint") == null) {
             sla.insertPolicy("sla-complaint", "Complaint SLA", null, "nl-business");

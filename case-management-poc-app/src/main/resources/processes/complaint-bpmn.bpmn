@@ -4,7 +4,7 @@
                   xmlns:casemgmt="https://casemgmt.org/bpmn"
                   id="complaint-bpmn-definitions" targetNamespace="https://casemgmt.org/poc">
   <bpmn:process id="complaint" name="Complaint handling (BPMN)" isExecutable="true"
-                operaton:historyTimeToLive="180">
+                operaton:historyTimeToLive="180" casemgmt:slaTargetId="resolution">
     <bpmn:startEvent id="start"/>
     <bpmn:sequenceFlow id="to-intake" sourceRef="start" targetRef="intake"/>
     <bpmn:subProcess id="intake" name="Intake" casemgmt:stage="true">
@@ -31,7 +31,7 @@
     <bpmn:intermediateThrowEvent id="decided" name="Decided" casemgmt:milestoneId="decided"/>
     <bpmn:sequenceFlow id="to-close" sourceRef="decided" targetRef="close-complaint"/>
     <bpmn:userTask id="close-complaint" name="Close complaint" operaton:formKey="closeForm"
-                   operaton:candidateGroups="handlers" casemgmt:slaTargetId="resolution"/>
+                   operaton:candidateGroups="handlers"/>
     <bpmn:sequenceFlow id="to-end" sourceRef="close-complaint" targetRef="end"/>
     <bpmn:endEvent id="end"/>
   </bpmn:process>

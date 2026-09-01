@@ -12,11 +12,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.testcontainers.oracle.OracleContainer;
+import org.testcontainers.utility.DockerImageName;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.List;
 
 // No @Testcontainers/@Container here on purpose. That extension manages a *per-class-instance*
@@ -28,42 +30,9 @@ import java.util.List;
 // test class, that is a different design (an instance field, not this shared static one).
 public abstract class OracleTestBase {
 
-    private static final String ORACLE_IMAGE = "gvenzl/oracle-free:23-slim-faststart";
-
-    private static final String LIGHTWEIGHT_ORACLE_SPFILE = String.join("\n",
-            "cat > /tmp/initFREE-light.ora <<'EOF'",
-            "common_user_prefix=\"\"",
-            "compatible=\"23.6.0\"",
-            "control_files=\"/opt/oracle/oradata/FREE/control01.ctl\",\"/opt/oracle/oradata/FREE/control02.ctl\"",
-            "control_management_pack_access=\"DIAGNOSTIC+TUNING\"",
-            "cpu_count=2",
-            "db_block_size=8192",
-            "db_name=\"FREE\"",
-            "diagnostic_dest=\"/opt/oracle\"",
-            "dispatchers=\"(PROTOCOL=TCP) (SERVICE=FREEXDB)\"",
-            "enable_pluggable_database=true",
-            "fast_start_parallel_rollback=\"FALSE\"",
-            "job_queue_processes=1",
-            "local_listener=\"\"",
-            "mle_prog_languages=\"OFF\"",
-            "nls_language=\"AMERICAN\"",
-            "nls_territory=\"AMERICA\"",
-            "open_cursors=300",
-            "pga_aggregate_target=256m",
-            "processes=300",
-            "remote_login_passwordfile=\"EXCLUSIVE\"",
-            "sga_target=768m",
-            "shared_servers=0",
-            "spatial_vector_acceleration=FALSE",
-            "undo_tablespace=\"UNDOTBS1\"",
-            "EOF",
-            "sqlplus -s / as sysdba <<'SQL'",
-            "WHENEVER SQLERROR EXIT SQL.SQLCODE",
-            "CREATE SPFILE='${ORACLE_HOME}/dbs/spfile${ORACLE_SID}.ora' FROM PFILE='/tmp/initFREE-light.ora';",
-            "EXIT;",
-            "SQL",
-            "exec container-entrypoint.sh",
-            "");
+    private static final DockerImageName ORACLE_IMAGE = DockerImageName.parse(
+                    "gvenzl/oracle-free:23.26.3-slim-faststart@sha256:f5ff19033860d662c821cb04eb10483fa94f14f78eae252d054291ea07028093")
+            .asCompatibleSubstituteFor("gvenzl/oracle-free");
 
     // Reused across all core test classes in this module's forked JVM: starting Oracle takes ~40s.
     private static final OracleContainer ORACLE = oracleContainer();
@@ -95,8 +64,7 @@ public abstract class OracleTestBase {
         return new OracleContainer(ORACLE_IMAGE)
                 .withUsername("cm")
                 .withPassword("cm")
-                .withCreateContainerCmdModifier(cmd -> cmd.withEntrypoint(
-                        "bash", "-lc", LIGHTWEIGHT_ORACLE_SPFILE));
+                .withStartupTimeout(Duration.ofMinutes(5));
     }
 
     static {
@@ -119,7 +87,17 @@ public abstract class OracleTestBase {
             // than leaking connections until the JVM's own exit tears the socket down anyway.
             Runtime.getRuntime().addShutdownHook(new Thread(ds::close, "OracleTestBasePool-close"));
         } catch (Throwable t) {
+            preserveOracleLogs(t);
             startupFailure = t;
+        }
+    }
+
+    private static void preserveOracleLogs(Throwable failure) {
+        try {
+            System.err.printf("Oracle container startup or migration failed (%s).%n%s%n",
+                    ORACLE_IMAGE, ORACLE.getLogs());
+        } catch (Throwable logFailure) {
+            failure.addSuppressed(logFailure);
         }
     }
 

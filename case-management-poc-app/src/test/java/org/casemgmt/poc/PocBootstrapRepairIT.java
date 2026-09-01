@@ -149,6 +149,11 @@ class PocBootstrapRepairIT {
         List<String> holidays = ((List<?>) calendar.get("holidays")).stream()
                 .map(String::valueOf).toList();
         assertThat(holidays).contains("2026-12-25", "2026-12-26");
+        var revision = sla.require(PocBootstrap.TENANT_ID, "nl-business", 1);
+        assertThat(revision.tenantId()).isEqualTo(PocBootstrap.TENANT_ID);
+        assertThat(revision.calendarId()).isEqualTo("nl-business");
+        assertThat(revision.revision()).isEqualTo(1);
+        assertThat(revision.definition()).isEqualTo(calendar);
         assertThat(sla.calendarIdOf("sla-complaint")).isEqualTo("nl-business");
         assertThat(sla.targetsFor("sla-complaint"))
                 .anySatisfy(t -> {
