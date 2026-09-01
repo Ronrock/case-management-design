@@ -21,7 +21,18 @@ npm install
 VITE_CASE_API_PROXY_TARGET=http://localhost:8080 npm run dev
 ```
 
-Open the URL printed by Vite and connect with the tutorial caseworker credentials `alice` / `alice`. The username and password stay in browser memory only; they are not persisted. The demo lets you search and create complaint cases, inspect canonical variables, tasks, SLAs, the observation spine and recent events, and claim or complete tasks when the API advertises those actions.
+Open the URL printed by Vite and connect with the tutorial caseworker credentials `alice` / `alice`. The username and password stay in browser memory only; they are not persisted.
+
+The worker showcase is entirely driven by capabilities returned by the live REST API. It provides:
+
+- a request-driven **My Work** inbox, grouped into assigned and claimable work;
+- a shared case workspace for facts, current tasks, and the observation spine;
+- case-level update, close, and cancel controls only when the case advertises them;
+- every SLA clock, including advertised pause and resume controls;
+- a chronological activity view combining system events and internal comments; and
+- advertised task claim and completion actions, with completion fields loaded from the pinned case contract.
+
+Refresh controls issue requests only when selected; the demo does not poll in the background. Because actions and comments depend on the current case state and caller permissions, controls that the backend does not advertise are intentionally absent.
 
 ## Configuration
 
