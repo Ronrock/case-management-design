@@ -1,32 +1,39 @@
-# React + TypeScript + Vite
+# Standalone React case management demo
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+This small React application showcases the case management library through its public REST API. It is intentionally independent: the directory is not part of the Maven reactor, an npm workspace, or the published library package. It has no mock-data mode and requires the live PoC backend.
 
-Currently, two official plugins are available:
+## Start the demo
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+From the repository root, start the backend in one terminal:
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+docker compose up -d oracle
+export CASEMGMT_WEBHOOK_SECRET_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+./mvnw -B -DskipTests package
+java -jar case-management-poc-app/target/case-management-poc-app-0.1.0-SNAPSHOT.jar
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Then start the standalone frontend in a second terminal:
+
+```bash
+cd case-management-react-demo
+npm install
+VITE_CASE_API_PROXY_TARGET=http://localhost:8080 npm run dev
+```
+
+Open the URL printed by Vite and connect with the tutorial caseworker credentials `alice` / `alice`. The username and password stay in browser memory only; they are not persisted. The demo lets you search and create complaint cases, inspect canonical variables, tasks, SLAs, the observation spine and recent events, and claim or complete tasks when the API advertises those actions.
+
+## Configuration
+
+- `VITE_CASE_API_BASE_URL` sets the browser-visible REST base and defaults to `/case-api/v2`.
+- `VITE_CASE_API_PROXY_TARGET` sets the Vite development proxy target and defaults to `http://localhost:8080`.
+- Production hosting must reverse-proxy `/case-api` to the REST backend. HTTP Basic is intended for this local demonstration; use the deployment's normal authentication controls outside the PoC.
+
+## Checks and production preview
+
+```bash
+npm test
+npm run lint
+npm run build
+npm run preview
+```

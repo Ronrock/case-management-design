@@ -6,15 +6,17 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import type { ApiCredentials } from '@/lib/api-types'
+import { ApiError } from '@/lib/case-api-client'
 
 interface ConnectionGateProps {
   onConnect(credentials: ApiCredentials): Promise<void>
+  initialMessage?: string
 }
 
-export function ConnectionGate({ onConnect }: ConnectionGateProps) {
+export function ConnectionGate({ onConnect, initialMessage = '' }: ConnectionGateProps) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
+  const [error, setError] = useState(initialMessage)
   const [connecting, setConnecting] = useState(false)
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -24,7 +26,12 @@ export function ConnectionGate({ onConnect }: ConnectionGateProps) {
     try {
       await onConnect({ username, password })
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not connect')
+      if (reason instanceof ApiError && reason.status === 401) {
+        setPassword('')
+        setError('Credentials were not accepted')
+      } else {
+        setError(reason instanceof Error ? reason.message : 'Could not connect')
+      }
     } finally {
       setConnecting(false)
     }
