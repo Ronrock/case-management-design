@@ -10,11 +10,15 @@ import type { CaseSummary } from '@/lib/api-types'
 interface CaseRailProps {
   cases: CaseSummary[]
   selectedId?: string
+  totalCases: number
+  hasMore: boolean
+  loadingMore: boolean
+  onLoadMore(): void
   onSelect(caseId: string): void
   onCreate(): void
 }
 
-export function CaseRail({ cases, selectedId, onSelect, onCreate }: CaseRailProps) {
+export function CaseRail({ cases, selectedId, totalCases, hasMore, loadingMore, onLoadMore, onSelect, onCreate }: CaseRailProps) {
   const [query, setQuery] = useState('')
   const visibleCases = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -34,8 +38,9 @@ export function CaseRail({ cases, selectedId, onSelect, onCreate }: CaseRailProp
       </div>
       <div className="relative mt-5">
         <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-        <Input className="pl-9" type="search" aria-label="Search cases" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <Input className="pl-9" type="search" aria-label="Filter loaded cases" value={query} onChange={(event) => setQuery(event.target.value)} />
       </div>
+      <p className="mt-2 text-xs text-muted-foreground">Showing {cases.length} of {totalCases} cases. Filter applies to loaded cases.</p>
       {cases.length === 0 ? <p className="empty-copy">No cases yet</p> : null}
       {cases.length > 0 && visibleCases.length === 0 ? <p className="empty-copy">No cases match this search.</p> : null}
       <ScrollArea className="mt-4 h-[calc(100svh-13rem)]">
@@ -56,6 +61,7 @@ export function CaseRail({ cases, selectedId, onSelect, onCreate }: CaseRailProp
               </span>
             </button>
           ))}
+          {hasMore ? <Button variant="outline" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? 'Loading…' : 'Load more cases'}</Button> : null}
         </div>
       </ScrollArea>
     </aside>

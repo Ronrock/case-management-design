@@ -44,6 +44,23 @@ describe('activity panel', () => {
     expect(entries[1]).toHaveTextContent('alice')
   })
 
+  it('orders mixed-offset timestamps by their actual instant', async () => {
+    installFetchScript(() => ({
+      body: [{ id: 'comment-1', caseId: 'case-1', author: 'alice', text: 'Earlier comment', visibility: 'internal', createdAt: '2026-09-01T12:27:00+08:00' }],
+    }))
+    render(<ActivityPanel
+      client={client()}
+      caseItem={caseItem}
+      events={[{ id: 'event-1', type: 'case.task.completed', time: '2026-09-01T05:00:00Z' }]}
+      refreshKey={0}
+      onChanged={vi.fn()}
+    />)
+
+    const entries = await screen.findAllByRole('listitem')
+    expect(entries[0]).toHaveTextContent('Task Completed')
+    expect(entries[1]).toHaveTextContent('Earlier comment')
+  })
+
   it('shows and submits the composer only when comment is advertised', async () => {
     const calls = installFetchScript((call) => call.init.method === 'POST'
       ? { body: { id: 'comment-2', caseId: 'case-1', text: 'Checked with customer' } }

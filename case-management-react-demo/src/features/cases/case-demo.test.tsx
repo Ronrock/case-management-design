@@ -55,12 +55,46 @@ describe('case demo', () => {
     const user = userEvent.setup()
     render(<CaseDemo client={client()} username="alice" initialPage={page([caseItem('case-1', 'Lost transfer'), caseItem('case-2', 'Card complaint')])} />)
 
-    await user.type(screen.getByRole('searchbox', { name: 'Search cases' }), 'card')
+    await user.type(screen.getByRole('searchbox', { name: 'Filter loaded cases' }), 'card')
     const rail = within(screen.getByRole('complementary', { name: 'Cases' }))
     expect(rail.getByText('Card complaint')).toBeInTheDocument()
     expect(rail.queryByText('Lost transfer')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /Card complaint/ }))
     expect(screen.getByRole('button', { name: /Card complaint/ })).toHaveAttribute('data-selected', 'true')
+  })
+
+  it('loads another page before filtering cases outside the initial page', async () => {
+    const firstPage: Page<CaseSummary> = {
+      items: [caseItem('case-1', 'Lost transfer')],
+      page: 0,
+      pageSize: 1,
+      totalItems: 2,
+      totalPages: 2,
+    }
+    const secondPage: Page<CaseSummary> = {
+      items: [caseItem('case-2', 'Card complaint')],
+      page: 1,
+      pageSize: 1,
+      totalItems: 2,
+      totalPages: 2,
+    }
+    const calls = installFetchScript((call) => {
+      if (call.url.endsWith('/cases?page=1&pageSize=1')) return { body: secondPage }
+      if (call.url.endsWith('/cases')) return { body: firstPage }
+      if (call.url.endsWith('/cases/case-1')) return { body: caseItem('case-1', 'Lost transfer') }
+      return { body: [] }
+    })
+    const user = userEvent.setup()
+    render(<CaseDemo client={client()} username="alice" initialPage={firstPage} />)
+
+    await user.click(await screen.findByRole('button', { name: 'Load more cases' }))
+    await user.type(screen.getByRole('searchbox', { name: 'Filter loaded cases' }), 'card')
+
+    const rail = within(screen.getByRole('complementary', { name: 'Cases' }))
+    expect(await rail.findByText('Card complaint')).toBeInTheDocument()
+    expect(rail.queryByText('Lost transfer')).not.toBeInTheDocument()
+    expect(calls.some((call) => call.url.endsWith('/cases?page=1&pageSize=1'))).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Load more cases' })).not.toBeInTheDocument()
   })
 
   it('creates a complaint with an idempotency key and selects it', async () => {

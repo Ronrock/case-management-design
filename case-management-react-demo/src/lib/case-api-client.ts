@@ -45,8 +45,11 @@ export class CaseApiClient {
     this.unauthorizedHandler = handler
   }
 
-  listCases(): Promise<Page<CaseSummary>> {
-    return this.request('/cases')
+  listCases(page = 0, pageSize?: number): Promise<Page<CaseSummary>> {
+    if (page === 0 && pageSize === undefined) return this.request('/cases')
+    const query = new URLSearchParams({ page: String(page) })
+    if (pageSize !== undefined) query.set('pageSize', String(pageSize))
+    return this.request(`/cases?${query}`)
   }
 
   listTasks(): Promise<TaskSummary[]> {
@@ -94,16 +97,9 @@ export class CaseApiClient {
     const action = task.availableActions.find((candidate) => candidate.action === 'complete')
     const formKey = action?.formKey ?? task.formKey
     if (!formKey) throw new Error('This task does not advertise a completion form.')
-    const version = await this.request<{ contractReleaseId?: string }>(
-      `/case-definitions/${encodeURIComponent(caseItem.caseDefinitionKey)}/versions/${caseItem.caseDefinitionVersion}`,
+    return this.request<TaskFormDefinition>(
+      `/case-definitions/${encodeURIComponent(caseItem.caseDefinitionKey)}/versions/${caseItem.caseDefinitionVersion}/forms/${encodeURIComponent(formKey)}`,
     )
-    if (!version.contractReleaseId) throw new Error('The pinned case definition has no contract release.')
-    const contract = await this.request<{ forms?: Record<string, TaskFormDefinition> }>(
-      `/case-definitions/${encodeURIComponent(caseItem.caseDefinitionKey)}/contract-releases/${encodeURIComponent(version.contractReleaseId)}`,
-    )
-    const definition = contract.forms?.[formKey]
-    if (!definition) throw new Error(`Form ${formKey} is not present in the pinned contract.`)
-    return definition
   }
 
   executeTaskAction(action: AvailableAction, version: number, variables?: Record<string, unknown>): Promise<unknown> {

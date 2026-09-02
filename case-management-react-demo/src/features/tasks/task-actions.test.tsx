@@ -27,8 +27,9 @@ describe('task actions', () => {
 
   it('loads the pinned contract form and completes through the advertised action', async () => {
     const calls = installFetchScript((call) => {
-      if (call.url.includes('/versions/3')) return { body: { contractReleaseId: 'contract-9' } }
-      if (call.url.includes('/contract-releases/contract-9')) return { body: { forms: { assessForm: { schema: { type: 'object', required: ['outcome'], properties: { outcome: { type: 'string', enum: ['upheld'] } } } } } } }
+      if (call.url.endsWith('/case-definitions/complaint/versions/3/forms/assessForm')) {
+        return { body: { schema: { type: 'object', required: ['outcome'], properties: { outcome: { type: 'string', enum: ['upheld'] } } } } }
+      }
       return { body: {} }
     })
     const onChanged = vi.fn()

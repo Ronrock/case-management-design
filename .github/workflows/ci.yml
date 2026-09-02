@@ -13,6 +13,37 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect demo changes
+    runs-on: ubuntu-latest
+    outputs:
+      react_demo: ${{ steps.filter.outputs.react_demo }}
+      quickstart: ${{ steps.filter.outputs.quickstart }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            react_demo:
+              - 'case-management-react-demo/**'
+              - 'case-management-core/**'
+              - 'case-management-rest/**'
+              - 'case-management-spring-boot-starter/**'
+              - 'case-management-poc-app/**'
+              - 'pom.xml'
+              - '.github/workflows/ci.yml'
+            quickstart:
+              - 'docker/**'
+              - 'docker-compose.yml'
+              - 'case-management-core/**'
+              - 'case-management-engine-embedded/**'
+              - 'case-management-rest/**'
+              - 'case-management-spring-boot-starter/**'
+              - 'case-management-poc-app/**'
+              - 'pom.xml'
+              - '.github/workflows/ci.yml'
+
   # Core starts Oracle through Testcontainers, so this job needs the Docker daemon that
   # ubuntu-latest already provides. It is independent from the downstream module jobs so an
   # Oracle infrastructure failure cannot hide every other module's result.
@@ -229,3 +260,80 @@ jobs:
       - name: Test
         run: npm test
         working-directory: case-management-web-components
+
+  react-demo:
+    name: React demo
+    needs: changes
+    if: needs.changes.outputs.react_demo == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: case-management-react-demo/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: case-management-react-demo
+      - name: Test
+        run: npm test
+        working-directory: case-management-react-demo
+      - name: Lint
+        run: npm run lint
+        working-directory: case-management-react-demo
+      - name: Build
+        run: npm run build
+        working-directory: case-management-react-demo
+
+  demo-quickstart:
+    name: Demo quickstart
+    needs: changes
+    if: needs.changes.outputs.quickstart == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+      - name: Start a fresh Oracle database
+        run: docker compose up -d --wait oracle
+      - name: Package the PoC backend
+        run: ./mvnw --batch-mode -DskipTests -pl case-management-poc-app -am package
+      - name: Start the PoC backend
+        id: backend
+        env:
+          CASEMGMT_WEBHOOK_SECRET_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+        run: |
+          java -jar case-management-poc-app/target/case-management-poc-app-0.1.0-SNAPSHOT.jar > "$RUNNER_TEMP/poc.log" 2>&1 &
+          echo "pid=$!" >> "$GITHUB_OUTPUT"
+      - name: Verify the documented backend startup
+        run: |
+          for attempt in {1..60}; do
+            if curl --fail --silent --user alice:alice 'http://127.0.0.1:8080/case-api/v2/cases?pageSize=1' > /dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          cat "$RUNNER_TEMP/poc.log"
+          exit 1
+      - name: Upload backend log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-quickstart-backend-log
+          path: ${{ runner.temp }}/poc.log
+          if-no-files-found: error
+      - name: Stop the quickstart
+        if: always()
+        env:
+          BACKEND_PID: ${{ steps.backend.outputs.pid }}
+        run: |
+          if test -n "$BACKEND_PID"; then
+            kill "$BACKEND_PID" || true
+          fi
+          docker compose down -v

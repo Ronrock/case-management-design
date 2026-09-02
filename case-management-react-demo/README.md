@@ -4,6 +4,12 @@ This small React application showcases the case management library through its p
 
 ## Start the demo
 
+Prerequisites:
+
+- Docker with Docker Compose;
+- JDK 21; and
+- Node.js 22 with npm.
+
 From the repository root, start the backend in one terminal:
 
 ```bash
@@ -17,7 +23,7 @@ Then start the standalone frontend in a second terminal:
 
 ```bash
 cd case-management-react-demo
-npm install
+npm ci
 VITE_CASE_API_PROXY_TARGET=http://localhost:8080 npm run dev
 ```
 

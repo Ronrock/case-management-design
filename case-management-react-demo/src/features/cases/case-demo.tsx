@@ -16,6 +16,8 @@ interface CaseDemoProps {
 
 export function CaseDemo({ client, username, initialPage }: CaseDemoProps) {
   const [cases, setCases] = useState(initialPage.items)
+  const [casePage, setCasePage] = useState(initialPage)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [selectedId, setSelectedId] = useState(initialPage.items[0]?.id)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [activeView, setActiveView] = useState<'work' | 'cases'>('cases')
@@ -27,6 +29,7 @@ export function CaseDemo({ client, username, initialPage }: CaseDemoProps) {
     client.listCases().then((nextPage) => {
       if (!current) return
       setCases(nextPage.items)
+      setCasePage(nextPage)
       setSelectedId((selected) => selected ?? nextPage.items[0]?.id)
     }).catch(() => {
       // Keep the credential-check page visible; global 401 handling still ends the session.
@@ -38,6 +41,21 @@ export function CaseDemo({ client, username, initialPage }: CaseDemoProps) {
     setSelectedId(task.caseId)
     setHighlightedTaskId(task.id)
     setActiveView('cases')
+  }
+
+  async function loadMoreCases() {
+    if (loadingMore || casePage.page + 1 >= casePage.totalPages) return
+    setLoadingMore(true)
+    try {
+      const nextPage = await client.listCases(casePage.page + 1, casePage.pageSize)
+      setCases((current) => {
+        const knownIds = new Set(current.map((item) => item.id))
+        return [...current, ...nextPage.items.filter((item) => !knownIds.has(item.id))]
+      })
+      setCasePage(nextPage)
+    } finally {
+      setLoadingMore(false)
+    }
   }
 
   return (
@@ -53,7 +71,16 @@ export function CaseDemo({ client, username, initialPage }: CaseDemoProps) {
       {activeView === 'work'
         ? <WorkInbox client={client} username={username} refreshKey={refreshKey} onOpenTask={openTask} />
         : <div className="case-layout">
-          <CaseRail cases={cases} selectedId={selectedId} onSelect={(caseId) => { setHighlightedTaskId(undefined); setSelectedId(caseId) }} onCreate={() => setDialogOpen(true)} />
+          <CaseRail
+            cases={cases}
+            selectedId={selectedId}
+            totalCases={casePage.totalItems}
+            hasMore={casePage.page + 1 < casePage.totalPages}
+            loadingMore={loadingMore}
+            onLoadMore={loadMoreCases}
+            onSelect={(caseId) => { setHighlightedTaskId(undefined); setSelectedId(caseId) }}
+            onCreate={() => setDialogOpen(true)}
+          />
           {selectedId ? <CaseWorkspace client={client} caseId={selectedId} refreshKey={refreshKey} highlightedTaskId={highlightedTaskId} onDataChanged={() => setRefreshKey((value) => value + 1)} /> : <section className="case-workspace-placeholder"><div><h2>No case selected</h2><p>Create a complaint to begin.</p></div></section>}
         </div>}
       <NewCaseDialog

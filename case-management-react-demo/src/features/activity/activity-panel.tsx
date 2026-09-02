@@ -127,10 +127,17 @@ function combineActivity(events: CaseEvent[], comments: CaseComment[]): Activity
     actor: comment.author,
     time: comment.createdAt,
   }))
-  return [...eventEntries, ...commentEntries].sort((left, right) =>
-    String(right.time ?? '').localeCompare(String(left.time ?? ''))
-      || `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`),
-  )
+  return [...eventEntries, ...commentEntries].sort((left, right) => {
+    const timeDifference = activityTime(right.time) - activityTime(left.time)
+    return timeDifference
+      || `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`)
+  })
+}
+
+function activityTime(value?: string | null) {
+  if (!value) return Number.NEGATIVE_INFINITY
+  const parsed = Date.parse(value)
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed
 }
 
 function eventLabel(type: string) {

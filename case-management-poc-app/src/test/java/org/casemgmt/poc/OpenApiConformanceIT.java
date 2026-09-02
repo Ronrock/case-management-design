@@ -219,6 +219,54 @@ class OpenApiConformanceIT extends PocAppEmbeddedTestBase {
     }
 
     @Test
+    void advertisedTaskFormCanBeLoadedFromThePinnedCaseVersionAndCompleted() {
+        Map<String, Object> created = client("alice").post().uri("/case-api/v2/cases")
+                .header("Idempotency-Key", "versioned-form-" + UUID.randomUUID())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("caseDefinitionKey", "complaint", "tenantId", "t1",
+                        "title", "Versioned form flow"))
+                .retrieve().toEntity(Map.class).getBody();
+        String caseId = (String) created.get("id");
+        int definitionVersion = ((Number) created.get("caseDefinitionVersion")).intValue();
+
+        List<Map<String, Object>> tasks = client("alice").get()
+                .uri("/case-api/v2/cases/{id}/tasks", caseId)
+                .retrieve().toEntity(List.class).getBody();
+        Map<String, Object> task = tasks.getFirst();
+        String taskId = (String) task.get("id");
+
+        ResponseEntity<Map> claimed = client("alice").post()
+                .uri("/case-api/v2/tasks/{id}/claim", taskId)
+                .header("If-Match", "\"" + task.get("version") + "\"")
+                .retrieve().toEntity(Map.class);
+        assertThat(claimed.getStatusCode().value()).isEqualTo(200);
+        Map<String, Object> completeAction = ((List<Map<String, Object>>) claimed.getBody()
+                .get("availableActions")).getFirst();
+        String formKey = (String) completeAction.get("formKey");
+
+        ResponseEntity<String> form = client("alice").get()
+                .uri("/case-api/v2/case-definitions/complaint/versions/{version}/forms/{formKey}",
+                        definitionVersion, formKey)
+                .retrieve().toEntity(String.class);
+        assertThat(form.getStatusCode().value()).isEqualTo(200);
+        assertThat(form.getHeaders().getContentType()).hasToString("application/schema+json");
+        assertThat(form.getBody()).contains("\"channel\"").contains("\"summary\"");
+        assertConforms("/case-definitions/{key}/versions/{version}/forms/{formKey}",
+                Request.Method.GET, 200, form.getBody(), "application/schema+json");
+        assertRejected("/case-definitions/{key}/versions/{version}/forms/{formKey}",
+                Request.Method.GET, 200, "[]", "application/schema+json", "object");
+
+        ResponseEntity<Map> completed = client("alice").post()
+                .uri("/case-api/v2" + completeAction.get("href"))
+                .header("If-Match", claimed.getHeaders().getETag())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("variables", Map.of("channel", "web", "summary", "Registered")))
+                .retrieve().toEntity(Map.class);
+        assertThat(completed.getStatusCode().value()).isEqualTo(200);
+        assertThat(completed.getBody()).containsEntry("state", "COMPLETED");
+    }
+
+    @Test
     void planItemsTasksCollaborationAndSlaReadModelsConformToTheSpec() {
         String caseId = (String) ((Map) client("alice").post().uri("/case-api/v2/cases")
                 .header("Idempotency-Key", "openapi-readmodels-" + UUID.randomUUID())

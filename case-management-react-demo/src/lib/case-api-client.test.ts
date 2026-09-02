@@ -141,4 +141,37 @@ describe('case API client', () => {
 
     expect(requested).toContain('/case-api/v2/cases/case-1/events?after=0&limit=100')
   })
+
+  it('loads an advertised task form from the public version-pinned route', async () => {
+    const requested: string[] = []
+    const definition = {
+      schema: {
+        type: 'object' as const,
+        required: ['outcome'],
+        properties: { outcome: { type: 'string' as const } },
+      },
+    }
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      requested.push(String(input))
+      return new Response(JSON.stringify(definition), { headers: { 'Content-Type': 'application/schema+json' } })
+    }) as typeof fetch
+    const client = new CaseApiClient({
+      baseUrl: '/case-api/v2',
+      credentials: { username: 'alice', password: 'alice' },
+      fetchImpl,
+    })
+
+    await expect(client.taskForm({
+      id: 'case-1', tenantId: 't1', caseDefinitionKey: 'complaint', caseDefinitionVersion: 3,
+      state: 'ACTIVE', version: 1, availableActions: [],
+    }, {
+      id: 'task-1', caseId: 'case-1', name: 'Assess', state: 'CLAIMED', assignee: 'alice',
+      candidateGroups: [], version: 2,
+      availableActions: [{ action: 'complete', name: 'Complete', href: '/tasks/task-1/complete', method: 'POST', formKey: 'assessForm' }],
+    })).resolves.toEqual(definition)
+
+    expect(requested).toEqual([
+      '/case-api/v2/case-definitions/complaint/versions/3/forms/assessForm',
+    ])
+  })
 })
