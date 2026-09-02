@@ -138,4 +138,19 @@ public class CaseDefinitionController {
         return repo.formSchema(key, formKey, tenant)
                 .orElseThrow(() -> new NotFoundException("Form", key + "/" + formKey));
     }
+
+    @GetMapping(value = "/{key}/versions/{version}/forms/{formKey}",
+            produces = "application/schema+json")
+    public Map<String, Object> versionedForm(
+            @PathVariable String key, @PathVariable int version, @PathVariable String formKey,
+            @RequestParam(required = false) String tenantId,
+            Authentication authentication) {
+        String tenant = callers.requireTenant(callers.actor(authentication), tenantId);
+        CaseDefinition definition = repo.findVersion(key, version, tenant)
+                .orElseThrow(() -> new NotFoundException(
+                        "CaseDefinition", key + ":" + version));
+        return repo.formSchemaOfDefinition(definition.id(), formKey)
+                .orElseThrow(() -> new NotFoundException(
+                        "Form", key + ":" + version + "/" + formKey));
+    }
 }

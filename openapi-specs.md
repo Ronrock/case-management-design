@@ -247,6 +247,33 @@ paths:
               schema: {type: object}
         '404': {$ref: '#/components/responses/NotFound'}
 
+  /case-definitions/{key}/versions/{version}/forms/{formKey}:
+    get:
+      tags: [Case Definitions]
+      summary: Get a form schema from one immutable case-definition version
+      description: >
+        Worker-facing version-pinned form discovery. The schema is resolved from the exact
+        definition version stamped onto the case, so a later deployment cannot change the form
+        rendered for existing work.
+      parameters:
+        - {$ref: '#/components/parameters/definitionKey'}
+        - name: version
+          in: path
+          required: true
+          schema: {type: integer, minimum: 1}
+        - name: formKey
+          in: path
+          required: true
+          schema: {type: string}
+        - {$ref: '#/components/parameters/tenantId'}
+      responses:
+        '200':
+          description: JSON Schema and UI metadata for the pinned task form
+          content:
+            application/schema+json:
+              schema: {type: object}
+        '404': {$ref: '#/components/responses/NotFound'}
+
   /case-definitions/{key}/identity-links:
     get:
       tags: [Case Definitions]

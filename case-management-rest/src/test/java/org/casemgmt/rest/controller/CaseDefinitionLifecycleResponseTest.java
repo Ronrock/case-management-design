@@ -168,6 +168,31 @@ class CaseDefinitionLifecycleResponseTest {
     }
 
     @Test
+    void workerCanReadAFormFromOneExactDefinitionVersion() {
+        CaseDefinitionRepository definitions = mock(CaseDefinitionRepository.class);
+        CaseDefinitionVersionBindingRepository bindings =
+                mock(CaseDefinitionVersionBindingRepository.class);
+        ActionPolicy policy = mock(ActionPolicy.class);
+        CallerResolver callers = new CallerResolver(mock(ParticipantRepository.class));
+        Authentication authentication = mock(Authentication.class);
+        when(authentication.isAuthenticated()).thenReturn(true);
+        when(authentication.getName()).thenReturn("carol");
+        doReturn(List.of((org.springframework.security.core.GrantedAuthority)
+                () -> "ROLE_tenant:t1")).when(authentication).getAuthorities();
+        when(definitions.findVersion("orders", 1, "t1")).thenReturn(Optional.of(definition()));
+        Map<String, Object> schema = Map.of("schema", Map.of(
+                "type", "object", "required", List.of("outcome")));
+        when(definitions.formSchemaOfDefinition("definition-1", "reviewForm"))
+                .thenReturn(Optional.of(schema));
+        CaseDefinitionController controller = new CaseDefinitionController(
+                definitions, bindings, policy, callers);
+
+        assertThat(controller.versionedForm(
+                "orders", 1, "reviewForm", null, authentication)).isEqualTo(schema);
+        verify(definitions).formSchemaOfDefinition("definition-1", "reviewForm");
+    }
+
+    @Test
     void failedPublicationPointsToWorkingMetadataAndReturnsTheBoundedDiagnostic() {
         CaseDefinitionReleaseService releases = mock(CaseDefinitionReleaseService.class);
         CaseDefinitionReleaseRepository repository = mock(CaseDefinitionReleaseRepository.class);

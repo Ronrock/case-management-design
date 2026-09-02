@@ -1,0 +1,212 @@
+import type { ApiCredentials, AvailableAction, CaseComment, CaseEvent, CaseSummary, CaseWorkspaceSnapshot, CreateComplaintInput, MilestoneSummary, Page, PlanItemSummary, SlaSummary, TaskFormDefinition, TaskSummary } from './api-types'
+
+interface ProblemDetails {
+  title?: string
+  detail?: string
+}
+
+interface ClientOptions {
+  baseUrl: string
+  credentials: ApiCredentials
+  fetchImpl?: typeof fetch
+}
+
+export class ApiError extends Error {
+  status: number
+  title?: string
+  detail?: string
+
+  constructor(status: number, problem: ProblemDetails = {}) {
+    super(problem.detail ?? problem.title ?? `Request failed with status ${status}`)
+    this.name = 'ApiError'
+    this.status = status
+    this.title = problem.title
+    this.detail = problem.detail
+  }
+}
+
+export class CaseApiClient {
+  private readonly baseUrl: string
+  private readonly credentials: ApiCredentials
+  private readonly fetchImpl: typeof fetch
+  private unauthorizedHandler?: () => void
+
+  constructor({ baseUrl, credentials, fetchImpl = fetch }: ClientOptions) {
+    this.baseUrl = baseUrl.replace(/\/$/, '')
+    this.credentials = credentials
+    this.fetchImpl = fetchImpl
+  }
+
+  connect(): Promise<Page<CaseSummary>> {
+    return this.request('/cases?pageSize=1')
+  }
+
+  onUnauthorized(handler: () => void) {
+    this.unauthorizedHandler = handler
+  }
+
+  listCases(page = 0, pageSize?: number): Promise<Page<CaseSummary>> {
+    if (page === 0 && pageSize === undefined) return this.request('/cases')
+    const query = new URLSearchParams({ page: String(page) })
+    if (pageSize !== undefined) query.set('pageSize', String(pageSize))
+    return this.request(`/cases?${query}`)
+  }
+
+  listTasks(): Promise<TaskSummary[]> {
+    return this.request('/tasks')
+  }
+
+  createComplaint(input: CreateComplaintInput): Promise<CaseSummary> {
+    const variables: Record<string, unknown> = {
+      channel: input.channel,
+      summary: input.summary,
+    }
+    if (input.amount !== undefined) variables.amount = input.amount
+
+    return this.request('/cases', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        caseDefinitionKey: 'complaint',
+        tenantId: input.tenantId,
+        businessKey: input.businessKey,
+        title: input.title,
+        priority: 'MEDIUM',
+        variables,
+      }),
+    })
+  }
+
+  async loadWorkspace(caseId: string): Promise<CaseWorkspaceSnapshot> {
+    const path = `/cases/${encodeURIComponent(caseId)}`
+    const [caseItem, tasks, planItems, milestones, slas, events] = await Promise.all([
+      this.request<CaseSummary>(path),
+      this.request<TaskSummary[]>(`${path}/tasks`),
+      this.request<PlanItemSummary[]>(`${path}/plan-items`),
+      this.request<MilestoneSummary[]>(`${path}/milestones`),
+      this.request<SlaSummary[]>(`${path}/slas`),
+      this.request<CaseEvent[]>(`${path}/events?after=0&limit=100`),
+    ])
+    return { case: caseItem, tasks, planItems, milestones, slas, events }
+  }
+
+  async taskForm(caseItem: CaseSummary, task: TaskSummary): Promise<TaskFormDefinition> {
+    const action = task.availableActions.find((candidate) => candidate.action === 'complete')
+    const formKey = action?.formKey ?? task.formKey
+    if (!formKey) throw new Error('This task does not advertise a completion form.')
+    return this.request<TaskFormDefinition>(
+      `/case-definitions/${encodeURIComponent(caseItem.caseDefinitionKey)}/versions/${caseItem.caseDefinitionVersion}/forms/${encodeURIComponent(formKey)}`,
+    )
+  }
+
+  executeTaskAction(action: AvailableAction, version: number, variables?: Record<string, unknown>): Promise<unknown> {
+    const href = this.actionPath(action.href)
+    const headers: Record<string, string> = {
+      'If-Match': `"${version}"`,
+      'Idempotency-Key': crypto.randomUUID(),
+    }
+    let body: string | undefined
+    if (action.action === 'complete') {
+      headers['Content-Type'] = 'application/json'
+      body = JSON.stringify({ variables: variables ?? {} })
+    }
+    return this.request(href, { method: action.method, headers, body })
+  }
+
+  executeCaseAction(
+    action: AvailableAction,
+    version: number,
+    payload?: Record<string, unknown>,
+  ): Promise<CaseSummary> {
+    return this.executeVersionedAction(
+      action,
+      version,
+      payload,
+      action.action === 'update' ? 'application/merge-patch+json' : 'application/json',
+    )
+  }
+
+  executeSlaAction(action: AvailableAction, version: number, reason?: string): Promise<SlaSummary> {
+    return this.executeVersionedAction(
+      action,
+      version,
+      action.action === 'pause' ? { reason } : undefined,
+    )
+  }
+
+  listComments(caseId: string): Promise<CaseComment[]> {
+    return this.request(`/cases/${encodeURIComponent(caseId)}/comments`)
+  }
+
+  addComment(action: AvailableAction, text: string): Promise<CaseComment> {
+    return this.request(this.actionPath(action.href), {
+      method: action.method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, visibility: 'internal' }),
+    })
+  }
+
+  private executeVersionedAction<T>(
+    action: AvailableAction,
+    version: number,
+    payload?: Record<string, unknown>,
+    contentType = 'application/json',
+  ): Promise<T> {
+    const headers: Record<string, string> = { 'If-Match': `"${version}"` }
+    let body: string | undefined
+    if (payload !== undefined) {
+      headers['Content-Type'] = contentType
+      body = JSON.stringify(payload)
+    }
+    return this.request(this.actionPath(action.href), { method: action.method, headers, body })
+  }
+
+  private actionPath(href: string) {
+    if (/^https?:\/\//i.test(href)) {
+      const url = new URL(href)
+      if (typeof window === 'undefined' || url.origin !== window.location.origin) throw new Error('Refusing a cross-origin task action.')
+      href = `${url.pathname}${url.search}`
+    }
+    if (!href.startsWith('/') || href.startsWith('//')) throw new Error('Refusing a task action outside the case API.')
+    return href.startsWith(`${this.baseUrl}/`) ? href : `${this.baseUrl}${href}`
+  }
+
+  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const headers = new Headers(init.headers)
+    headers.set('Accept', 'application/json')
+    headers.set(
+      'Authorization',
+      `Basic ${btoa(`${this.credentials.username}:${this.credentials.password}`)}`,
+    )
+    headers.set('X-Correlation-ID', crypto.randomUUID())
+
+    const url = path.startsWith(this.baseUrl) ? path : `${this.baseUrl}${path}`
+    let response: Response
+    try {
+      const fetchImpl = this.fetchImpl
+      response = await fetchImpl(url, { ...init, headers })
+    } catch (reason) {
+      if (reason instanceof TypeError) {
+        throw new Error(`Backend unavailable at ${this.baseUrl}. Start the PoC backend and try again.`)
+      }
+      throw reason
+    }
+
+    if (!response.ok) {
+      let problem: ProblemDetails = {}
+      try {
+        problem = (await response.json()) as ProblemDetails
+      } catch {
+        // A response without problem JSON still has a useful status code.
+      }
+      const apiError = new ApiError(response.status, problem)
+      if (response.status === 401) this.unauthorizedHandler?.()
+      throw apiError
+    }
+
+    return (await response.json()) as T
+  }
+}
